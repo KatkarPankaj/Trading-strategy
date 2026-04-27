@@ -1,0 +1,20 @@
+{
+    "symbol": "RELIANCE.NS",
+    "interval": "5m",
+    "period": "30d",
+    "market_timezone": "Asia/Kolkata",
+    "opening_range_minutes": 15,
+    "entry_cutoff_time": "13:30",
+    "square_off_time": "15:15",
+    "time_exit_minutes": 60,
+    "stop_loss_pct": 0.004,
+    "take_profit_pct": 0.008,
+    "risk_per_trade_pct": 0.005,
+    "starting_capital": 200000,
+    "max_trades_per_day": 1,
+    "commission_pct": 0.0003,
+    "slippage_pct": 0.0005,
+    "allow_short": false,
+    "volume_ma_window": 20,
+    "volume_spike_threshold": 1.2
+}
