@@ -12,6 +12,7 @@ import pandas as pd
 from .backtest import run_backtest
 from .config import TradingConfig
 from .data import fetch_intraday_data, latest_bars
+from .optimizer import export_optimization_report, run_intelligent_optimization
 from .strategy import add_strategy_columns
 from .sweep import run_parameter_sweep
 
@@ -103,6 +104,38 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Maximum allowed absolute drawdown as decimal (example: 0.08 for 8%)",
+    )
+
+    optimize_parser = subparsers.add_parser(
+        "optimize",
+        help="Analyze recent trades and generate data-driven strategy recommendations",
+    )
+    optimize_parser.add_argument(
+        "--config", default="config.json", help="Path to config JSON")
+    optimize_parser.add_argument(
+        "--symbol", default=None, help="Override symbol in config")
+    optimize_parser.add_argument(
+        "--trade-file",
+        default="outputs/paper_trade_history.csv",
+        help="Path to backtest trades CSV or paper trade history CSV",
+    )
+    optimize_parser.add_argument(
+        "--lookback-trades",
+        type=int,
+        default=200,
+        help="Number of most recent closed trades to analyze",
+    )
+    optimize_parser.add_argument(
+        "--min-train-trades",
+        type=int,
+        default=50,
+        help="Minimum past trades required before walk-forward scoring starts",
+    )
+    optimize_parser.add_argument(
+        "--quality-threshold",
+        type=float,
+        default=55.0,
+        help="Minimum walk-forward quality score to keep a trade in filtered comparison",
     )
 
     return parser
@@ -204,6 +237,75 @@ def cmd_sweep(
     print(f"Saved sweep results: {out_file}")
     print("Top combinations")
     print(table.head(max(1, top)).to_string(index=False))
+    return 0
+
+
+def cmd_optimize(
+    cfg: TradingConfig,
+    trade_file: str,
+    lookback_trades: int,
+    min_train_trades: int,
+    quality_threshold: float,
+) -> int:
+    report = run_intelligent_optimization(
+        trade_file=trade_file,
+        cfg=cfg,
+        lookback_trades=lookback_trades,
+        min_train_trades=min_train_trades,
+        quality_threshold=quality_threshold,
+    )
+
+    ts = _market_now(cfg).strftime("%Y%m%d_%H%M%S")
+    prefix = f"optimize_{Path(trade_file).stem}_{ts}"
+    artifacts = export_optimization_report(
+        report, out_dir="outputs", prefix=prefix)
+
+    print("Optimization Summary")
+    for key, value in report.summary.items():
+        if isinstance(value, float):
+            if "rate" in key or key.endswith("_pct"):
+                print(f"- {key}: {value:.2%}")
+            else:
+                print(f"- {key}: {value:.4f}")
+        else:
+            print(f"- {key}: {value}")
+
+    print("\nRecommendations")
+    if not report.recommendations:
+        print("- No strong recommendations yet. Collect more trades or widen lookback.")
+    else:
+        for idx, item in enumerate(report.recommendations, start=1):
+            evidence = item.get("evidence", {})
+            trades = evidence.get("trades", 0)
+            avg_net = float(evidence.get("avg_net_pnl", 0.0))
+            win_rate = float(evidence.get("win_rate", 0.0))
+            print(
+                f"{idx}. {item['message']} "
+                f"[trades={trades}, avg_net_pnl={avg_net:.2f}, win_rate={win_rate:.2%}]"
+            )
+
+    if not report.symbol_scores.empty:
+        print("\nTop symbols")
+        print(report.symbol_scores.head(5).to_string(index=False))
+
+    if not report.model_feature_importance.empty:
+        print("\nTop model features")
+        print(report.model_feature_importance.head(8).to_string(index=False))
+
+    print("\nClean trade collection progress")
+    print(
+        f"- clean_closed_trades: {report.summary.get('clean_closed_trades', 0)} | "
+        f"to_200: {report.summary.get('trades_to_200_goal', 0)} | "
+        f"to_300: {report.summary.get('trades_to_300_goal', 0)}"
+    )
+
+    if not report.walkforward_comparison.empty:
+        print("\nWalk-forward baseline vs filtered")
+        print(report.walkforward_comparison.to_string(index=False))
+
+    print("\nSaved artifacts")
+    for name, path in artifacts.items():
+        print(f"- {name}: {path}")
     return 0
 
 
@@ -339,6 +441,14 @@ def main() -> int:
             rank=args.rank,
             min_trades=args.min_trades,
             max_drawdown_pct=args.max_drawdown_pct,
+        )
+    if args.command == "optimize":
+        return cmd_optimize(
+            cfg,
+            trade_file=args.trade_file,
+            lookback_trades=args.lookback_trades,
+            min_train_trades=args.min_train_trades,
+            quality_threshold=args.quality_threshold,
         )
 
     parser.error("Unknown command")

@@ -209,6 +209,40 @@ Custom sweep values example:
 
 The sweep command saves a ranked CSV in `outputs/`.
 
+## Run intelligent strategy optimization
+Use recent closed trades to generate data-driven suggestions for filters, stronger symbols, and SL/TP context.
+
+```powershell
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe -m stockmarket.cli optimize --config config.json --trade-file outputs/paper_trade_history.csv --lookback-trades 200
+```
+
+What it analyzes:
+- entry time bucket
+- volume spike ratio
+- distance from VWAP
+- opening-range breakout strength
+- volatility bucket
+- recent symbol expectancy
+
+Advanced engineered features now included:
+- candle strength (`body / range`) and wick-to-body ratio
+- previous-day high/low breakout distance
+- ATR-based volatility percentage
+- NIFTY session trend and NIFTY vs VWAP context
+
+Trade-quality model:
+- trains a lightweight ridge-style model on recent closed trades
+- outputs `ml_win_prob`, `ml_expected_return_pct`, and `ml_trade_quality_score`
+- saves feature importance so you can inspect what mattered most
+
+Artifacts are saved in `outputs/`:
+- `*_recommendations.json`
+- `*_symbol_scores.csv`
+- `*_feature_scores.csv`
+- `*_model_feature_importance.csv`
+- `*_enriched_trades.csv`
+
 ## Replay top sweep result
 Run a full backtest using the best ranked sweep row (rank 1 by default):
 ```powershell
