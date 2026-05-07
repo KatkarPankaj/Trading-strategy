@@ -9,6 +9,7 @@ import random as _rng_mod
 import json
 import math
 import sys
+import logging
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,6 @@ from typing import Any
 import pandas as pd
 import pytz
 import streamlit as st
-import streamlit.components.v1 as components
 
 try:
     from nsepython import nsefetch
@@ -136,6 +136,43 @@ MARKET_CONFIG = {
 _SRC_DIR = Path(__file__).resolve().parent / "src"
 if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
+
+# Setup logging for server-side console output
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [%(levelname)s] - %(message)s'
+)
+logger = logging.getLogger("dashboard_simple")
+
+
+def _app_log(level: str, message: str) -> None:
+    """Log to both server console and session state for UI display."""
+    timestamp = datetime.now(IST).strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {message}"
+    
+    # Log to server console
+    if level.upper() == "INFO":
+        logger.info(message)
+    elif level.upper() == "WARNING":
+        logger.warning(message)
+    elif level.upper() == "ERROR":
+        logger.error(message)
+    else:
+        logger.debug(message)
+    
+    # Add to session state for UI display
+    if "s_app_logs" not in st.session_state:
+        st.session_state.s_app_logs = []
+    
+    st.session_state.s_app_logs.append({
+        "timestamp": timestamp,
+        "level": level.upper(),
+        "message": message,
+    })
+    
+    # Keep only last 100 logs to prevent memory bloat
+    if len(st.session_state.s_app_logs) > 100:
+        st.session_state.s_app_logs = st.session_state.s_app_logs[-100:]
 
 try:
     from stockmarket.config import TradingConfig
@@ -295,7 +332,7 @@ def _auto_refresh(seconds: int) -> None:
     # Speed up portfolio price updates independent of full-page refresh
     _refresh_holding_prices()
 
-    components.html(
+    st.html(
         f"""
         <script>
             (function() {{
@@ -309,9 +346,7 @@ def _auto_refresh(seconds: int) -> None:
                 }}, delayMs);
             }})();
         </script>
-        """,
-        height=0,
-        width=0,
+        """
     )
 
 
@@ -360,86 +395,118 @@ def _to_nse_symbol(symbol: str) -> str:
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_nse_quote(symbol: str) -> dict[str, float]:
     if nsefetch is None:
+        _app_log("error", f"nsefetch library not available for {symbol}")
         raise ValueError(
             "nsepython is not installed. Run: pip install nsepython")
 
     nse_symbol = _to_nse_symbol(symbol)
-    data = nsefetch(
-        f"https://www.nseindia.com/api/quote-equity?symbol={nse_symbol}")
-    p = data.get("priceInfo", {})
+    try:
+        _app_log("info", f"Fetching NSE quote: {nse_symbol}")
+        data = nsefetch(
+            f"https://www.nseindia.com/api/quote-equity?symbol={nse_symbol}")
+        p = data.get("priceInfo", {})
 
-    price = float(p.get("lastPrice") or 0.0)
-    vwap = float(p.get("vwap") or 0.0)
-    pchange = float(p.get("pChange") or 0.0)
-    ihl = p.get("intraDayHighLow", {}) or {}
-    day_low = float(ihl.get("min") or 0.0)
-    day_high = float(ihl.get("max") or 0.0)
-    range_pct = ((day_high - day_low) / max(price, 1e-6)) * \
-        100 if price > 0 else 0.0
+        price = float(p.get("lastPrice") or 0.0)
+        vwap = float(p.get("vwap") or 0.0)
+        pchange = float(p.get("pChange") or 0.0)
+        ihl = p.get("intraDayHighLow", {}) or {}
+        day_low = float(ihl.get("min") or 0.0)
+        day_high = float(ihl.get("max") or 0.0)
+        range_pct = ((day_high - day_low) / max(price, 1e-6)) * \
+            100 if price > 0 else 0.0
 
-    return {
-        "symbol": symbol,
-        "price": price,
-        "vwap": vwap,
-        "pchange": pchange,
-        "range_pct": range_pct,
-    }
+        result = {
+            "symbol": symbol,
+            "price": price,
+            "vwap": vwap,
+            "pchange": pchange,
+            "range_pct": range_pct,
+        }
+        _app_log("info", f"NSE {nse_symbol}: Rs {price:.2f} ({pchange:+.2f}%)")
+        return result
+    except Exception as e:
+        if "429" in str(e) or "Rate limit" in str(e):
+            _app_log("error", f"NSE API rate limit (429) for {nse_symbol}: {e}")
+        elif "timeout" in str(e).lower():
+            _app_log("warning", f"NSE API timeout for {nse_symbol}: {e}")
+        else:
+            _app_log("error", f"NSE API error for {nse_symbol}: {e}")
+        raise
 
 
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_us_quote(symbol: str) -> dict[str, float]:
     if yf is None:
+        _app_log("error", f"yfinance library not available for {symbol}")
         raise ValueError(
             "yfinance is not installed. Run: pip install yfinance")
 
-    ticker = yf.Ticker(str(symbol).upper())
-    intraday = ticker.history(
-        period="1d", interval="1m", prepost=False, auto_adjust=False)
-    if intraday is None or intraday.empty:
+    try:
+        _app_log("info", f"Fetching US quote: {symbol}")
+        ticker = yf.Ticker(str(symbol).upper())
         intraday = ticker.history(
-            period="5d", interval="5m", prepost=False, auto_adjust=False)
-    if intraday is None or intraday.empty:
-        raise ValueError(f"No US intraday market data for {symbol}")
+            period="1d", interval="1m", prepost=False, auto_adjust=False)
+        if intraday is None or intraday.empty:
+            _app_log("warning", f"No 1m data for {symbol}, trying 5m...")
+            intraday = ticker.history(
+                period="5d", interval="5m", prepost=False, auto_adjust=False)
+        if intraday is None or intraday.empty:
+            _app_log("error", f"No intraday data available for {symbol}")
+            raise ValueError(
+                f"No US intraday market data for {symbol}")
 
-    intraday = intraday.dropna(subset=["Close"]).copy()
-    if intraday.empty:
-        raise ValueError(
-            f"US intraday market data empty after cleanup for {symbol}")
+        intraday = intraday.dropna(subset=["Close"]).copy()
+        if intraday.empty:
+            _app_log("error", f"Intraday data empty after cleanup for {symbol}")
+            raise ValueError(
+                f"US intraday market data empty after cleanup for {symbol}")
 
-    latest = intraday.iloc[-1]
-    price = float(latest.get("Close") or 0.0)
-    high = float(intraday["High"].max() or price)
-    low = float(intraday["Low"].min() or price)
-    open_price = float(intraday.iloc[0].get("Open") or price)
+        latest = intraday.iloc[-1]
+        price = float(latest.get("Close") or 0.0)
+        high = float(intraday["High"].max() or price)
+        low = float(intraday["Low"].min() or price)
+        open_price = float(intraday.iloc[0].get("Open") or price)
 
-    volume_series = intraday.get("Volume")
-    if volume_series is not None and float(volume_series.fillna(0).sum()) > 0:
-        close_volume = (intraday["Close"].fillna(
-            0.0) * volume_series.fillna(0.0)).sum()
-        total_volume = float(volume_series.fillna(0.0).sum())
-        vwap = float(close_volume / max(total_volume, 1e-6))
-    else:
-        vwap = (high + low + open_price + price) / 4.0 if price > 0 else 0.0
+        volume_series = intraday.get("Volume")
+        if volume_series is not None and float(volume_series.fillna(0).sum()) > 0:
+            close_volume = (intraday["Close"].fillna(
+                0.0) * volume_series.fillna(0.0)).sum()
+            total_volume = float(volume_series.fillna(0.0).sum())
+            vwap = float(close_volume / max(total_volume, 1e-6))
+        else:
+            vwap = (high + low + open_price + price) / 4.0 if price > 0 else 0.0
 
-    daily_hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
-    prev_close = 0.0
-    if daily_hist is not None and not daily_hist.empty:
-        daily_hist = daily_hist.dropna(subset=["Close"])
-        if len(daily_hist) >= 2:
-            prev_close = float(daily_hist.iloc[-2]["Close"] or 0.0)
-        elif len(daily_hist) == 1:
-            prev_close = float(daily_hist.iloc[-1]["Close"] or 0.0)
-    pchange = ((price - prev_close) / max(prev_close, 1e-6)) * \
-        100.0 if prev_close > 0 else 0.0
-    range_pct = ((high - low) / max(price, 1e-6)) * 100.0 if price > 0 else 0.0
+        daily_hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
+        prev_close = 0.0
+        if daily_hist is not None and not daily_hist.empty:
+            daily_hist = daily_hist.dropna(subset=["Close"])
+            if len(daily_hist) >= 2:
+                prev_close = float(daily_hist.iloc[-2]["Close"] or 0.0)
+            elif len(daily_hist) == 1:
+                prev_close = float(daily_hist.iloc[-1]["Close"] or 0.0)
+        pchange = ((price - prev_close) / max(prev_close, 1e-6)) * \
+            100.0 if prev_close > 0 else 0.0
+        range_pct = ((high - low) / max(price, 1e-6)) * 100.0 if price > 0 else 0.0
 
-    return {
-        "symbol": symbol,
-        "price": price,
-        "vwap": vwap,
-        "pchange": pchange,
-        "range_pct": range_pct,
-    }
+        result = {
+            "symbol": symbol,
+            "price": price,
+            "vwap": vwap,
+            "pchange": pchange,
+            "range_pct": range_pct,
+        }
+        _app_log("info", f"US {symbol}: ${price:.2f} ({pchange:+.2f}%)")
+        return result
+    except Exception as e:
+        if "429" in str(e) or "Rate limit" in str(e):
+            _app_log("error", f"yfinance API rate limit (429) for {symbol}: {e}")
+        elif "timeout" in str(e).lower() or "timed out" in str(e).lower():
+            _app_log("warning", f"yfinance API timeout for {symbol}: {e}")
+        elif "No data found" in str(e):
+            _app_log("warning", f"No data for {symbol} (invalid ticker?): {e}")
+        else:
+            _app_log("error", f"yfinance API error for {symbol}: {e}")
+        raise
 
 
 def fetch_market_quote(symbol: str) -> dict[str, float]:
@@ -482,6 +549,7 @@ def _init_state(starting_capital: float) -> None:
         "s_profit_ladder_armed",
         "s_profit_ladder_pullback_started",
         "s_profit_ladder_exited_day",
+        "s_app_logs",
     ]:
         st.session_state.pop(key, None)
 
@@ -518,9 +586,12 @@ def _init_state(starting_capital: float) -> None:
             st.session_state.s_profit_ladder_exited_day = str(
                 data.get("profit_ladder_exited_day", "")
             )
+            st.session_state.s_app_logs = []
             st.session_state.s_state_file = state_key
+            _app_log("info", f"Loaded state for {_selected_market()} market")
             return
-        except Exception:
+        except Exception as e:
+            _app_log("error", f"Failed to load saved state: {e}")
             pass
 
     st.session_state.s_cash = float(starting_capital)
@@ -540,7 +611,10 @@ def _init_state(starting_capital: float) -> None:
     st.session_state.s_profit_ladder_armed = False
     st.session_state.s_profit_ladder_pullback_started = False
     st.session_state.s_profit_ladder_exited_day = ""
+    st.session_state.s_app_logs = []
     st.session_state.s_state_file = state_key
+    _app_log("info", f"Initialized fresh state for {_selected_market()} market with {currency_symbol} {starting_capital:,.0f}")
+
 
 
 def _save_state() -> None:
@@ -1100,6 +1174,7 @@ def _record_trade(
             "stop": stop_price,
             "target": target_price,
         }
+        _app_log("info", f"BUY {symbol}: {qty}@Rs{price:.2f} | Avg: Rs{new_avg:.2f} | {reason}")
     elif side == "SELL":
         h = st.session_state.s_holdings.get(symbol, {"qty": 0, "avg": 0.0})
         old_qty = int(h.get("qty", 0))
@@ -1121,6 +1196,7 @@ def _record_trade(
             }
         else:
             st.session_state.s_holdings.pop(symbol, None)
+        _app_log("info", f"SELL {symbol}: {exit_qty}@Rs{price:.2f} | PnL: Rs{pnl:.2f} | {reason}")
     elif side == "SHORT":
         st.session_state.s_cash += (value - ch)
         h = st.session_state.s_shorts.get(symbol, {"qty": 0, "avg": 0.0})
@@ -1138,6 +1214,7 @@ def _record_trade(
             "stop": stop_price,
             "target": target_price,
         }
+        _app_log("info", f"SHORT {symbol}: {qty}@Rs{price:.2f} | Avg: Rs{new_avg:.2f} | {reason}")
     elif side == "COVER":
         h = st.session_state.s_shorts.get(symbol, {"qty": 0, "avg": 0.0})
         old_qty = int(h.get("qty", 0))
@@ -1159,6 +1236,7 @@ def _record_trade(
             }
         else:
             st.session_state.s_shorts.pop(symbol, None)
+        _app_log("info", f"COVER {symbol}: {cover_qty}@Rs{price:.2f} | PnL: Rs{pnl:.2f} | {reason}")
     else:
         return
 
@@ -2223,6 +2301,39 @@ def _auto_paper_cycle(
     return actions
 
 
+def _render_app_logs() -> None:
+    """Display application logs in a scrollable container."""
+    logs = st.session_state.get("s_app_logs", [])
+    if not logs:
+        return
+    
+    with st.expander("📋 Activity Logs", expanded=False):
+        # Create a scrollable container using a container with fixed height via CSS
+        log_container = st.container()
+        
+        # Display logs in reverse order (latest first)
+        with log_container:
+            for log_entry in reversed(logs[-50:]):  # Show last 50 logs
+                level = log_entry.get("level", "INFO")
+                message = log_entry.get("message", "")
+                timestamp = log_entry.get("timestamp", "")
+                
+                # Color code based on level
+                if level == "ERROR":
+                    st.markdown(f"🔴 **{timestamp}** ERROR: {message}")
+                elif level == "WARNING":
+                    st.markdown(f"🟡 **{timestamp}** WARNING: {message}")
+                elif level == "INFO":
+                    st.markdown(f"ℹ️ **{timestamp}** {message}")
+                else:
+                    st.markdown(f"⚪ **{timestamp}** {message}")
+        
+        # Add a button to clear logs
+        if st.button("Clear Logs", key="clear_logs_btn"):
+            st.session_state.s_app_logs = []
+            st.rerun()
+
+
 def _portfolio_view() -> tuple[pd.DataFrame, float, float]:
     rows: list[dict[str, Any]] = []
     unreal = 0.0
@@ -2285,18 +2396,76 @@ st.set_page_config(page_title="Simple Budget Trading Simulator",
                    page_icon="\U0001f4b0", layout="wide")
 st.title("\U0001f4b0 Simple Budget-Based Trading Simulator")
 
-if "selected_market" not in st.session_state:
+# Initialize session state keys for all sidebar inputs
+_sidebar_keys = [
+    "selected_market",
+    "total_capital",
+    "risk_pct",
+    "max_trades_day",
+    "max_open_positions",
+    "max_symbol_allocation_pct",
+    "max_total_deployment_pct",
+    "max_qty_per_trade",
+    "max_trade_invest_pct",
+    "scan_symbol_count",
+    "min_price",
+    "max_price",
+    "min_buy_score",
+    "auto_budget_filters",
+    "min_order_value",
+    "idle_buy_fallback_minutes",
+    "topup_target_qty",
+    "topup_ignore_cash_check",
+    "sl_pct",
+    "tp_pct",
+    "enable_signal_sell",
+    "min_sell_score",
+    "max_signal_exits_per_cycle",
+    "reentry_cooldown_minutes",
+    "reentry_min_move_pct",
+    "enable_short_selling",
+    "min_short_score",
+    "enable_regime_entry_gate",
+    "sl_cooldown_after_stop_minutes",
+    "enable_learning_agent",
+    "auto_apply_learning_suggestions",
+    "enable_profit_guard",
+    "profit_guard_drawdown_pct",
+    "profit_guard_after_hhmm",
+    "block_new_entries_on_guard",
+    "daily_profit_target",
+    "full_auto_paper_mode",
+    "auto_trade_on",
+    "auto_refresh_on",
+    "refresh_seconds",
+    "optimizer_auto_run",
+    "optimizer_interval_minutes",
+    "optimizer_lookback_trades",
+    "optimizer_min_train_trades",
+    "optimizer_quality_threshold",
+]
+
+# Initialize all sidebar keys in session state if not present
+for key in _sidebar_keys:
+    if key not in st.session_state:
+        st.session_state[key] = None
+
+if "selected_market" not in st.session_state or st.session_state.selected_market is None:
     st.session_state.selected_market = "NSE"
+    _app_log("info", "Initialized market selector to NSE")
 
 with st.sidebar:
     st.header("Market")
-    st.radio(
+    selected = st.radio(
         "Trading Market",
         options=["NSE", "US"],
         format_func=lambda key: str(MARKET_CONFIG[key]["label"]),
         key="selected_market",
         help="Each market keeps its own paper-trade state and ML model.",
     )
+    if selected != st.session_state.get("_last_market"):
+        st.session_state._last_market = selected
+        _app_log("info", f"Switched to {MARKET_CONFIG[selected]['label']} market")
 
 saved_state = _read_saved_state()
 saved_ui = saved_state.get("ui_config", {}) if isinstance(
@@ -2757,6 +2926,7 @@ buy_df, sell_df, sell_exit_df = _apply_effective_scores(
 
 actions: list[str] = []
 if auto_trade_on:
+    _app_log("info", "Starting auto-trade cycle...")
     actions = _auto_paper_cycle(
         buy_df=buy_df,
         sell_df=sell_df,
@@ -2792,8 +2962,9 @@ if auto_trade_on:
         idle_buy_fallback_minutes=idle_buy_fallback_minutes,
         max_trade_invest_pct=max_trade_invest_pct,
     )
-
+    
     if actions:
+        _app_log("info", f"Auto-trade cycle complete: {len(actions)} action(s)")
         # Show latest Top-5 after any executed trade in this cycle.
         buy_df, sell_df, sell_exit_df, scan_errors = _rank_signals(
             active_watchlist,
@@ -2861,6 +3032,9 @@ if _should_run_optimizer:
 
 # Display portfolio metrics with auto price refresh every page load/refresh
 _quick_portfolio_metrics()
+
+# Display application activity logs
+_render_app_logs()
 
 # Get holdings dataframe for the Open Positions section below
 holdings_df, _, _ = _portfolio_view()

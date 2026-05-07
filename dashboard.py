@@ -3,7 +3,6 @@ Intraday Strategy Dashboard — NSE/BSE
 Run with: streamlit run dashboard.py
 """
 
-import streamlit.components.v1 as components
 import streamlit as st
 import pytz
 import pandas as pd
@@ -181,7 +180,7 @@ def _parse_time(value: str, fallback: time) -> time:
 def _auto_refresh(seconds: int, hard_reload_fallback: bool = False) -> None:
     if seconds <= 0:
         return
-    components.html(
+    st.html(
         f"""
                 <script>
                     (function() {{
@@ -222,9 +221,7 @@ def _auto_refresh(seconds: int, hard_reload_fallback: bool = False) -> None:
                         console.log('[Auto-Refresh] Timer set for {seconds} seconds');
                     }})();
                 </script>
-                """,
-        height=0,
-        width=0,
+                """
     )
 
 
