@@ -4,6 +4,7 @@ Run with: streamlit run dashboard_simple.py --server.port 8507
 """
 
 from __future__ import annotations
+import random as _rng_mod
 
 import json
 import math
@@ -22,13 +23,16 @@ try:
 except Exception:
     nsefetch = None
 
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
+
 
 IST = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN = time(9, 15)
-ENTRY_CUTOFF = time(13, 30)
-SQUARE_OFF = time(15, 15)
+US_EASTERN = pytz.timezone("America/New_York")
 
-WATCHLIST = [
+WATCHLIST_NSE = [
     "IEX.NS",
     "BHEL.NS",
     "IRCTC.NS",
@@ -41,10 +45,93 @@ WATCHLIST = [
     "TATAPOWER.NS",
     "MOTHERSON.NS",
     "PERSISTENT.NS",
+    "RELIANCE.NS",
+    "TCS.NS",
+    "INFY.NS",
+    "HDFCBANK.NS",
+    "ICICIBANK.NS",
+    "SBIN.NS",
+    "AXISBANK.NS",
+    "LT.NS",
+    "ITC.NS",
+    "HINDUNILVR.NS",
+    "BHARTIARTL.NS",
+    "TITAN.NS",
+    "MARUTI.NS",
+    "BAJFINANCE.NS",
+    "KOTAKBANK.NS",
+    "ASIANPAINT.NS",
+    "ULTRACEMCO.NS",
+    "HCLTECH.NS",
+    "WIPRO.NS",
+    "SUNPHARMA.NS",
+    "NTPC.NS",
+    "POWERGRID.NS",
+    "ONGC.NS",
+    "TATASTEEL.NS",
+    "HINDALCO.NS",
+    "ADANIPORTS.NS",
+    "GRASIM.NS",
+    "TECHM.NS",
 ]
 
-STATE_FILE = Path("outputs") / "simple_paper_state.json"
-CLEAN_CLOSED_TRADES_FILE = Path("outputs") / "clean_closed_trades_light.csv"
+WATCHLIST_US = [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "TSLA",
+    "AMD",
+    "NFLX",
+    "AVGO",
+    "JPM",
+    "BAC",
+    "WMT",
+    "COST",
+    "KO",
+    "MCD",
+    "CRM",
+    "ADBE",
+    "INTC",
+    "QCOM",
+]
+
+MARKET_CONFIG = {
+    "NSE": {
+        "label": "India NSE",
+        "timezone": IST,
+        "market_open": time(9, 15),
+        "entry_cutoff": time(13, 30),
+        "square_off": time(15, 15),
+        "watchlist": WATCHLIST_NSE,
+        "state_file": Path("outputs") / "simple_paper_state.json",
+        "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light.csv",
+        "currency": "Rs",
+        "score_change_weight": 6.0,
+        "score_vwap_weight": 20.0,
+        "score_range_weight": 2.0,
+        "ready_pchange_threshold": 0.25,
+        "ready_range_threshold": 0.5,
+    },
+    "US": {
+        "label": "US",
+        "timezone": US_EASTERN,
+        "market_open": time(9, 30),
+        "entry_cutoff": time(13, 30),
+        "square_off": time(15, 45),
+        "watchlist": WATCHLIST_US,
+        "state_file": Path("outputs") / "simple_paper_state_us.json",
+        "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light_us.csv",
+        "currency": "$",
+        "score_change_weight": 8.0,
+        "score_vwap_weight": 28.0,
+        "score_range_weight": 3.5,
+        "ready_pchange_threshold": 0.12,
+        "ready_range_threshold": 0.3,
+    },
+}
 
 _SRC_DIR = Path(__file__).resolve().parent / "src"
 if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
@@ -64,18 +151,73 @@ try:
         train_market_learning_model,
         get_symbol_quality_score,
         MarketLearningModel,
+        resolve_learning_model_path,
     )
 except Exception:
     train_market_learning_model = None
     get_symbol_quality_score = None
     MarketLearningModel = None
+    resolve_learning_model_path = None
+
+
+def _selected_market() -> str:
+    market = str(st.session_state.get("selected_market", "NSE")).upper()
+    return market if market in MARKET_CONFIG else "NSE"
+
+
+def _market_cfg() -> dict[str, Any]:
+    return MARKET_CONFIG[_selected_market()]
+
+
+def _state_file() -> Path:
+    return Path(_market_cfg()["state_file"])
+
+
+def _clean_closed_trades_file() -> Path:
+    return Path(_market_cfg()["clean_closed_trades_file"])
+
+
+def _watchlist() -> list[str]:
+    return list(_market_cfg()["watchlist"])
+
+
+def _currency_symbol() -> str:
+    return str(_market_cfg()["currency"])
+
+
+def _market_score_config() -> dict[str, float]:
+    cfg = _market_cfg()
+    return {
+        "score_change_weight": float(cfg.get("score_change_weight", 6.0)),
+        "score_vwap_weight": float(cfg.get("score_vwap_weight", 20.0)),
+        "score_range_weight": float(cfg.get("score_range_weight", 2.0)),
+        "ready_pchange_threshold": float(cfg.get("ready_pchange_threshold", 0.25)),
+        "ready_range_threshold": float(cfg.get("ready_range_threshold", 0.5)),
+    }
+
+
+def market_now() -> datetime:
+    return datetime.now(pytz.utc).astimezone(_market_cfg()["timezone"])
+
+
+def _market_open_time() -> time:
+    return _market_cfg()["market_open"]
+
+
+def _entry_cutoff_time() -> time:
+    return _market_cfg()["entry_cutoff"]
+
+
+def _square_off_time() -> time:
+    return _market_cfg()["square_off"]
 
 
 def _read_saved_state() -> dict[str, Any]:
-    if not STATE_FILE.exists():
+    state_file = _state_file()
+    if not state_file.exists():
         return {}
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return json.loads(state_file.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -85,16 +227,18 @@ def _auto_export_clean_closed_trades() -> tuple[int, str | None]:
         return 0, "Optimizer module unavailable; clean closed-trade export skipped."
 
     # Fresh reset state can leave an empty file briefly; treat as no trades yet.
-    if not STATE_FILE.exists() or STATE_FILE.stat().st_size == 0:
+    state_file = _state_file()
+    if not state_file.exists() or state_file.stat().st_size == 0:
         return 0, None
 
     try:
         closed_trades_df, _ = collect_clean_closed_trades(
-            STATE_FILE,
+            state_file,
             lookback_trades=0,
         )
-        CLEAN_CLOSED_TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        closed_trades_df.to_csv(CLEAN_CLOSED_TRADES_FILE, index=False)
+        clean_closed_trades_file = _clean_closed_trades_file()
+        clean_closed_trades_file.parent.mkdir(parents=True, exist_ok=True)
+        closed_trades_df.to_csv(clean_closed_trades_file, index=False)
         return int(len(closed_trades_df)), None
     except Exception as exc:
         exc_text = str(exc)
@@ -123,7 +267,7 @@ def _run_optimizer_from_dashboard(
         cfg = TradingConfig.from_json(
             cfg_path) if cfg_path.exists() else TradingConfig()
         report = run_intelligent_optimization(
-            trade_file=STATE_FILE,
+            trade_file=_state_file(),
             cfg=cfg,
             lookback_trades=int(lookback_trades),
             min_train_trades=int(min_train_trades),
@@ -148,6 +292,9 @@ def ist_now() -> datetime:
 def _auto_refresh(seconds: int) -> None:
     if seconds <= 0:
         return
+    # Speed up portfolio price updates independent of full-page refresh
+    _refresh_holding_prices()
+
     components.html(
         f"""
         <script>
@@ -166,6 +313,44 @@ def _auto_refresh(seconds: int) -> None:
         height=0,
         width=0,
     )
+
+
+def _quick_portfolio_metrics() -> None:
+    """Render portfolio metrics with live price updates. Called on every refresh."""
+    _refresh_holding_prices()
+
+    holdings_df, unrealized, invested_capital = _portfolio_view()
+    realized = float(st.session_state.s_realized)
+    charges = float(st.session_state.s_charges)
+    cash = float(st.session_state.s_cash)
+    equity = cash + invested_capital + unrealized
+
+    today = market_now().strftime("%Y-%m-%d")
+    today_realized = sum(
+        float(row.get("realized_delta", 0.0))
+        for row in st.session_state.s_log
+        if str(row.get("ts", "")).startswith(today)
+    )
+    daily_pnl = today_realized + unrealized
+    daily_profit_target = float(st.session_state.get(
+        "s_ui_config", {}).get("daily_profit_target", 4000.0))
+    currency_symbol = _currency_symbol()
+
+    a, b, c, d, e, f = st.columns(6)
+    a.metric("Start Capital",
+             f"{currency_symbol} {st.session_state.s_start:,.2f}")
+    b.metric("Current Equity", f"{currency_symbol} {equity:,.2f}",
+             delta=f"{currency_symbol} {(equity - st.session_state.s_start):,.2f}")
+    c.metric("Cash", f"{currency_symbol} {cash:,.2f}")
+    d.metric("Open PnL", f"{currency_symbol} {unrealized:,.2f}")
+    e.metric("Realized PnL", f"{currency_symbol} {realized:,.2f}")
+    f.metric("Total Charges", f"{currency_symbol} {charges:,.2f}",
+             delta=f"Net {currency_symbol} {(realized - charges):,.2f}", delta_color="inverse")
+
+    progress = (daily_pnl / daily_profit_target) * \
+        100.0 if daily_profit_target > 0 else 0.0
+    st.progress(min(1.0, max(0.0, progress / 100.0)),
+                text=f"Today: {currency_symbol} {daily_pnl:,.2f} / {currency_symbol} {daily_profit_target:,.2f} ({progress:.1f}%)")
 
 
 def _to_nse_symbol(symbol: str) -> str:
@@ -201,6 +386,68 @@ def fetch_nse_quote(symbol: str) -> dict[str, float]:
     }
 
 
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_us_quote(symbol: str) -> dict[str, float]:
+    if yf is None:
+        raise ValueError(
+            "yfinance is not installed. Run: pip install yfinance")
+
+    ticker = yf.Ticker(str(symbol).upper())
+    intraday = ticker.history(
+        period="1d", interval="1m", prepost=False, auto_adjust=False)
+    if intraday is None or intraday.empty:
+        intraday = ticker.history(
+            period="5d", interval="5m", prepost=False, auto_adjust=False)
+    if intraday is None or intraday.empty:
+        raise ValueError(f"No US intraday market data for {symbol}")
+
+    intraday = intraday.dropna(subset=["Close"]).copy()
+    if intraday.empty:
+        raise ValueError(
+            f"US intraday market data empty after cleanup for {symbol}")
+
+    latest = intraday.iloc[-1]
+    price = float(latest.get("Close") or 0.0)
+    high = float(intraday["High"].max() or price)
+    low = float(intraday["Low"].min() or price)
+    open_price = float(intraday.iloc[0].get("Open") or price)
+
+    volume_series = intraday.get("Volume")
+    if volume_series is not None and float(volume_series.fillna(0).sum()) > 0:
+        close_volume = (intraday["Close"].fillna(
+            0.0) * volume_series.fillna(0.0)).sum()
+        total_volume = float(volume_series.fillna(0.0).sum())
+        vwap = float(close_volume / max(total_volume, 1e-6))
+    else:
+        vwap = (high + low + open_price + price) / 4.0 if price > 0 else 0.0
+
+    daily_hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
+    prev_close = 0.0
+    if daily_hist is not None and not daily_hist.empty:
+        daily_hist = daily_hist.dropna(subset=["Close"])
+        if len(daily_hist) >= 2:
+            prev_close = float(daily_hist.iloc[-2]["Close"] or 0.0)
+        elif len(daily_hist) == 1:
+            prev_close = float(daily_hist.iloc[-1]["Close"] or 0.0)
+    pchange = ((price - prev_close) / max(prev_close, 1e-6)) * \
+        100.0 if prev_close > 0 else 0.0
+    range_pct = ((high - low) / max(price, 1e-6)) * 100.0 if price > 0 else 0.0
+
+    return {
+        "symbol": symbol,
+        "price": price,
+        "vwap": vwap,
+        "pchange": pchange,
+        "range_pct": range_pct,
+    }
+
+
+def fetch_market_quote(symbol: str) -> dict[str, float]:
+    if _selected_market() == "US":
+        return fetch_us_quote(symbol)
+    return fetch_nse_quote(symbol)
+
+
 def _intraday_charges(side: str, turnover: float) -> float:
     brokerage = min(turnover * 0.0003, 20.0)
     exchange_txn = turnover * 0.0000325
@@ -212,10 +459,33 @@ def _intraday_charges(side: str, turnover: float) -> float:
 
 
 def _init_state(starting_capital: float) -> None:
-    if "s_cash" in st.session_state:
+    state_file = _state_file()
+    state_key = str(state_file)
+    if st.session_state.get("s_state_file") == state_key and "s_cash" in st.session_state:
         return
 
-    if STATE_FILE.exists():
+    for key in [
+        "s_cash",
+        "s_start",
+        "s_realized",
+        "s_charges",
+        "s_holdings",
+        "s_shorts",
+        "s_ui_config",
+        "s_log",
+        "s_prices",
+        "s_agent_memory",
+        "s_peak_open_pnl",
+        "s_peak_open_pnl_day",
+        "s_profit_guard_triggered_day",
+        "s_profit_ladder_day",
+        "s_profit_ladder_armed",
+        "s_profit_ladder_pullback_started",
+        "s_profit_ladder_exited_day",
+    ]:
+        st.session_state.pop(key, None)
+
+    if state_file.exists():
         try:
             data = _read_saved_state()
             st.session_state.s_cash = float(data.get("cash", starting_capital))
@@ -248,6 +518,7 @@ def _init_state(starting_capital: float) -> None:
             st.session_state.s_profit_ladder_exited_day = str(
                 data.get("profit_ladder_exited_day", "")
             )
+            st.session_state.s_state_file = state_key
             return
         except Exception:
             pass
@@ -269,10 +540,12 @@ def _init_state(starting_capital: float) -> None:
     st.session_state.s_profit_ladder_armed = False
     st.session_state.s_profit_ladder_pullback_started = False
     st.session_state.s_profit_ladder_exited_day = ""
+    st.session_state.s_state_file = state_key
 
 
 def _save_state() -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    state_file = _state_file()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "cash": float(st.session_state.s_cash),
         "start": float(st.session_state.s_start),
@@ -291,12 +564,13 @@ def _save_state() -> None:
         "profit_ladder_armed": bool(st.session_state.get("s_profit_ladder_armed", False)),
         "profit_ladder_pullback_started": bool(st.session_state.get("s_profit_ladder_pullback_started", False)),
         "profit_ladder_exited_day": st.session_state.get("s_profit_ladder_exited_day", ""),
+        "market": _selected_market(),
     }
-    STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    state_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _today_entry_count() -> int:
-    today = ist_now().strftime("%Y-%m-%d")
+    today = market_now().strftime("%Y-%m-%d")
     return sum(
         1
         for row in st.session_state.s_log
@@ -318,7 +592,7 @@ def _minutes_since_last_entry(now_naive: datetime, day: str) -> float:
             continue
         return max(0.0, (now_naive - ts_dt).total_seconds() / 60.0)
 
-    market_open_dt = datetime.combine(now_naive.date(), MARKET_OPEN)
+    market_open_dt = datetime.combine(now_naive.date(), _market_open_time())
     return max(0.0, (now_naive - market_open_dt).total_seconds() / 60.0)
 
 
@@ -342,6 +616,27 @@ def _latest_exit_info_by_symbol(day: str) -> dict[str, tuple[datetime, float]]:
     return latest
 
 
+def _latest_stop_loss_event_by_symbol() -> dict[str, tuple[datetime, str]]:
+    latest: dict[str, tuple[datetime, str]] = {}
+    for row in reversed(st.session_state.s_log):
+        side = str(row.get("side", "")).upper()
+        if side not in {"SELL", "COVER"}:
+            continue
+        reason = str(row.get("reason", "")).strip()
+        if "sl" not in reason.lower():
+            continue
+        sym = str(row.get("symbol", "")).strip()
+        if not sym or sym in latest:
+            continue
+        ts = str(row.get("ts", ""))
+        try:
+            ts_dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+        latest[sym] = (ts_dt, reason)
+    return latest
+
+
 def _current_open_pnl() -> float:
     pnl = 0.0
     for sym, h in st.session_state.s_holdings.items():
@@ -357,6 +652,56 @@ def _current_open_pnl() -> float:
         if qty > 0 and avg > 0 and ltp > 0:
             pnl += (avg - ltp) * qty
     return float(pnl)
+
+
+def _current_gross_exposure() -> float:
+    exposure = 0.0
+    for sym, h in st.session_state.s_holdings.items():
+        qty = int(h.get("qty", 0))
+        avg = float(h.get("avg", 0.0))
+        ltp = float(st.session_state.s_prices.get(sym, avg))
+        if qty > 0 and ltp > 0:
+            exposure += qty * ltp
+    for sym, h in st.session_state.s_shorts.items():
+        qty = int(h.get("qty", 0))
+        avg = float(h.get("avg", 0.0))
+        ltp = float(st.session_state.s_prices.get(sym, avg))
+        if qty > 0 and ltp > 0:
+            exposure += qty * ltp
+    return float(exposure)
+
+
+def _auto_filters_from_budget_slots(
+    total_capital: float,
+    cash_now: float,
+    current_exposure: float,
+    current_open_positions: int,
+    max_open_positions: int,
+    max_symbol_allocation_pct: float,
+    max_total_deployment_pct: float,
+    max_qty_per_trade: int,
+    max_price: float,
+) -> tuple[float, float, int]:
+    remaining_slots = max(1, int(max_open_positions) -
+                          int(current_open_positions))
+    deploy_cap = max(0.0, float(total_capital) *
+                     (float(max_total_deployment_pct) / 100.0))
+    symbol_cap = max(0.0, float(total_capital) *
+                     (float(max_symbol_allocation_pct) / 100.0))
+    remaining_deploy = max(0.0, deploy_cap - float(current_exposure))
+    qty_cap_value = max(1, int(max_qty_per_trade)) * max(1.0, float(max_price))
+
+    per_slot_budget = min(
+        max(0.0, float(cash_now)),
+        max(0.0, float(remaining_deploy)),
+        max(0.0, float(symbol_cap)),
+        max(0.0, float(qty_cap_value)),
+    ) / float(remaining_slots)
+
+    # Keep floor practical: conservative fraction of per-slot budget to avoid choking entries.
+    auto_min_order = max(100.0, per_slot_budget * 0.25)
+
+    return float(auto_min_order), float(per_slot_budget), int(remaining_slots)
 
 
 def _summarize_day_from_log(day: str) -> dict[str, Any]:
@@ -467,7 +812,7 @@ def _update_learning_memory() -> dict[str, Any]:
     memory = {
         "daily": daily,
         "symbols": symbol_profile,
-        "last_updated": ist_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_updated": market_now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     if st.session_state.get("s_agent_memory", {}) != memory:
         st.session_state.s_agent_memory = memory
@@ -518,22 +863,135 @@ def _market_research_from_signals(buy_df: pd.DataFrame, sell_df: pd.DataFrame) -
     }
 
 
+def _best_ai_action(
+    buy_df: pd.DataFrame,
+    sell_df: pd.DataFrame,
+    sell_exit_df: pd.DataFrame,
+    market_research: dict[str, Any],
+    min_buy_score: float,
+    min_short_score: float,
+    min_sell_score: float,
+    enable_short_selling: bool,
+    enable_regime_entry_gate: bool,
+) -> dict[str, Any]:
+    regime = str(market_research.get("regime", "unknown")).strip().lower()
+    allow_buy = (not enable_regime_entry_gate) or regime in {
+        "bullish", "mixed", "unknown"}
+    allow_short = (not enable_regime_entry_gate) or regime in {
+        "bearish", "mixed", "unknown"}
+
+    candidates: list[dict[str, Any]] = []
+
+    # Prioritize valid long exits if risk-off signal is active on existing holdings.
+    if not sell_exit_df.empty:
+        for _, row in sell_exit_df.iterrows():
+            sym = str(row.get("symbol", ""))
+            if sym not in st.session_state.get("s_holdings", {}):
+                continue
+            if str(row.get("sell_signal", "WAIT")) != "READY":
+                continue
+            score = float(row.get("effective_sell_score",
+                          row.get("sell_score", 0.0)) or 0.0)
+            if score < float(min_sell_score):
+                continue
+            candidates.append(
+                {
+                    "action": "EXIT LONG",
+                    "symbol": sym,
+                    "score": score,
+                    "confidence": min(100.0, score + 8.0),
+                    "reason": f"Sell-exit signal READY with score {score:.1f}",
+                }
+            )
+
+    if not buy_df.empty and allow_buy:
+        for _, row in buy_df.iterrows():
+            if str(row.get("buy_signal", "WAIT")) != "READY":
+                continue
+            sym = str(row.get("symbol", ""))
+            if sym in st.session_state.get("s_holdings", {}) or sym in st.session_state.get("s_shorts", {}):
+                continue
+            score = float(row.get("effective_buy_score",
+                          row.get("buy_score", 0.0)) or 0.0)
+            if score < float(min_buy_score):
+                continue
+            tag = str(row.get("research_tag", ""))
+            bonus = 4.0 if tag == "Healthy setup" else (
+                -6.0 if tag == "Overextended" else -2.0)
+            candidates.append(
+                {
+                    "action": "BUY",
+                    "symbol": sym,
+                    "score": score + bonus,
+                    "confidence": max(0.0, min(100.0, score + bonus)),
+                    "reason": f"Buy signal READY, setup={tag or 'n/a'}, score {score:.1f}",
+                }
+            )
+
+    if enable_short_selling and (not sell_df.empty) and allow_short:
+        for _, row in sell_df.iterrows():
+            if str(row.get("sell_signal", "WAIT")) != "READY":
+                continue
+            sym = str(row.get("symbol", ""))
+            if sym in st.session_state.get("s_holdings", {}) or sym in st.session_state.get("s_shorts", {}):
+                continue
+            score = float(row.get("effective_sell_score",
+                          row.get("sell_score", 0.0)) or 0.0)
+            if score < float(min_short_score):
+                continue
+            tag = str(row.get("research_tag", ""))
+            bonus = 4.0 if tag == "Healthy setup" else (
+                -6.0 if tag == "Overextended" else -2.0)
+            candidates.append(
+                {
+                    "action": "SHORT",
+                    "symbol": sym,
+                    "score": score + bonus,
+                    "confidence": max(0.0, min(100.0, score + bonus)),
+                    "reason": f"Short signal READY, setup={tag or 'n/a'}, score {score:.1f}",
+                }
+            )
+
+    if not candidates:
+        gate_note = ""
+        if enable_regime_entry_gate:
+            if (not allow_buy) and (not allow_short):
+                gate_note = f" Regime gate active ({regime})."
+            elif not allow_buy:
+                gate_note = f" Buy blocked by regime ({regime})."
+            elif not allow_short:
+                gate_note = f" Short blocked by regime ({regime})."
+        return {
+            "action": "HOLD",
+            "symbol": "-",
+            "confidence": 0.0,
+            "reason": f"No qualified signal above thresholds.{gate_note}",
+        }
+
+    best = max(candidates, key=lambda x: float(x.get("score", 0.0)))
+    return {
+        "action": str(best.get("action", "HOLD")),
+        "symbol": str(best.get("symbol", "-")),
+        "confidence": float(best.get("confidence", 0.0)),
+        "reason": str(best.get("reason", "")),
+    }
+
+
 def _agent_tuning_plan(
     base_min_buy_score: float,
     base_min_short_score: float,
     base_tp_pct: float,
     base_idle_buy_fallback_minutes: int,
     base_reentry_cooldown_minutes: int,
-    base_min_expected_profit_per_trade: float,
     learning_memory: dict[str, Any],
     market_research: dict[str, Any],
 ) -> dict[str, Any]:
+    max_practical_min_score = 85.0
     adj_buy = 0.0
     adj_short = 0.0
     tp_mult = 1.0
     suggested_idle_fallback = int(base_idle_buy_fallback_minutes)
     suggested_reentry_cooldown = int(base_reentry_cooldown_minutes)
-    suggested_min_expected_profit = float(base_min_expected_profit_per_trade)
     notes: list[str] = []
 
     daily = learning_memory.get("daily", []) if isinstance(
@@ -552,8 +1010,6 @@ def _agent_tuning_plan(
                     240, suggested_idle_fallback + 10)
                 suggested_reentry_cooldown = min(
                     120, suggested_reentry_cooldown + 5)
-                suggested_min_expected_profit = min(
-                    500000.0, suggested_min_expected_profit * 1.2)
                 notes.append(
                     "Yesterday weak: tightened entries and quicker profit booking.")
             elif net > 0 and win_rate >= 60.0:
@@ -569,8 +1025,6 @@ def _agent_tuning_plan(
     if regime == "bearish":
         adj_buy += 2.0
         adj_short -= 1.0
-        suggested_min_expected_profit = min(
-            500000.0, suggested_min_expected_profit * 1.1)
         notes.append("Market bearish: stricter longs, easier shorts.")
     elif regime == "bullish":
         adj_buy -= 1.0
@@ -582,12 +1036,11 @@ def _agent_tuning_plan(
         notes.append("Sideways regime: faster profit booking.")
 
     return {
-        "effective_min_buy_score": float(min(100.0, max(0.0, base_min_buy_score + adj_buy))),
-        "effective_min_short_score": float(min(100.0, max(0.0, base_min_short_score + adj_short))),
+        "effective_min_buy_score": float(min(max_practical_min_score, max(0.0, base_min_buy_score + adj_buy))),
+        "effective_min_short_score": float(min(max_practical_min_score, max(0.0, base_min_short_score + adj_short))),
         "effective_tp_pct": float(min(0.06, max(0.003, base_tp_pct * tp_mult))),
         "suggested_idle_buy_fallback_minutes": int(suggested_idle_fallback),
         "suggested_reentry_cooldown_minutes": int(suggested_reentry_cooldown),
-        "suggested_min_expected_profit_per_trade": float(suggested_min_expected_profit),
         "notes": notes,
         "latest_learning": latest,
     }
@@ -608,29 +1061,6 @@ def _max_feasible_order_value(
     qty_cap_value = max(1, int(max_qty_per_trade)) * max(1.0, float(max_price))
     cash_cap = max(0.0, float(cash_now))
     return float(max(100.0, min(symbol_cap, deploy_cap, qty_cap_value, cash_cap)))
-
-
-def _max_feasible_expected_profit(
-    total_capital: float,
-    cash_now: float,
-    max_symbol_allocation_pct: float,
-    max_total_deployment_pct: float,
-    max_qty_per_trade: int,
-    max_price: float,
-    tp_pct: float,
-) -> float:
-    order_cap = _max_feasible_order_value(
-        total_capital=total_capital,
-        cash_now=cash_now,
-        max_symbol_allocation_pct=max_symbol_allocation_pct,
-        max_total_deployment_pct=max_total_deployment_pct,
-        max_qty_per_trade=max_qty_per_trade,
-        max_price=max_price,
-    )
-    qty_cap = max(1, int(max_qty_per_trade))
-    price_cap = max(1.0, float(max_price))
-    tp_val = max(0.0001, float(tp_pct))
-    return float(min(order_cap * tp_val, qty_cap * price_cap * tp_val))
 
 
 def _hhmm_to_time(hhmm: int) -> time:
@@ -736,7 +1166,7 @@ def _record_trade(
     st.session_state.s_prices[symbol] = float(price)
     st.session_state.s_log.append(
         {
-            "ts": ist_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": market_now().strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": symbol,
             "side": side,
             "qty": int(qty),
@@ -791,11 +1221,11 @@ def _top_up_small_holdings(target_qty: int, sl_pct: float, tp_pct: float, ignore
 
 
 def _in_entry_window() -> bool:
-    now = ist_now()
+    now = market_now()
     if now.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
     t = now.time()
-    return MARKET_OPEN <= t <= ENTRY_CUTOFF
+    return _market_open_time() <= t <= _entry_cutoff_time()
 
 
 @st.cache_data(ttl=5, show_spinner=False)
@@ -806,10 +1236,11 @@ def _scan_watchlist(
 ) -> tuple[pd.DataFrame, list[str]]:
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
+    score_cfg = _market_score_config()
 
     for sym in symbols:
         try:
-            q = fetch_nse_quote(sym)
+            q = fetch_market_quote(sym)
             price = float(q["price"])
             if price <= 0:
                 continue
@@ -832,15 +1263,23 @@ def _scan_watchlist(
                 above = 0.0
                 below = 0.0
 
-            buy_score += min(45.0, max(0.0, pchange) * 6.0)
-            buy_score += min(35.0, above * 20.0)
-            buy_score += min(20.0, range_pct * 2.0)
-            buy_ready = price > vwap and pchange > 0.25 and range_pct > 0.5
+            change_weight = float(score_cfg["score_change_weight"])
+            vwap_weight = float(score_cfg["score_vwap_weight"])
+            range_weight = float(score_cfg["score_range_weight"])
+            ready_pchange_threshold = float(
+                score_cfg["ready_pchange_threshold"])
+            ready_range_threshold = float(score_cfg["ready_range_threshold"])
 
-            sell_score += min(45.0, max(0.0, -pchange) * 6.0)
-            sell_score += min(35.0, below * 20.0)
-            sell_score += min(20.0, range_pct * 2.0)
-            sell_ready = price < vwap and pchange < -0.25 and range_pct > 0.5
+            buy_score += min(45.0, max(0.0, pchange) * change_weight)
+            buy_score += min(35.0, above * vwap_weight)
+            buy_score += min(20.0, range_pct * range_weight)
+            buy_ready = price > vwap and pchange > ready_pchange_threshold and range_pct > ready_range_threshold
+
+            sell_score += min(45.0, max(0.0, -pchange) * change_weight)
+            sell_score += min(35.0, below * vwap_weight)
+            sell_score += min(20.0, range_pct * range_weight)
+            sell_ready = price < vwap and pchange < - \
+                ready_pchange_threshold and range_pct > ready_range_threshold
 
             rows.append(
                 {
@@ -851,13 +1290,120 @@ def _scan_watchlist(
                     "sell_score": round(sell_score, 2),
                     "sell_signal": "READY" if sell_ready else "WAIT",
                     "pchange": round(pchange, 2),
-                    "updated": ist_now().strftime("%H:%M:%S"),
+                    "range_pct": round(range_pct, 2),
+                    "vwap_gap_pct": round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0,
+                    "updated": market_now().strftime("%H:%M:%S"),
                 }
             )
         except Exception as e:
             errors.append(f"{sym}: {e}")
 
     return pd.DataFrame(rows), errors
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _batch_ml_scores_cached(
+    symbols: tuple[str, ...],
+    state_mtime: float,
+    model_mtime: float,
+) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    if get_symbol_quality_score is None:
+        return scores
+    state_file = _state_file()
+    for sym in symbols:
+        try:
+            scores[sym] = float(get_symbol_quality_score(sym, state_file))
+        except Exception:
+            continue
+    return scores
+
+
+def _apply_effective_scores(
+    buy_df: pd.DataFrame,
+    sell_df: pd.DataFrame,
+    sell_exit_df: pd.DataFrame,
+    bias_map: dict[str, float],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ml_enabled = bool(
+        st.session_state.get("s_ui_config", {}).get("enable_ml_scoring", False)
+    )
+
+    buy_out = buy_df.copy() if not buy_df.empty else buy_df
+    sell_out = sell_df.copy() if not sell_df.empty else sell_df
+    sell_exit_out = sell_exit_df.copy() if not sell_exit_df.empty else sell_exit_df
+
+    if not buy_out.empty:
+        buy_out["symbol_bias"] = buy_out["symbol"].map(
+            lambda s: float(bias_map.get(str(s), 0.0))
+        )
+    if not sell_out.empty:
+        sell_out["symbol_bias"] = sell_out["symbol"].map(
+            lambda s: float(bias_map.get(str(s), 0.0))
+        )
+    if not sell_exit_out.empty:
+        sell_exit_out["symbol_bias"] = sell_exit_out["symbol"].map(
+            lambda s: float(bias_map.get(str(s), 0.0))
+        )
+
+    if not buy_out.empty:
+        rule_buy_score = pd.to_numeric(
+            buy_out["buy_score"], errors="coerce").fillna(0.0)
+        buy_bias = pd.to_numeric(
+            buy_out["symbol_bias"], errors="coerce").fillna(0.0)
+
+        if ml_enabled and get_symbol_quality_score is not None:
+            state_file = _state_file()
+            model_file = resolve_learning_model_path(
+                state_file) if resolve_learning_model_path is not None else Path("outputs") / "market_learning_model.pkl"
+            state_mtime = float(
+                state_file.stat().st_mtime) if state_file.exists() else 0.0
+            model_mtime = float(
+                model_file.stat().st_mtime) if model_file.exists() else 0.0
+
+            buy_symbols = tuple(
+                sorted({str(s) for s in buy_out["symbol"].astype(str).tolist()}))
+            ml_scores = _batch_ml_scores_cached(
+                buy_symbols, state_mtime, model_mtime)
+            buy_out["ml_quality_score"] = buy_out["symbol"].map(
+                lambda s: float(ml_scores.get(str(s), 0.5)))
+            ml_score = pd.to_numeric(
+                buy_out["ml_quality_score"], errors="coerce").fillna(0.5)
+
+            # Blend heuristic intraday signal with learned quality to keep scores data-driven.
+            blended_buy_score = (0.65 * rule_buy_score) + \
+                (0.35 * (ml_score * 100.0))
+            cap_series = pd.Series(92.0, index=blended_buy_score.index)
+            cap_series = cap_series.where(
+                ~((rule_buy_score >= 90.0) & (ml_score >= 0.80)),
+                97.0,
+            )
+            effective_buy_score = (blended_buy_score +
+                                   (0.8 * buy_bias)).clip(lower=0.0)
+            effective_buy_score = effective_buy_score.where(
+                effective_buy_score <= cap_series, cap_series)
+            buy_out["effective_buy_score"] = effective_buy_score.round(2)
+        else:
+            buy_out["effective_buy_score"] = (
+                rule_buy_score + buy_bias
+            ).clip(lower=0.0, upper=95.0).round(2)
+
+    if not sell_out.empty:
+        sell_out["effective_sell_score"] = (
+            pd.to_numeric(sell_out["sell_score"], errors="coerce").fillna(0.0)
+            + pd.to_numeric(sell_out["symbol_bias"],
+                            errors="coerce").fillna(0.0)
+        ).clip(lower=0.0, upper=95.0).round(2)
+
+    if not sell_exit_out.empty:
+        sell_exit_out["effective_sell_score"] = (
+            pd.to_numeric(sell_exit_out["sell_score"],
+                          errors="coerce").fillna(0.0)
+            + pd.to_numeric(sell_exit_out["symbol_bias"],
+                            errors="coerce").fillna(0.0)
+        ).clip(lower=0.0, upper=95.0).round(2)
+
+    return buy_out, sell_out, sell_exit_out
 
 
 def _rank_signals(
@@ -872,7 +1418,7 @@ def _rank_signals(
     max_qty_per_trade: int,
     max_open_positions: int,
     min_order_value: float,
-    min_expected_profit_per_trade: float,
+    max_trade_invest_pct: float = 10.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
     total_capital = float(st.session_state.get("s_start", 0.0) or 0.0)
     cash_now = float(st.session_state.get("s_cash", 0.0) or 0.0)
@@ -882,6 +1428,9 @@ def _rank_signals(
     deploy_cap_value = total_capital * \
         (float(max_total_deployment_pct) / 100.0)
     max_qty_limit = max(1, int(max_qty_per_trade))
+    max_invest_per_trade = total_capital * \
+        (float(max_total_deployment_pct) / 100.0) * \
+        (float(max_trade_invest_pct) / 100.0)
     open_positions_now = len(st.session_state.get("s_holdings", {})) + len(
         st.session_state.get("s_shorts", {}))
     remaining_slots_base = max(
@@ -918,12 +1467,53 @@ def _rank_signals(
     if all_df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), errors
 
-    # Unfiltered sell shortlist is reserved for long-exit signal handling.
-    sell_exit_df = all_df.sort_values(["sell_score", "pchange"], ascending=[
-        False, True]).head(5).reset_index(drop=True)
+    # Research layer: prefer setups with healthy momentum and avoid overextended moves.
+    all_df = all_df.copy()
+    pchange_series = pd.to_numeric(all_df.get(
+        "pchange"), errors="coerce").fillna(0.0)
+    range_series = pd.to_numeric(all_df.get(
+        "range_pct"), errors="coerce").fillna(0.0)
+    vwap_gap_series = pd.to_numeric(all_df.get(
+        "vwap_gap_pct"), errors="coerce").fillna(0.0)
 
-    buy_candidates = all_df.sort_values(["buy_score", "pchange"], ascending=[
-                                        False, False]).reset_index(drop=True)
+    stretch_penalty = (vwap_gap_series.abs() - 1.8).clip(lower=0.0) * 6.0
+    range_penalty = (range_series - 3.5).clip(lower=0.0) * 4.0
+    range_bonus = range_series.clip(lower=0.0, upper=2.5) * 3.0
+
+    buy_research_score = (
+        pd.to_numeric(all_df.get("buy_score"), errors="coerce").fillna(0.0)
+        + range_bonus
+        + (pchange_series.clip(lower=0.0, upper=2.0) * 3.0)
+        - stretch_penalty
+        - range_penalty
+    ).clip(lower=0.0, upper=100.0)
+
+    sell_research_score = (
+        pd.to_numeric(all_df.get("sell_score"), errors="coerce").fillna(0.0)
+        + range_bonus
+        + ((-pchange_series).clip(lower=0.0, upper=2.0) * 3.0)
+        - stretch_penalty
+        - range_penalty
+    ).clip(lower=0.0, upper=100.0)
+
+    all_df["research_buy_score"] = buy_research_score.round(2)
+    all_df["research_sell_score"] = sell_research_score.round(2)
+    all_df["research_tag"] = pd.Series(
+        "Healthy setup", index=all_df.index, dtype="object"
+    )
+    all_df["research_tag"] = all_df["research_tag"].where(
+        range_series >= 0.4, "Weak momentum"
+    )
+    all_df["research_tag"] = all_df["research_tag"].where(
+        stretch_penalty < 6.0, "Overextended"
+    )
+
+    # Unfiltered sell shortlist is reserved for long-exit signal handling.
+    sell_exit_df = all_df.sort_values(["research_sell_score", "sell_score", "pchange"], ascending=[
+        False, False, True]).head(5).reset_index(drop=True)
+
+    buy_candidates = all_df.sort_values(["research_buy_score", "buy_score", "pchange"], ascending=[
+                                        False, False, False]).reset_index(drop=True)
     buy_rows: list[dict[str, Any]] = []
     buy_symbol_exposure = dict(symbol_exposure)
     buy_total_exposure = float(total_exposure)
@@ -950,12 +1540,14 @@ def _rank_signals(
         ) / float(remaining_slots)
         qty_by_slot_budget = int(max(0.0, slot_budget) // max(price, 1e-6))
 
+        qty_by_trade_cap = int(max_invest_per_trade // max(price, 1e-6))
         qty_upper = max(0, min(
             qty_by_risk,
             qty_by_cash,
             qty_by_symbol_cap,
             qty_by_total_cap,
             qty_by_slot_budget,
+            qty_by_trade_cap,
             max_qty_limit,
         ))
 
@@ -968,17 +1560,7 @@ def _rank_signals(
         qty_floor_by_value = max(
             1, int(math.ceil(float(effective_min_order_value) / max(price, 1e-6))))
 
-        effective_min_expected_profit = min(
-            float(min_expected_profit_per_trade),
-            max(50.0, float(slot_budget) * float(tp_pct)),
-            max(50.0, float(remaining_symbol_cap) * float(tp_pct)),
-            max(50.0, float(remaining_total_cap) * float(tp_pct)),
-        )
-        qty_floor_by_profit = max(1, int(math.ceil(
-            float(effective_min_expected_profit) /
-            max(price * float(tp_pct), 1e-6)
-        )))
-        qty_lower = max(qty_floor_by_value, qty_floor_by_profit)
+        qty_lower = qty_floor_by_value
         if qty_upper <= 0 or qty_upper < qty_lower:
             continue
 
@@ -987,8 +1569,6 @@ def _rank_signals(
         if buy_cash_left < (est_value + est_ch):
             continue
         expected_profit = float(est_value) * float(tp_pct)
-        if expected_profit < float(effective_min_expected_profit):
-            continue
 
         rec = row.to_dict()
         rec["rank_qty"] = int(qty_upper)
@@ -1005,8 +1585,8 @@ def _rank_signals(
         if len(buy_rows) >= 5:
             break
 
-    sell_candidates = all_df.sort_values(["sell_score", "pchange"], ascending=[
-                                         False, True]).reset_index(drop=True)
+    sell_candidates = all_df.sort_values(["research_sell_score", "sell_score", "pchange"], ascending=[
+                                         False, False, True]).reset_index(drop=True)
     sell_rows: list[dict[str, Any]] = []
     short_symbol_exposure = dict(symbol_exposure)
     short_total_exposure = float(total_exposure)
@@ -1034,12 +1614,14 @@ def _rank_signals(
         ) / float(remaining_slots)
         qty_by_slot_budget = int(max(0.0, slot_budget) // max(price, 1e-6))
 
+        qty_by_trade_cap = int(max_invest_per_trade // max(price, 1e-6))
         qty_upper = max(0, min(
             qty_by_risk,
             qty_by_margin,
             qty_by_symbol_cap,
             qty_by_total_cap,
             qty_by_slot_budget,
+            qty_by_trade_cap,
             max_qty_limit,
         ))
 
@@ -1085,7 +1667,7 @@ def _refresh_holding_prices() -> None:
         st.session_state.s_shorts.keys())
     for sym in list(symbols):
         try:
-            q = fetch_nse_quote(sym)
+            q = fetch_market_quote(sym)
             p = float(q.get("price") or 0.0)
             if p > 0:
                 st.session_state.s_prices[sym] = p
@@ -1115,6 +1697,9 @@ def _auto_paper_cycle(
     daily_profit_target: float,
     reentry_cooldown_minutes: int,
     reentry_min_move_pct: float,
+    enable_regime_entry_gate: bool,
+    market_regime: str,
+    sl_cooldown_after_stop_minutes: int,
     max_qty_per_trade: int,
     symbols: list[str],
     min_price: float,
@@ -1122,16 +1707,18 @@ def _auto_paper_cycle(
     max_symbol_allocation_pct: float,
     max_total_deployment_pct: float,
     min_order_value: float,
-    min_expected_profit_per_trade: float,
     idle_buy_fallback_minutes: int,
+    max_trade_invest_pct: float = 10.0,
 ) -> list[str]:
     actions: list[str] = []
+
+    # Keep portfolio LTP moving every cycle, even when there are no fresh signals.
+    _refresh_holding_prices()
+
     if buy_df.empty and sell_df.empty and sell_exit_df.empty:
         return actions
 
-    _refresh_holding_prices()
-
-    now = ist_now()
+    now = market_now()
     now_naive = now.replace(tzinfo=None)
     today = now.strftime("%Y-%m-%d")
     same_cycle_exited_symbols: set[str] = set()
@@ -1301,7 +1888,7 @@ def _auto_paper_cycle(
 
     if (
         enable_profit_guard
-        and ist_now().time() >= profit_guard_after
+        and market_now().time() >= profit_guard_after
         and float(st.session_state.get("s_peak_open_pnl", 0.0)) > 0.0
         and st.session_state.get("s_profit_guard_triggered_day", "") != today
     ):
@@ -1340,7 +1927,7 @@ def _auto_paper_cycle(
             )
 
     # Intraday square-off for all open positions.
-    if ist_now().time() >= SQUARE_OFF:
+    if market_now().time() >= _square_off_time():
         for sym, h in list(st.session_state.s_holdings.items()):
             qty = int(h.get("qty", 0))
             if qty <= 0:
@@ -1386,6 +1973,17 @@ def _auto_paper_cycle(
 
     risk_budget = float(st.session_state.s_start) * (float(risk_pct) / 100.0)
     max_qty_limit = max(1, int(max_qty_per_trade))
+    max_invest_per_trade = float(st.session_state.s_start) * (
+        float(max_total_deployment_pct) / 100.0) * (float(max_trade_invest_pct) / 100.0)
+    sl_events = _latest_stop_loss_event_by_symbol()
+    regime = str(market_regime or "unknown").strip().lower()
+    allow_buy_regime = regime in {"bullish", "mixed", "unknown"}
+    allow_short_regime = regime in {"bearish", "mixed", "unknown"}
+
+    if enable_regime_entry_gate and not allow_buy_regime:
+        actions.append(f"BUY entries blocked by regime gate ({regime})")
+    if enable_regime_entry_gate and not allow_short_regime:
+        actions.append(f"SHORT entries blocked by regime gate ({regime})")
 
     def _refresh_ranked_entries() -> tuple[pd.DataFrame, pd.DataFrame]:
         _buy_df, _sell_df, _sell_exit_df, _ = _rank_signals(
@@ -1400,34 +1998,22 @@ def _auto_paper_cycle(
             max_qty_per_trade=max_qty_per_trade,
             max_open_positions=max_positions,
             min_order_value=min_order_value,
-            min_expected_profit_per_trade=min_expected_profit_per_trade,
+            max_trade_invest_pct=max_trade_invest_pct,
         )
         bias_map = _symbol_bias_map()
-        if not _buy_df.empty:
-            _buy_df = _buy_df.copy()
-            _buy_df["symbol_bias"] = _buy_df["symbol"].map(
-                lambda s: float(bias_map.get(str(s), 0.0))
-            )
-            _buy_df["effective_buy_score"] = (
-                pd.to_numeric(_buy_df["buy_score"],
-                              errors="coerce").fillna(0.0)
-                + pd.to_numeric(_buy_df["symbol_bias"],
-                                errors="coerce").fillna(0.0)
-            ).round(2)
-        if not _sell_df.empty:
-            _sell_df = _sell_df.copy()
-            _sell_df["symbol_bias"] = _sell_df["symbol"].map(
-                lambda s: float(bias_map.get(str(s), 0.0))
-            )
-            _sell_df["effective_sell_score"] = (
-                pd.to_numeric(_sell_df["sell_score"],
-                              errors="coerce").fillna(0.0)
-                + pd.to_numeric(_sell_df["symbol_bias"],
-                                errors="coerce").fillna(0.0)
-            ).round(2)
+        _buy_df, _sell_df, _ = _apply_effective_scores(
+            _buy_df,
+            _sell_df,
+            pd.DataFrame(),
+            bias_map,
+        )
         return _buy_df, _sell_df
 
-    while entries_today < int(max_trades_day) and open_positions < int(max_positions):
+    while (
+        entries_today < int(max_trades_day)
+        and open_positions < int(max_positions)
+        and (not enable_regime_entry_gate or allow_buy_regime)
+    ):
         live_buy_df, _ = _refresh_ranked_entries()
         if live_buy_df.empty:
             break
@@ -1448,6 +2034,17 @@ def _auto_paper_cycle(
                 continue
             if sym in st.session_state.s_holdings or sym in st.session_state.s_shorts:
                 continue
+            if int(sl_cooldown_after_stop_minutes) > 0:
+                last_sl = sl_events.get(sym)
+                if last_sl is not None:
+                    sl_ts, sl_reason = last_sl
+                    minutes_since_sl = (
+                        now_naive - sl_ts).total_seconds() / 60.0
+                    if minutes_since_sl < float(sl_cooldown_after_stop_minutes):
+                        actions.append(
+                            f"BUY {sym} SKIPPED: SL cooldown {minutes_since_sl:.1f}m < {int(sl_cooldown_after_stop_minutes)}m ({sl_reason})"
+                        )
+                        continue
             if sym in same_cycle_exited_symbols:
                 actions.append(
                     f"BUY {sym} SKIPPED: same-cycle re-entry blocked")
@@ -1488,7 +2085,9 @@ def _auto_paper_cycle(
             risk_per_share = max(price * float(sl_pct), 0.01)
             qty_by_risk = int(risk_budget // risk_per_share)
             qty_by_cash = int(st.session_state.s_cash // max(price, 1e-6))
-            qty = max(0, min(qty_by_risk, qty_by_cash, max_qty_limit))
+            qty_by_trade_cap = int(max_invest_per_trade // max(price, 1e-6))
+            qty = max(0, min(qty_by_risk, qty_by_cash,
+                      qty_by_trade_cap, max_qty_limit))
 
             if qty <= 0:
                 actions.append(
@@ -1523,7 +2122,7 @@ def _auto_paper_cycle(
             break
 
     # Optional intraday short entries from sell signals.
-    if enable_short_selling:
+    if enable_short_selling and (not enable_regime_entry_gate or allow_short_regime):
         while entries_today < int(max_trades_day) and open_positions < int(max_positions):
             _, live_sell_df = _refresh_ranked_entries()
             if live_sell_df.empty:
@@ -1542,6 +2141,17 @@ def _auto_paper_cycle(
                     continue
                 if sym in st.session_state.s_holdings or sym in st.session_state.s_shorts:
                     continue
+                if int(sl_cooldown_after_stop_minutes) > 0:
+                    last_sl = sl_events.get(sym)
+                    if last_sl is not None:
+                        sl_ts, sl_reason = last_sl
+                        minutes_since_sl = (
+                            now_naive - sl_ts).total_seconds() / 60.0
+                        if minutes_since_sl < float(sl_cooldown_after_stop_minutes):
+                            actions.append(
+                                f"SHORT {sym} SKIPPED: SL cooldown {minutes_since_sl:.1f}m < {int(sl_cooldown_after_stop_minutes)}m ({sl_reason})"
+                            )
+                            continue
                 if sym in same_cycle_exited_symbols:
                     actions.append(
                         f"SHORT {sym} SKIPPED: same-cycle re-entry blocked")
@@ -1579,7 +2189,10 @@ def _auto_paper_cycle(
                 qty_by_risk = int(risk_budget // risk_per_share)
                 qty_by_margin = int(
                     max(0.0, st.session_state.s_cash) // max(price * 0.2, 0.01))
-                qty = max(0, min(qty_by_risk, qty_by_margin, max_qty_limit))
+                qty_by_trade_cap = int(
+                    max_invest_per_trade // max(price, 1e-6))
+                qty = max(0, min(qty_by_risk, qty_by_margin,
+                          qty_by_trade_cap, max_qty_limit))
 
                 if qty <= 0:
                     actions.append(
@@ -1672,14 +2285,29 @@ st.set_page_config(page_title="Simple Budget Trading Simulator",
                    page_icon="\U0001f4b0", layout="wide")
 st.title("\U0001f4b0 Simple Budget-Based Trading Simulator")
 
+if "selected_market" not in st.session_state:
+    st.session_state.selected_market = "NSE"
+
+with st.sidebar:
+    st.header("Market")
+    st.radio(
+        "Trading Market",
+        options=["NSE", "US"],
+        format_func=lambda key: str(MARKET_CONFIG[key]["label"]),
+        key="selected_market",
+        help="Each market keeps its own paper-trade state and ML model.",
+    )
+
 saved_state = _read_saved_state()
 saved_ui = saved_state.get("ui_config", {}) if isinstance(
     saved_state, dict) else {}
+watchlist = _watchlist()
+currency_symbol = _currency_symbol()
 
 with st.sidebar:
     st.header("Setup")
     total_capital = float(st.number_input(
-        "Total Capital (Rs)", min_value=1000.0, value=float(saved_ui.get("total_capital", saved_state.get("start", 200000.0))), step=1000.0))
+        f"Total Capital ({currency_symbol})", min_value=1000.0, value=float(saved_ui.get("total_capital", saved_state.get("start", 200000.0))), step=1000.0))
     risk_pct = float(st.slider("Risk Per Trade (%)",
                      min_value=0.1, max_value=5.0, value=float(saved_ui.get("risk_pct", 0.5)), step=0.1))
     max_trades_day = int(st.number_input(
@@ -1695,22 +2323,37 @@ with st.sidebar:
     max_qty_per_trade = int(st.number_input(
         "Max Qty Per Trade", min_value=1, max_value=100000,
         value=int(saved_ui.get("max_qty_per_trade", 300)), step=1))
+    max_trade_invest_pct = float(st.slider(
+        "Max Invest Per Trade (% of deployed cap)", min_value=2.0, max_value=50.0,
+        value=float(saved_ui.get("max_trade_invest_pct", 10.0)), step=1.0,
+        help="Caps single-trade investment to this % of total deployed capital. E.g. 10% of Rs 16L cap = Rs 1.6L max per trade."))
+    scan_symbol_count = int(st.number_input(
+        "Symbols To Scan",
+        min_value=5,
+        max_value=len(watchlist),
+        value=int(saved_ui.get("scan_symbol_count", min(25, len(watchlist)))),
+        step=1,
+        help="Limits active scan universe for faster refresh. Uses the first N symbols from watchlist.",
+    ))
 
     st.header("Signal Filter")
-    min_price = float(st.number_input("Min Price (Rs)",
+    min_price = float(st.number_input(f"Min Price ({currency_symbol})",
                       min_value=0.0, max_value=50000.0, value=float(saved_ui.get("min_price", 50.0)), step=10.0))
     max_price = float(st.number_input(
-        "Max Price (Rs)", min_value=1.0, max_value=50000.0, value=float(saved_ui.get("max_price", 1800.0)), step=10.0))
+        f"Max Price ({currency_symbol})", min_value=1.0, max_value=50000.0, value=float(saved_ui.get("max_price", 1800.0)), step=10.0))
     min_buy_score = float(st.slider(
         "Minimum Buy Score", min_value=0.0, max_value=100.0, value=float(saved_ui.get("min_buy_score", 40.0)), step=1.0))
+    auto_budget_filters = st.checkbox(
+        "Auto-set order/profit filters from budget + open slots",
+        value=bool(saved_ui.get("auto_budget_filters", True)),
+        help="Recomputes minimum order value each refresh using cash, deployment headroom, and remaining open-position slots.",
+    )
+    saved_min_order_value = float(saved_ui.get("min_order_value", 50000.0))
+    saved_min_order_value = min(5000000.0, max(100.0, saved_min_order_value))
     min_order_value = float(st.number_input(
-        "Minimum Order Value (Rs)", min_value=100.0, max_value=5000000.0,
-        value=float(saved_ui.get("min_order_value", 50000.0)), step=1000.0,
+        f"Minimum Order Value ({currency_symbol})", min_value=100.0, max_value=5000000.0,
+        value=float(saved_min_order_value), step=1000.0,
         help="Avoids tiny orders that get eaten by charges"))
-    min_expected_profit_per_trade = float(st.number_input(
-        "Minimum Expected Profit Per Trade (Rs)", min_value=100.0, max_value=500000.0,
-        value=float(saved_ui.get("min_expected_profit_per_trade", 1000.0)), step=100.0,
-        help="BUY entries only. Uses position value x TP% as expected profit filter"))
     idle_buy_fallback_minutes = int(st.number_input(
         "Idle Buy Fallback After (Minutes)", min_value=1, max_value=240,
         value=int(saved_ui.get("idle_buy_fallback_minutes", 15)), step=1,
@@ -1744,6 +2387,19 @@ with st.sidebar:
         "Enable intraday short selling", value=bool(saved_ui.get("enable_short_selling", True)))
     min_short_score = float(st.slider(
         "Minimum Short Score", min_value=0.0, max_value=100.0, value=float(saved_ui.get("min_short_score", 20.0)), step=1.0))
+    enable_regime_entry_gate = st.checkbox(
+        "Gate entries by market regime",
+        value=bool(saved_ui.get("enable_regime_entry_gate", True)),
+        help="Blocks longs in bearish/sideways and blocks shorts in bullish/sideways regimes.",
+    )
+    sl_cooldown_after_stop_minutes = int(st.number_input(
+        "Stop-loss cooldown per symbol (minutes)",
+        min_value=0,
+        max_value=1440,
+        value=int(saved_ui.get("sl_cooldown_after_stop_minutes", 180)),
+        step=5,
+        help="After a symbol hits stop-loss, block fresh entries in that symbol for this duration.",
+    ))
 
     st.header("Learning Agent")
     enable_learning_agent = st.checkbox(
@@ -1778,15 +2434,22 @@ with st.sidebar:
 
     st.header("Target")
     daily_profit_target = float(st.number_input(
-        "Daily Profit Target (Rs)", min_value=500.0, value=float(saved_ui.get("daily_profit_target", 4000.0)), step=100.0))
+        f"Daily Profit Target ({currency_symbol})", min_value=500.0, value=float(saved_ui.get("daily_profit_target", 4000.0)), step=100.0))
 
     st.header("Run")
+    full_auto_paper_mode = st.checkbox(
+        "Full Auto Paper Mode (hands-free)",
+        value=bool(saved_ui.get("full_auto_paper_mode", False)),
+        help="Keeps paper trading only, but auto-enables trading, refresh, learning, ML scoring, and optimizer.",
+    )
     auto_trade_on = st.checkbox("Enable Auto Paper Trading", value=bool(
         saved_ui.get("auto_trade_on", True)))
     auto_refresh_on = st.checkbox("Auto Refresh", value=bool(
         saved_ui.get("auto_refresh_on", True)))
     refresh_seconds = int(st.number_input(
-        "Refresh Seconds", min_value=5, max_value=120, value=int(saved_ui.get("refresh_seconds", 20)), step=5))
+        "Refresh Seconds", min_value=5, max_value=120, value=int(saved_ui.get("refresh_seconds", 10)), step=5,
+        help="Updates prices and P&L on the portfolio metrics bar. Faster = more responsive but higher CPU."
+    ))
     st.subheader("Optimizer")
     optimizer_auto_run = st.checkbox(
         "Auto-run optimizer",
@@ -1826,6 +2489,25 @@ with st.sidebar:
         "Top Up Existing Tiny Positions", use_container_width=True)
     reset_btn = st.button("Reset Simulator", use_container_width=True)
 
+if full_auto_paper_mode:
+    auto_trade_on = True
+    auto_refresh_on = True
+    refresh_seconds = min(int(refresh_seconds), 10)
+    enable_learning_agent = True
+    auto_apply_learning_suggestions = True
+    enable_signal_sell = True
+    enable_profit_guard = True
+    enable_regime_entry_gate = True
+    optimizer_auto_run = True
+
+    ui_cfg = st.session_state.get("s_ui_config", {})
+    if not isinstance(ui_cfg, dict):
+        ui_cfg = {}
+    if not bool(ui_cfg.get("enable_ml_scoring", False)):
+        ui_cfg["enable_ml_scoring"] = True
+        st.session_state.s_ui_config = ui_cfg
+        _save_state()
+
 _init_state(total_capital)
 
 # If user changed Total Capital in the sidebar, scale cash and start accordingly
@@ -1844,11 +2526,13 @@ current_ui_config = {
     "max_symbol_allocation_pct": float(max_symbol_allocation_pct),
     "max_total_deployment_pct": float(max_total_deployment_pct),
     "max_qty_per_trade": int(max_qty_per_trade),
+    "max_trade_invest_pct": float(max_trade_invest_pct),
+    "scan_symbol_count": int(scan_symbol_count),
     "min_price": float(min_price),
     "max_price": float(max_price),
     "min_buy_score": float(min_buy_score),
+    "auto_budget_filters": bool(auto_budget_filters),
     "min_order_value": float(min_order_value),
-    "min_expected_profit_per_trade": float(min_expected_profit_per_trade),
     "idle_buy_fallback_minutes": int(idle_buy_fallback_minutes),
     "topup_target_qty": int(topup_target_qty),
     "topup_ignore_cash_check": bool(topup_ignore_cash_check),
@@ -1861,6 +2545,8 @@ current_ui_config = {
     "reentry_min_move_pct": float(reentry_min_move_pct),
     "enable_short_selling": bool(enable_short_selling),
     "min_short_score": float(min_short_score),
+    "enable_regime_entry_gate": bool(enable_regime_entry_gate),
+    "sl_cooldown_after_stop_minutes": int(sl_cooldown_after_stop_minutes),
     "enable_learning_agent": bool(enable_learning_agent),
     "auto_apply_learning_suggestions": bool(auto_apply_learning_suggestions),
     "enable_profit_guard": bool(enable_profit_guard),
@@ -1868,9 +2554,12 @@ current_ui_config = {
     "profit_guard_after_hhmm": int(profit_guard_after_hhmm),
     "block_new_entries_on_guard": bool(block_new_entries_on_guard),
     "daily_profit_target": float(daily_profit_target),
+    "full_auto_paper_mode": bool(full_auto_paper_mode),
     "auto_trade_on": bool(auto_trade_on),
     "auto_refresh_on": bool(auto_refresh_on),
     "refresh_seconds": int(refresh_seconds),
+    "enable_ml_scoring": bool(st.session_state.get("s_ui_config", {}).get(
+        "enable_ml_scoring", saved_ui.get("enable_ml_scoring", False))),
     "optimizer_auto_run": bool(optimizer_auto_run),
     "optimizer_interval_minutes": int(optimizer_interval_minutes),
     "optimizer_lookback_trades": int(optimizer_lookback_trades),
@@ -1883,6 +2572,29 @@ if st.session_state.get("s_ui_config", {}) != current_ui_config:
     _save_state()
 
 config_guard_messages: list[str] = []
+if auto_budget_filters:
+    open_positions_now = len(st.session_state.get(
+        "s_holdings", {})) + len(st.session_state.get("s_shorts", {}))
+    exposure_now = _current_gross_exposure()
+    auto_order_floor, slot_budget_now, remaining_slots_now = _auto_filters_from_budget_slots(
+        total_capital=total_capital,
+        cash_now=float(st.session_state.get("s_cash", total_capital)),
+        current_exposure=exposure_now,
+        current_open_positions=open_positions_now,
+        max_open_positions=max_open_positions,
+        max_symbol_allocation_pct=max_symbol_allocation_pct,
+        max_total_deployment_pct=max_total_deployment_pct,
+        max_qty_per_trade=max_qty_per_trade,
+        max_price=max_price,
+    )
+    min_order_value = float(auto_order_floor)
+    current_ui_config["min_order_value"] = float(min_order_value)
+    config_guard_messages.append(
+        "Auto-set filters from budget/slots: "
+        f"slot budget Rs {slot_budget_now:,.0f}, remaining slots {remaining_slots_now}, "
+        f"min order Rs {min_order_value:,.0f}"
+    )
+
 feasible_order_cap = _max_feasible_order_value(
     total_capital=total_capital,
     cash_now=float(st.session_state.get("s_cash", total_capital)),
@@ -1898,35 +2610,35 @@ if float(min_order_value) > feasible_order_cap + 1e-9:
         f"Capped min order value to feasible max: Rs {float(min_order_value):,.0f}"
     )
 
-feasible_expected_cap = _max_feasible_expected_profit(
-    total_capital=total_capital,
-    cash_now=float(st.session_state.get("s_cash", total_capital)),
-    max_symbol_allocation_pct=max_symbol_allocation_pct,
-    max_total_deployment_pct=max_total_deployment_pct,
-    max_qty_per_trade=max_qty_per_trade,
-    max_price=max_price,
-    tp_pct=tp_pct,
-)
-if float(min_expected_profit_per_trade) > feasible_expected_cap + 1e-9:
-    min_expected_profit_per_trade = float(feasible_expected_cap)
-    current_ui_config["min_expected_profit_per_trade"] = float(
-        min_expected_profit_per_trade)
-    config_guard_messages.append(
-        f"Capped min expected profit/trade to feasible max: Rs {float(min_expected_profit_per_trade):,.0f}"
-    )
-
 if config_guard_messages:
     st.session_state.s_ui_config = current_ui_config
     _save_state()
 
 if reset_btn:
-    if STATE_FILE.exists():
-        STATE_FILE.unlink(missing_ok=True)
+    state_file = _state_file()
+    if state_file.exists():
+        state_file.unlink(missing_ok=True)
     st.session_state.clear()
     st.rerun()
 
+# Shuffle the watchlist daily so the scan pool rotates across days.
+# Same seed within a day means the order is stable for the whole session.
+_day_seed = int(market_now().strftime("%Y%m%d"))
+_shuffled_wl = list(watchlist)
+_rng_mod.Random(_day_seed).shuffle(_shuffled_wl)
+# Always ensure any currently open positions are included in the scan
+# so their exit signals are never missed.
+_open_syms = list(st.session_state.get("s_holdings", {}).keys()) + \
+    list(st.session_state.get("s_shorts", {}).keys())
+for _s in _open_syms:
+    if _s in _shuffled_wl:
+        _shuffled_wl.remove(_s)
+        _shuffled_wl.insert(0, _s)
+_n = max(5, min(int(scan_symbol_count), len(_shuffled_wl)))
+active_watchlist = _shuffled_wl[:_n]
+
 buy_df, sell_df, sell_exit_df, scan_errors = _rank_signals(
-    WATCHLIST,
+    active_watchlist,
     min_price=min_price,
     max_price=max_price,
     risk_pct=risk_pct,
@@ -1937,7 +2649,7 @@ buy_df, sell_df, sell_exit_df, scan_errors = _rank_signals(
     max_qty_per_trade=max_qty_per_trade,
     max_open_positions=max_open_positions,
     min_order_value=min_order_value,
-    min_expected_profit_per_trade=min_expected_profit_per_trade,
+    max_trade_invest_pct=max_trade_invest_pct,
 )
 
 learning_memory = _update_learning_memory()
@@ -1950,7 +2662,6 @@ agent_plan = _agent_tuning_plan(
     base_tp_pct=tp_pct,
     base_idle_buy_fallback_minutes=idle_buy_fallback_minutes,
     base_reentry_cooldown_minutes=reentry_cooldown_minutes,
-    base_min_expected_profit_per_trade=min_expected_profit_per_trade,
     learning_memory=learning_memory,
     market_research=market_research,
 )
@@ -1969,7 +2680,6 @@ if enable_learning_agent:
         old_tp_pct = float(tp_pct)
         old_idle_fallback = int(idle_buy_fallback_minutes)
         old_reentry_cooldown = int(reentry_cooldown_minutes)
-        old_min_expected = float(min_expected_profit_per_trade)
 
         min_buy_score = float(effective_min_buy_score)
         min_short_score = float(effective_min_short_score)
@@ -1982,23 +2692,6 @@ if enable_learning_agent:
             agent_plan.get("suggested_reentry_cooldown_minutes",
                            reentry_cooldown_minutes)
         )
-        suggested_min_expected_profit = float(
-            agent_plan.get("suggested_min_expected_profit_per_trade",
-                           min_expected_profit_per_trade)
-        )
-        feasible_expected_profit_cap = _max_feasible_expected_profit(
-            total_capital=total_capital,
-            cash_now=float(st.session_state.get("s_cash", total_capital)),
-            max_symbol_allocation_pct=max_symbol_allocation_pct,
-            max_total_deployment_pct=max_total_deployment_pct,
-            max_qty_per_trade=max_qty_per_trade,
-            max_price=max_price,
-            tp_pct=tp_pct,
-        )
-        min_expected_profit_per_trade = float(min(
-            suggested_min_expected_profit,
-            feasible_expected_profit_cap,
-        ))
 
         effective_min_buy_score = float(min_buy_score)
         effective_min_short_score = float(min_short_score)
@@ -2006,7 +2699,6 @@ if enable_learning_agent:
 
         ranking_filters_changed = (
             abs(float(tp_pct) - old_tp_pct) > 1e-9
-            or abs(float(min_expected_profit_per_trade) - old_min_expected) > 1e-9
         )
 
         if abs(float(min_buy_score) - float(current_ui_config.get("min_buy_score", min_buy_score))) > 1e-9:
@@ -2029,15 +2721,6 @@ if enable_learning_agent:
             learning_apply_messages.append(
                 f"Applied re-entry cooldown: {int(reentry_cooldown_minutes)}m"
             )
-        if abs(float(min_expected_profit_per_trade) - float(current_ui_config.get("min_expected_profit_per_trade", min_expected_profit_per_trade))) > 1e-9:
-            learning_apply_messages.append(
-                f"Applied min expected profit/trade: Rs {float(min_expected_profit_per_trade):,.0f}"
-            )
-        if suggested_min_expected_profit > feasible_expected_profit_cap + 1e-9:
-            learning_apply_messages.append(
-                f"Capped min expected profit/trade to feasible max: Rs {float(feasible_expected_profit_cap):,.0f}"
-            )
-
         current_ui_config["min_buy_score"] = float(min_buy_score)
         current_ui_config["min_short_score"] = float(min_short_score)
         current_ui_config["tp_pct_display"] = float(tp_pct * 100.0)
@@ -2045,15 +2728,13 @@ if enable_learning_agent:
             idle_buy_fallback_minutes)
         current_ui_config["reentry_cooldown_minutes"] = int(
             reentry_cooldown_minutes)
-        current_ui_config["min_expected_profit_per_trade"] = float(
-            min_expected_profit_per_trade)
         st.session_state.s_ui_config = current_ui_config
         _save_state()
 
 # Keep ranking profit filters aligned with the final TP used by strategy.
 if abs(float(effective_tp_pct) - float(tp_pct)) > 1e-9 or ranking_filters_changed:
     buy_df, sell_df, sell_exit_df, scan_errors = _rank_signals(
-        WATCHLIST,
+        active_watchlist,
         min_price=min_price,
         max_price=max_price,
         risk_pct=risk_pct,
@@ -2064,39 +2745,15 @@ if abs(float(effective_tp_pct) - float(tp_pct)) > 1e-9 or ranking_filters_change
         max_qty_per_trade=max_qty_per_trade,
         max_open_positions=max_open_positions,
         min_order_value=min_order_value,
-        min_expected_profit_per_trade=min_expected_profit_per_trade,
+        max_trade_invest_pct=max_trade_invest_pct,
     )
 
-if not buy_df.empty:
-    buy_df = buy_df.copy()
-    buy_df["symbol_bias"] = buy_df["symbol"].map(
-        lambda s: float(symbol_bias.get(str(s), 0.0))
-    )
-    buy_df["effective_buy_score"] = (
-        pd.to_numeric(buy_df["buy_score"], errors="coerce").fillna(0.0)
-        + pd.to_numeric(buy_df["symbol_bias"], errors="coerce").fillna(0.0)
-    ).round(2)
-
-if not sell_df.empty:
-    sell_df = sell_df.copy()
-    sell_df["symbol_bias"] = sell_df["symbol"].map(
-        lambda s: float(symbol_bias.get(str(s), 0.0))
-    )
-    sell_df["effective_sell_score"] = (
-        pd.to_numeric(sell_df["sell_score"], errors="coerce").fillna(0.0)
-        + pd.to_numeric(sell_df["symbol_bias"], errors="coerce").fillna(0.0)
-    ).round(2)
-
-if not sell_exit_df.empty:
-    sell_exit_df = sell_exit_df.copy()
-    sell_exit_df["symbol_bias"] = sell_exit_df["symbol"].map(
-        lambda s: float(symbol_bias.get(str(s), 0.0))
-    )
-    sell_exit_df["effective_sell_score"] = (
-        pd.to_numeric(sell_exit_df["sell_score"], errors="coerce").fillna(0.0)
-        + pd.to_numeric(sell_exit_df["symbol_bias"],
-                        errors="coerce").fillna(0.0)
-    ).round(2)
+buy_df, sell_df, sell_exit_df = _apply_effective_scores(
+    buy_df,
+    sell_df,
+    sell_exit_df,
+    symbol_bias,
+)
 
 actions: list[str] = []
 if auto_trade_on:
@@ -2122,21 +2779,24 @@ if auto_trade_on:
         daily_profit_target=daily_profit_target,
         reentry_cooldown_minutes=reentry_cooldown_minutes,
         reentry_min_move_pct=reentry_min_move_pct,
+        enable_regime_entry_gate=enable_regime_entry_gate,
+        market_regime=str(market_research.get("regime", "unknown")),
+        sl_cooldown_after_stop_minutes=sl_cooldown_after_stop_minutes,
         max_qty_per_trade=max_qty_per_trade,
-        symbols=WATCHLIST,
+        symbols=active_watchlist,
         min_price=min_price,
         max_price=max_price,
         max_symbol_allocation_pct=max_symbol_allocation_pct,
         max_total_deployment_pct=max_total_deployment_pct,
         min_order_value=min_order_value,
-        min_expected_profit_per_trade=min_expected_profit_per_trade,
         idle_buy_fallback_minutes=idle_buy_fallback_minutes,
+        max_trade_invest_pct=max_trade_invest_pct,
     )
 
     if actions:
         # Show latest Top-5 after any executed trade in this cycle.
         buy_df, sell_df, sell_exit_df, scan_errors = _rank_signals(
-            WATCHLIST,
+            active_watchlist,
             min_price=min_price,
             max_price=max_price,
             risk_pct=risk_pct,
@@ -2147,43 +2807,15 @@ if auto_trade_on:
             max_qty_per_trade=max_qty_per_trade,
             max_open_positions=max_open_positions,
             min_order_value=min_order_value,
-            min_expected_profit_per_trade=min_expected_profit_per_trade,
+            max_trade_invest_pct=max_trade_invest_pct,
         )
 
-        if not buy_df.empty:
-            buy_df = buy_df.copy()
-            buy_df["symbol_bias"] = buy_df["symbol"].map(
-                lambda s: float(symbol_bias.get(str(s), 0.0))
-            )
-            buy_df["effective_buy_score"] = (
-                pd.to_numeric(buy_df["buy_score"], errors="coerce").fillna(0.0)
-                + pd.to_numeric(buy_df["symbol_bias"],
-                                errors="coerce").fillna(0.0)
-            ).round(2)
-
-        if not sell_df.empty:
-            sell_df = sell_df.copy()
-            sell_df["symbol_bias"] = sell_df["symbol"].map(
-                lambda s: float(symbol_bias.get(str(s), 0.0))
-            )
-            sell_df["effective_sell_score"] = (
-                pd.to_numeric(sell_df["sell_score"],
-                              errors="coerce").fillna(0.0)
-                + pd.to_numeric(sell_df["symbol_bias"],
-                                errors="coerce").fillna(0.0)
-            ).round(2)
-
-        if not sell_exit_df.empty:
-            sell_exit_df = sell_exit_df.copy()
-            sell_exit_df["symbol_bias"] = sell_exit_df["symbol"].map(
-                lambda s: float(symbol_bias.get(str(s), 0.0))
-            )
-            sell_exit_df["effective_sell_score"] = (
-                pd.to_numeric(sell_exit_df["sell_score"],
-                              errors="coerce").fillna(0.0)
-                + pd.to_numeric(sell_exit_df["symbol_bias"],
-                                errors="coerce").fillna(0.0)
-            ).round(2)
+        buy_df, sell_df, sell_exit_df = _apply_effective_scores(
+            buy_df,
+            sell_df,
+            sell_exit_df,
+            symbol_bias,
+        )
 
 if topup_small_positions_btn:
     topup_actions = _top_up_small_holdings(
@@ -2227,21 +2859,14 @@ if _should_run_optimizer:
     else:
         st.session_state.s_optimizer_error = _optimizer_err
 
-holdings_df, unrealized, invested_capital = _portfolio_view()
-realized = float(st.session_state.s_realized)
-charges = float(st.session_state.s_charges)
-cash = float(st.session_state.s_cash)
-equity = cash + invested_capital + unrealized
+# Display portfolio metrics with auto price refresh every page load/refresh
+_quick_portfolio_metrics()
 
-today = ist_now().strftime("%Y-%m-%d")
-today_realized = sum(
-    float(row.get("realized_delta", 0.0))
-    for row in st.session_state.s_log
-    if str(row.get("ts", "")).startswith(today)
-)
+# Get holdings dataframe for the Open Positions section below
+holdings_df, _, _ = _portfolio_view()
 
-# Yesterday's PnL from history CSV
-_yesterday = (ist_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+# Yesterday's PnL from history CSV (for sidebar display if needed)
+_yesterday = (market_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 _daily_hist_file = Path("outputs") / "daily_pnl_history.csv"
 yesterday_net = None
 if _daily_hist_file.exists():
@@ -2252,24 +2877,6 @@ if _daily_hist_file.exists():
             yesterday_net = float(_row.iloc[-1]["net_pnl"])
     except Exception:
         pass
-
-daily_pnl = today_realized + unrealized
-
-a, b, c, d, e, f = st.columns(6)
-a.metric("Start Capital", f"Rs {st.session_state.s_start:,.2f}")
-b.metric("Current Equity", f"Rs {equity:,.2f}",
-         delta=f"Rs {(equity - st.session_state.s_start):,.2f}")
-c.metric("Cash", f"Rs {cash:,.2f}")
-d.metric("Open PnL", f"Rs {unrealized:,.2f}")
-e.metric("Realized PnL", f"Rs {realized:,.2f}")
-f.metric("Total Charges", f"Rs {charges:,.2f}",
-         delta=f"Net Rs {(realized - charges):,.2f}", delta_color="inverse")
-
-progress = (daily_pnl / daily_profit_target) * \
-    100.0 if daily_profit_target > 0 else 0.0
-_yest_str = f"  |  Yesterday: Rs {yesterday_net:,.2f}" if yesterday_net is not None else ""
-st.progress(min(1.0, max(0.0, progress / 100.0)),
-            text=f"Today: Rs {daily_pnl:,.2f} / Rs {daily_profit_target:,.2f} ({progress:.1f}%){_yest_str}")
 
 with st.expander("\U0001f916 Learning Agent: Tomorrow Plan", expanded=True):
     latest_learning = agent_plan.get(
@@ -2341,13 +2948,28 @@ with st.expander("🤖 ML Market Learning", expanded=False):
                 with st.spinner("🔄 Fetching 60 days historical data + training model..."):
                     try:
                         result = train_market_learning_model(
-                            STATE_FILE, WATCHLIST, use_historical_data=True, historical_days=60)
-                        st.success(f"✅ {result.get('status', 'done')}")
+                            _state_file(), active_watchlist, use_historical_data=True, historical_days=60)
+                        status = str(result.get("status", "unknown"))
+                        reason = str(result.get("reason", "")).strip()
+                        if status == "trained":
+                            st.success("✅ trained")
+                        elif status in {"skipped", "insufficient_data"}:
+                            msg = f"⚠️ {status}"
+                            if reason:
+                                msg = f"{msg}: {reason}"
+                            st.warning(msg)
+                        else:
+                            msg = f"❌ {status}"
+                            if reason:
+                                msg = f"{msg}: {reason}"
+                            st.error(msg)
 
                         # Display detailed training info
                         st.write(f"**Training Summary:**")
                         st.write(
                             f"- Historical data samples: {result.get('historical_data_samples', 0)}")
+                        st.write(
+                            f"- Historical symbols covered: {result.get('historical_symbols_covered', 0)} / {len(active_watchlist)}")
                         st.write(
                             f"- Personal trade samples: {result.get('personal_trade_samples', 0)}")
                         st.write(
@@ -2356,10 +2978,25 @@ with st.expander("🤖 ML Market Learning", expanded=False):
                             f"- LR accuracy: {result.get('lr_accuracy', 0):.1%}")
                         st.write(
                             f"- RF accuracy: {result.get('rf_accuracy', 0):.1%}")
+                        st.write(
+                            f"- Cache hits: {result.get('historical_cache_hits', 0)}")
+                        st.write(
+                            f"- Network fetches: {result.get('historical_network_hits', 0)}")
+                        st.write(
+                            f"- NSE fallback fetches: {result.get('nse_fallback_hits', 0)}")
+                        st.write(
+                            f"- NSE quote bootstrap: {result.get('nse_quote_fallback_hits', 0)}")
+                        if result.get("historical_warning"):
+                            st.caption(
+                                f"- Warning: {result.get('historical_warning')}")
+                        if result.get("label_rebalanced"):
+                            st.caption(
+                                "- Note: Labels were rebalanced from momentum ranks due single-class historical labels")
                         st.write(f"- Note: {result.get('training_note', '')}")
                     except Exception as e:
                         st.error(f"Training failed: {e}")
 
+    show_ml_scores_table = False
     with col2:
         current_ml_enabled = st.session_state.s_ui_config.get(
             "enable_ml_scoring", False) if isinstance(st.session_state.s_ui_config, dict) else False
@@ -2371,15 +3008,27 @@ with st.expander("🤖 ML Market Learning", expanded=False):
         if enable_ml_scoring != current_ml_enabled:
             st.session_state.s_ui_config["enable_ml_scoring"] = enable_ml_scoring
             _save_state()
+        show_ml_scores_table = st.checkbox(
+            "Render ML score table (slower)",
+            value=False,
+            help="Computes per-symbol ML scores and may slow page load on large scan sizes.",
+        )
 
-    if get_symbol_quality_score is not None and st.session_state.s_ui_config.get("enable_ml_scoring", False):
+    if (
+        get_symbol_quality_score is not None
+        and st.session_state.s_ui_config.get("enable_ml_scoring", False)
+        and show_ml_scores_table
+    ):
         st.subheader("Symbol ML Quality Scores")
-        scores: dict[str, float] = {}
-        try:
-            for sym in WATCHLIST:
-                scores[sym] = get_symbol_quality_score(sym, STATE_FILE)
-        except Exception:
-            pass
+        state_file = _state_file()
+        state_mtime = float(
+            state_file.stat().st_mtime) if state_file.exists() else 0.0
+        model_file = resolve_learning_model_path(
+            state_file) if resolve_learning_model_path is not None else Path("outputs") / "market_learning_model.pkl"
+        model_mtime = float(
+            model_file.stat().st_mtime) if model_file.exists() else 0.0
+        scores = _batch_ml_scores_cached(
+            tuple(active_watchlist), state_mtime, model_mtime)
 
         if scores:
             score_df = pd.DataFrame(
@@ -2400,7 +3049,26 @@ if clean_export_err:
     st.warning(clean_export_err)
 else:
     st.caption(
-        f"Clean closed trades exported: {clean_closed_trade_count} -> {CLEAN_CLOSED_TRADES_FILE}")
+        f"Clean closed trades exported: {clean_closed_trade_count} -> {_clean_closed_trades_file()}")
+
+best_action = _best_ai_action(
+    buy_df=buy_df,
+    sell_df=sell_df,
+    sell_exit_df=sell_exit_df,
+    market_research=market_research,
+    min_buy_score=effective_min_buy_score,
+    min_short_score=effective_min_short_score,
+    min_sell_score=min_sell_score,
+    enable_short_selling=enable_short_selling,
+    enable_regime_entry_gate=enable_regime_entry_gate,
+)
+
+with st.expander("AI Best Next Action", expanded=True):
+    st.write(
+        f"Recommendation: {best_action.get('action', 'HOLD')} {best_action.get('symbol', '-')}")
+    st.write(
+        f"Confidence: {float(best_action.get('confidence', 0.0)):.1f}% | Regime: {market_research.get('regime', 'unknown')}")
+    st.caption(str(best_action.get("reason", "")))
 
 optimizer_error = st.session_state.get("s_optimizer_error")
 if optimizer_error:
@@ -2440,6 +3108,8 @@ with c1:
             "rank_symbol_headroom",
             "rank_deployment_headroom",
             "buy_score",
+            "research_buy_score",
+            "research_tag",
             "effective_buy_score",
             "buy_signal",
             "pchange",
@@ -2471,6 +3141,8 @@ with c2:
             "rank_symbol_headroom",
             "rank_deployment_headroom",
             "sell_score",
+            "research_sell_score",
+            "research_tag",
             "effective_sell_score",
             "sell_signal",
             "pchange",

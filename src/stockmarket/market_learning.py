@@ -9,6 +9,7 @@ import json
 import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,12 @@ try:
     from nsepython import nsefetch
 except Exception:
     nsefetch = None
+
+try:
+    from nsepython import equity_history, quote_equity
+except Exception:
+    equity_history = None
+    quote_equity = None
 
 try:
     import yfinance as yf
@@ -37,25 +44,68 @@ except Exception:
 class MarketDataFetcher:
     """Fetch historical market data for symbols."""
 
+    _HIST_COLS = [
+        "symbol",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "pchange",
+        "atr",
+        "rsi",
+        "vwap",
+    ]
+
+    @staticmethod
+    def _is_nse_symbol(symbol: str) -> bool:
+        return str(symbol).upper().endswith(".NS")
+
+    @staticmethod
+    def _yf_symbol(symbol: str) -> str:
+        return str(symbol).upper() if "." in str(symbol) else str(symbol).upper()
+
     @staticmethod
     def fetch_daily_ohlcv(symbol: str, days: int = 60) -> pd.DataFrame | None:
         """Fetch last N days of daily OHLCV. Simulated for now."""
         # In production, use yfinance or NSE API; for now, return mock data
         # Real implementation would call actual market data API
         try:
-            if nsefetch is None:
-                return None
-            q = nsefetch(
-                f"https://www.nseindia.com/api/quote-equity?symbol={symbol.split('.')[0]}"
-            )
-            pi = q.get("priceInfo", {})
-            p = float(pi.get("lastPrice") or 0)
-            vwap = float(pi.get("vwap") or 0)
-            hol = pi.get("intraDayHighLow", {}) or {}
-            high = float(hol.get("max") or 0)
-            low = float(hol.get("min") or 0)
-            vol = float(pi.get("totalTradedVolume") or 0)
-            pch = float(pi.get("pChange") or 0)
+            if MarketDataFetcher._is_nse_symbol(symbol):
+                if nsefetch is None:
+                    return None
+                q = nsefetch(
+                    f"https://www.nseindia.com/api/quote-equity?symbol={symbol.split('.')[0]}"
+                )
+                pi = q.get("priceInfo", {})
+                p = float(pi.get("lastPrice") or 0)
+                vwap = float(pi.get("vwap") or 0)
+                hol = pi.get("intraDayHighLow", {}) or {}
+                high = float(hol.get("max") or 0)
+                low = float(hol.get("min") or 0)
+                vol = float(pi.get("totalTradedVolume") or 0)
+                pch = float(pi.get("pChange") or 0)
+            else:
+                if not YF_AVAILABLE:
+                    return None
+                ticker = yf.Ticker(MarketDataFetcher._yf_symbol(symbol))
+                history_days = max(5, int(days))
+                hist = ticker.history(period=f"{history_days}d")
+                if hist is None or hist.empty:
+                    return None
+                latest = hist.tail(2)
+                row = latest.iloc[-1]
+                prev_close = float(
+                    latest.iloc[-2]["Close"]) if len(latest) > 1 else float(row.get("Close") or 0.0)
+                p = float(row.get("Close") or 0.0)
+                high = float(row.get("High") or p)
+                low = float(row.get("Low") or p)
+                vol = float(row.get("Volume") or 0.0)
+                pch = ((p - prev_close) / max(prev_close, 1e-6)
+                       * 100.0) if prev_close > 0 else 0.0
+                vwap = (float(row.get("Open") or p) + high +
+                        low + p) / 4.0 if p > 0 else 0.0
 
             # Compute simple indicators
             atr = (high - low) if high > low else 0.0
@@ -109,68 +159,291 @@ class MarketDataFetcher:
         }
 
     @staticmethod
-    def fetch_historical_ohlcv(symbols: list[str], days: int = 60, cache_dir: Path | None = None) -> pd.DataFrame:
-        """Fetch historical OHLCV data from yfinance (NSE stocks)."""
-        if not YF_AVAILABLE:
-            return pd.DataFrame()
+    def fetch_historical_ohlcv(
+        symbols: list[str],
+        days: int = 60,
+        cache_dir: Path | None = None,
+        return_meta: bool = False,
+    ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
+        """Fetch historical OHLCV data using cache-first strategy with yfinance fallback."""
 
         cache_dir = cache_dir or Path("outputs") / "market_data_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         all_data = []
+        meta: dict[str, Any] = {
+            "cache_hits": 0,
+            "network_hits": 0,
+            "nse_fallback_hits": 0,
+            "nse_quote_fallback_hits": 0,
+            "failed_symbols": [],
+            "errors": {},
+            "rate_limited": False,
+        }
         for sym in symbols:
             cache_file = cache_dir / f"{sym.replace('.', '_')}_history.csv"
 
-            # Try to load from cache first
-            if cache_file.exists():
-                try:
-                    cached_df = pd.read_csv(cache_file)
-                    cached_df["date"] = pd.to_datetime(cached_df["date"])
-                    all_data.append(cached_df)
-                    continue
-                except Exception:
-                    pass
+            cached_df = MarketDataFetcher._load_cached_history(cache_file)
+            if cached_df is not None and not cached_df.empty:
+                all_data.append(cached_df)
+                meta["cache_hits"] += 1
+                continue
 
-            # Fetch from yfinance
+            if not YF_AVAILABLE:
+                meta["failed_symbols"].append(sym)
+                meta["errors"][sym] = "yfinance not installed"
+                continue
+
+            fetched_df, fetch_error = MarketDataFetcher._fetch_history_with_retry(
+                symbol=sym,
+                days=days,
+                max_attempts=4,
+                base_backoff_seconds=1.5,
+            )
+            if fetched_df is None or fetched_df.empty:
+                # Yahoo failed: try NSE historical fallback.
+                nse_df, nse_error = MarketDataFetcher._fetch_nse_history_with_retry(
+                    symbol=sym,
+                    days=days,
+                    max_attempts=3,
+                    base_backoff_seconds=1.0,
+                )
+                if nse_df is not None and not nse_df.empty:
+                    fetched_df = nse_df
+                    meta["nse_fallback_hits"] += 1
+                else:
+                    # Final fallback: synthesize a short bootstrap series from NSE quote snapshot.
+                    quote_df = MarketDataFetcher._fallback_from_nse_quote(sym)
+                    if quote_df is not None and not quote_df.empty:
+                        fetched_df = quote_df
+                        meta["nse_quote_fallback_hits"] += 1
+                    else:
+                        meta["failed_symbols"].append(sym)
+                        if fetch_error:
+                            meta["errors"][sym] = fetch_error
+                            if "rate limit" in fetch_error.lower() or "too many requests" in fetch_error.lower():
+                                meta["rate_limited"] = True
+                        if nse_error and sym not in meta["errors"]:
+                            meta["errors"][sym] = nse_error
+                        continue
+
             try:
-                ticker_symbol = sym.split(".")[0] if "." in sym else sym
-                ticker = yf.Ticker(f"{ticker_symbol}.NS")
-                hist = ticker.history(period=f"{days}d")
-
-                if hist.empty:
-                    continue
-
-                hist = hist.reset_index()
-                hist.columns = ["date", "open", "high", "low",
-                                "close", "volume", "dividends", "stock_splits"]
-                hist["symbol"] = sym
-                hist["pchange"] = ((hist["close"] - hist["close"].shift(1)) /
-                                   hist["close"].shift(1) * 100.0).fillna(0.0)
-                hist["atr"] = (hist["high"] - hist["low"]).rolling(
-                    window=5).mean().fillna(hist["high"] - hist["low"])
-                hist["rsi"] = MarketDataFetcher._compute_rsi(
-                    hist["close"], period=14)
-                hist["vwap"] = (hist["close"] * hist["volume"]).rolling(
-                    window=20).sum() / hist["volume"].rolling(window=20).sum()
-                hist["vwap"] = hist["vwap"].fillna(hist["close"])
-
-                # Keep only relevant columns
-                hist = hist[["symbol", "date", "open", "high", "low",
-                             "close", "volume", "pchange", "atr", "rsi", "vwap"]]
-
-                # Cache the result
-                try:
-                    hist.to_csv(cache_file, index=False)
-                except Exception:
-                    pass
-
-                all_data.append(hist)
+                fetched_df.to_csv(cache_file, index=False)
             except Exception:
                 pass
 
+            all_data.append(fetched_df)
+            meta["network_hits"] += 1
+
         if all_data:
-            return pd.concat(all_data, ignore_index=True)
+            merged = pd.concat(all_data, ignore_index=True)
+            if return_meta:
+                return merged, meta
+            return merged
+
+        if return_meta:
+            return pd.DataFrame(), meta
         return pd.DataFrame()
+
+    @staticmethod
+    def _load_cached_history(cache_file: Path) -> pd.DataFrame | None:
+        if not cache_file.exists():
+            return None
+        try:
+            cached_df = pd.read_csv(cache_file)
+            if cached_df.empty:
+                return None
+            if "date" in cached_df.columns:
+                cached_df["date"] = pd.to_datetime(
+                    cached_df["date"], errors="coerce")
+            for col in MarketDataFetcher._HIST_COLS:
+                if col not in cached_df.columns:
+                    return None
+            cached_df = cached_df[MarketDataFetcher._HIST_COLS].dropna(subset=[
+                                                                       "close"])
+            return cached_df if not cached_df.empty else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fetch_history_with_retry(
+        symbol: str,
+        days: int,
+        max_attempts: int = 3,
+        base_backoff_seconds: float = 1.0,
+    ) -> tuple[pd.DataFrame | None, str | None]:
+        ticker_symbol = MarketDataFetcher._yf_symbol(symbol)
+        last_error: str | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                ticker = yf.Ticker(ticker_symbol)
+                hist = ticker.history(period=f"{days}d")
+                if hist is None or hist.empty:
+                    last_error = "empty response"
+                else:
+                    prepared = MarketDataFetcher._prepare_history_df(
+                        symbol, hist)
+                    if not prepared.empty:
+                        return prepared, None
+                    last_error = "prepared history is empty"
+            except Exception as exc:
+                last_error = str(exc)
+
+            if attempt < max_attempts - 1:
+                sleep_for = base_backoff_seconds * (2 ** attempt)
+                time.sleep(sleep_for)
+
+        return None, last_error
+
+    @staticmethod
+    def _prepare_history_df(symbol: str, hist: pd.DataFrame) -> pd.DataFrame:
+        hist = hist.reset_index()
+        hist.columns = [
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "dividends",
+            "stock_splits",
+        ]
+        hist["symbol"] = symbol
+        hist["pchange"] = (
+            (hist["close"] - hist["close"].shift(1))
+            / hist["close"].shift(1)
+            * 100.0
+        ).fillna(0.0)
+        hist["atr"] = (hist["high"] - hist["low"]).rolling(window=5).mean().fillna(
+            hist["high"] - hist["low"]
+        )
+        hist["rsi"] = MarketDataFetcher._compute_rsi(hist["close"], period=14)
+        hist["vwap"] = (
+            (hist["close"] * hist["volume"]).rolling(window=20).sum()
+            / hist["volume"].rolling(window=20).sum()
+        )
+        hist["vwap"] = hist["vwap"].fillna(hist["close"])
+        hist = hist[MarketDataFetcher._HIST_COLS]
+        return hist
+
+    @staticmethod
+    def _fetch_nse_history_with_retry(
+        symbol: str,
+        days: int,
+        max_attempts: int = 3,
+        base_backoff_seconds: float = 1.0,
+    ) -> tuple[pd.DataFrame | None, str | None]:
+        if equity_history is None:
+            return None, "nsepython equity_history unavailable"
+
+        ticker_symbol = symbol.split(".")[0] if "." in symbol else symbol
+        start_date = (datetime.now() - timedelta(days=days + 10)
+                      ).strftime("%d-%m-%Y")
+        end_date = datetime.now().strftime("%d-%m-%Y")
+        last_error: str | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                hist = equity_history(
+                    ticker_symbol, "EQ", start_date, end_date)
+                if hist is None or len(hist) == 0:
+                    last_error = "NSE history empty"
+                else:
+                    prepared = MarketDataFetcher._prepare_nse_history_df(
+                        symbol, hist)
+                    if prepared is not None and not prepared.empty:
+                        return prepared, None
+                    last_error = "NSE history parse failed"
+            except Exception as exc:
+                last_error = str(exc)
+
+            if attempt < max_attempts - 1:
+                time.sleep(base_backoff_seconds * (2 ** attempt))
+
+        return None, last_error
+
+    @staticmethod
+    def _prepare_nse_history_df(symbol: str, hist: pd.DataFrame) -> pd.DataFrame | None:
+        try:
+            df = hist.copy()
+            colmap = {
+                "CH_TIMESTAMP": "date",
+                "CH_OPENING_PRICE": "open",
+                "CH_TRADE_HIGH_PRICE": "high",
+                "CH_TRADE_LOW_PRICE": "low",
+                "CH_CLOSING_PRICE": "close",
+                "CH_TOT_TRADED_QTY": "volume",
+            }
+            missing = [c for c in colmap if c not in df.columns]
+            if missing:
+                return None
+            df = df.rename(columns=colmap)
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            for c in ["open", "high", "low", "close", "volume"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df = df.dropna(subset=["date", "close"]).sort_values("date")
+            if df.empty:
+                return None
+            df["symbol"] = symbol
+            df["pchange"] = (
+                (df["close"] - df["close"].shift(1)) /
+                df["close"].shift(1) * 100.0
+            ).fillna(0.0)
+            df["atr"] = (df["high"] - df["low"]
+                         ).rolling(window=5).mean().fillna(df["high"] - df["low"])
+            df["rsi"] = MarketDataFetcher._compute_rsi(df["close"], period=14)
+            df["vwap"] = (
+                (df["close"] * df["volume"]).rolling(window=20).sum()
+                / df["volume"].rolling(window=20).sum()
+            ).fillna(df["close"])
+            return df[MarketDataFetcher._HIST_COLS]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fallback_from_nse_quote(symbol: str) -> pd.DataFrame | None:
+        if quote_equity is None:
+            return None
+        try:
+            ticker_symbol = symbol.split(".")[0] if "." in symbol else symbol
+            q = quote_equity(ticker_symbol)
+            pi = (q or {}).get("priceInfo", {})
+            p = float(pi.get("lastPrice") or 0.0)
+            high = float(((pi.get("intraDayHighLow") or {}).get("max")) or p)
+            low = float(((pi.get("intraDayHighLow") or {}).get("min")) or p)
+            vol = float(pi.get("totalTradedVolume") or 0.0)
+            pch = float(pi.get("pChange") or 0.0)
+            if p <= 0:
+                return None
+
+            # Build a tiny synthetic series to bootstrap feature extraction when all APIs are blocked.
+            rows = []
+            for i in range(6, 0, -1):
+                dt = datetime.now() - timedelta(days=i)
+                drift = (pch / 100.0) * (1.0 - i / 10.0)
+                close_i = max(0.01, p * (1.0 - drift))
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "date": dt,
+                        "open": close_i,
+                        "high": max(close_i, high),
+                        "low": min(close_i, low),
+                        "close": close_i,
+                        "volume": max(vol, 1.0),
+                    }
+                )
+            df = pd.DataFrame(rows)
+            df["pchange"] = ((df["close"] - df["close"].shift(1)) /
+                             df["close"].shift(1) * 100.0).fillna(0.0)
+            df["atr"] = (df["high"] - df["low"]
+                         ).rolling(window=3).mean().fillna(df["high"] - df["low"])
+            df["rsi"] = MarketDataFetcher._compute_rsi(df["close"], period=6)
+            df["vwap"] = df["close"]
+            return df[MarketDataFetcher._HIST_COLS]
+        except Exception:
+            return None
 
     @staticmethod
     def _compute_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -331,6 +604,8 @@ class MarketLearningModel:
         """Train model on symbol features and quality labels (1=good, 0=bad)."""
         if not SK_AVAILABLE or len(symbol_data) < 5:
             return {"status": "skipped", "reason": "insufficient data or sklearn unavailable"}
+        if len(set(int(x) for x in labels)) < 2:
+            return {"status": "skipped", "reason": "insufficient label diversity (single class)"}
 
         try:
             X = np.array(
@@ -414,6 +689,19 @@ class MarketLearningModel:
             pass
 
 
+def resolve_learning_model_path(state_file: Path) -> Path:
+    """Map each trade state file to its own persisted ML model file."""
+    stem = state_file.stem
+    if stem == "simple_paper_state":
+        model_name = "market_learning_model.pkl"
+    elif stem.startswith("simple_paper_state"):
+        suffix = stem[len("simple_paper_state"):]
+        model_name = f"market_learning_model{suffix}.pkl"
+    else:
+        model_name = f"{stem}_market_learning_model.pkl"
+    return state_file.with_name(model_name)
+
+
 def train_market_learning_model(
     state_file: Path,
     watchlist: list[str],
@@ -433,51 +721,96 @@ def train_market_learning_model(
     symbol_data = []
     labels = []
     training_samples = 0
+    historical_symbols_covered = 0
+    forward_return_threshold_pct = 0.35
+    label_rebalanced = False
+    hist_meta: dict[str, Any] = {
+        "cache_hits": 0,
+        "network_hits": 0,
+        "nse_fallback_hits": 0,
+        "nse_quote_fallback_hits": 0,
+        "failed_symbols": [],
+        "errors": {},
+        "rate_limited": False,
+    }
+
+    trade_stats = PersonalTradeAnalyzer.analyze_trades(state_file)
 
     # Phase 1: Train on historical OHLCV (if available)
-    if use_historical_data and YF_AVAILABLE:
+    if use_historical_data:
         try:
-            hist_df = MarketDataFetcher.fetch_historical_ohlcv(
-                watchlist, days=historical_days, cache_dir=Path(
-                    "outputs") / "market_data_cache"
+            hist_df, hist_meta = MarketDataFetcher.fetch_historical_ohlcv(
+                watchlist,
+                days=historical_days,
+                cache_dir=Path("outputs") / "market_data_cache",
+                return_meta=True,
             )
             if not hist_df.empty:
+                hist_df = hist_df.copy()
+                hist_df["date"] = pd.to_datetime(
+                    hist_df["date"], errors="coerce")
+                hist_df = hist_df.dropna(
+                    subset=["date", "close"]).sort_values(["symbol", "date"])
                 for sym in watchlist:
-                    sym_hist = hist_df[hist_df["symbol"] == sym]
-                    if len(sym_hist) >= 5:
-                        # Use recent price action as proxy for quality
-                        recent_avg_pchange = float(
-                            sym_hist["pchange"].tail(10).mean())
-                        volatility = float(
-                            sym_hist["atr"].mean() / sym_hist["close"].mean() * 100.0)
-                        momentum = float(sym_hist["pchange"].iloc[-1])
-                        rsi = float(sym_hist["rsi"].iloc[-1])
-                        trend_score = 1.0 if momentum > 0 else 0.0
+                    sym_hist = hist_df[hist_df["symbol"] ==
+                                       sym].copy().reset_index(drop=True)
+                    if len(sym_hist) < 6:
+                        continue
+
+                    historical_symbols_covered += 1
+                    close = pd.to_numeric(sym_hist["close"], errors="coerce")
+                    next_return_pct = (
+                        (close.shift(-1) - close) / close * 100.0)
+                    sym_trade = trade_stats.get(sym, {})
+                    base_win_rate = float(sym_trade.get(
+                        "win_rate", 0.5)) if sym_trade else 0.5
+                    base_total_trades = float(sym_trade.get(
+                        "total_trades", 0.0)) if sym_trade else 0.0
+                    base_total_pnl = float(sym_trade.get(
+                        "total_pnl", 0.0)) if sym_trade else 0.0
+                    base_avg_win = float(sym_trade.get(
+                        "avg_win", 0.0)) if sym_trade else 0.0
+                    base_avg_loss = float(sym_trade.get(
+                        "avg_loss", 0.0)) if sym_trade else 0.0
+
+                    for i in range(0, len(sym_hist) - 1):
+                        row = sym_hist.iloc[i]
+                        price = float(row.get("close", 0.0) or 0.0)
+                        if price <= 0:
+                            continue
+
+                        momentum = float(row.get("pchange", 0.0) or 0.0)
+                        atr = float(row.get("atr", 0.0) or 0.0)
+                        rsi = float(row.get("rsi", 50.0) or 50.0)
+                        volatility = (atr / max(price, 1e-6)) * 100.0
+                        trend_score = 1.0 if momentum > 0 else (
+                            -1.0 if momentum < 0 else 0.0)
 
                         features = {
-                            "volatility": volatility,
-                            "momentum": momentum,
-                            "trend": trend_score,
-                            "strength": min(1.0, abs(momentum) / 5.0),
-                            "rsi": rsi,
+                            "volatility": float(volatility),
+                            "momentum": float(momentum),
+                            "trend": float(trend_score),
+                            "strength": float(min(1.0, abs(momentum) / 5.0)),
+                            "rsi": float(rsi),
                             "sentiment": 0.0,
-                            "win_rate": 0.5,  # Neutral for historical data
-                            "total_trades": 0.0,
-                            "total_pnl": 0.0,
-                            "avg_win": 0.0,
-                            "avg_loss": 0.0,
+                            "win_rate": float(base_win_rate),
+                            "total_trades": float(base_total_trades),
+                            "total_pnl": float(base_total_pnl),
+                            "avg_win": float(base_avg_win),
+                            "avg_loss": float(base_avg_loss),
                         }
 
+                        fwd = float(next_return_pct.iloc[i]) if pd.notna(
+                            next_return_pct.iloc[i]) else 0.0
+                        label = 1 if fwd >= float(
+                            forward_return_threshold_pct) else 0
                         symbol_data.append(features)
-                        # Label: positive if average uptrend + decent RSI, else negative
-                        label = 1 if recent_avg_pchange > 0.5 and 40 < rsi < 70 else 0
                         labels.append(label)
                         training_samples += 1
         except Exception as e:
             return {"status": "error", "reason": f"Historical fetch failed: {e}"}
 
     # Phase 2: Overlay with personal trade history to refine labels
-    trade_stats = PersonalTradeAnalyzer.analyze_trades(state_file)
     trade_refined_samples = 0
     for sym in watchlist:
         stats = trade_stats.get(sym, {})
@@ -493,20 +826,70 @@ def train_market_learning_model(
             labels.append(label)
             trade_refined_samples += 1
 
+    # If labels collapse into one class (common during API fallback phases),
+    # rebalance using cross-sectional momentum ranking to keep training usable.
+    if len(symbol_data) >= 10 and len(set(int(x) for x in labels)) < 2:
+        ranked_idx = sorted(
+            range(len(symbol_data)),
+            key=lambda i: float(symbol_data[i].get("momentum", 0.0) or 0.0),
+        )
+        split = max(1, len(ranked_idx) // 2)
+        rebalanced = [0] * len(ranked_idx)
+        for idx in ranked_idx[split:]:
+            rebalanced[idx] = 1
+        labels = rebalanced
+        label_rebalanced = True
+
     if len(symbol_data) < 5:
-        return {
+        short_result: dict[str, Any] = {
             "status": "insufficient_data",
             "reason": "Need at least 5 training samples",
             "collected": len(symbol_data),
         }
+        short_result["historical_data_samples"] = training_samples
+        short_result["historical_symbols_covered"] = historical_symbols_covered
+        short_result["personal_trade_samples"] = trade_refined_samples
+        short_result["total_training_samples"] = len(symbol_data)
+        short_result["historical_cache_hits"] = int(
+            hist_meta.get("cache_hits", 0))
+        short_result["historical_network_hits"] = int(
+            hist_meta.get("network_hits", 0))
+        short_result["nse_fallback_hits"] = int(
+            hist_meta.get("nse_fallback_hits", 0))
+        short_result["nse_quote_fallback_hits"] = int(
+            hist_meta.get("nse_quote_fallback_hits", 0))
+        short_result["historical_failed_symbols"] = list(
+            hist_meta.get("failed_symbols", []))
+        short_result["label_rebalanced"] = bool(label_rebalanced)
+        if hist_meta.get("rate_limited"):
+            short_result["historical_warning"] = "yfinance rate limit detected; using cache where available."
+        return short_result
 
-    model = MarketLearningModel()
+    model = MarketLearningModel(resolve_learning_model_path(state_file))
     result = model.train(symbol_data, labels)
     result["symbols_trained"] = len(watchlist)
     result["total_training_samples"] = len(symbol_data)
     result["historical_data_samples"] = training_samples
+    result["historical_symbols_covered"] = historical_symbols_covered
     result["personal_trade_samples"] = trade_refined_samples
-    result["training_note"] = f"Bootstrap: {training_samples} historical samples, refined by {trade_refined_samples} personal trades"
+    result["historical_cache_hits"] = int(hist_meta.get(
+        "cache_hits", 0)) if isinstance(hist_meta, dict) else 0
+    result["historical_network_hits"] = int(hist_meta.get(
+        "network_hits", 0)) if isinstance(hist_meta, dict) else 0
+    result["nse_fallback_hits"] = int(hist_meta.get(
+        "nse_fallback_hits", 0)) if isinstance(hist_meta, dict) else 0
+    result["nse_quote_fallback_hits"] = int(hist_meta.get(
+        "nse_quote_fallback_hits", 0)) if isinstance(hist_meta, dict) else 0
+    if isinstance(hist_meta, dict):
+        result["historical_failed_symbols"] = list(
+            hist_meta.get("failed_symbols", []))
+        if hist_meta.get("rate_limited"):
+            result["historical_warning"] = "yfinance rate limit detected; using cache where available."
+    result["label_rebalanced"] = bool(label_rebalanced)
+    result["training_note"] = (
+        f"Rolling bootstrap: {training_samples} historical rows across {historical_symbols_covered} symbols; "
+        f"refined by {trade_refined_samples} personal trade samples"
+    )
 
     return result
 
@@ -521,7 +904,7 @@ def get_symbol_quality_score(
         symbol, state_file, market_data=market_trend, sentiment=0.0
     )
 
-    model = MarketLearningModel()
+    model = MarketLearningModel(resolve_learning_model_path(state_file))
     prob = model.predict_probability(features)
 
     return min(1.0, max(0.0, prob))
