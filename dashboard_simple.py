@@ -2653,10 +2653,10 @@ with st.sidebar:
         step=1.0,
     ))
     run_optimizer_now_btn = st.button(
-        "Run Optimizer Now", use_container_width=True)
+        "Run Optimizer Now", width='stretch')
     topup_small_positions_btn = st.button(
-        "Top Up Existing Tiny Positions", use_container_width=True)
-    reset_btn = st.button("Reset Simulator", use_container_width=True)
+        "Top Up Existing Tiny Positions", width='stretch')
+    reset_btn = st.button("Reset Simulator", width='stretch')
 
 if full_auto_paper_mode:
     auto_trade_on = True
@@ -3212,7 +3212,7 @@ with st.expander("🤖 ML Market Learning", expanded=False):
                     for k, v in sorted(scores.items(), key=lambda x: x[1], reverse=True)
                 ]
             )
-            st.dataframe(score_df, use_container_width=True, hide_index=True)
+            st.dataframe(score_df, width='stretch', hide_index=True)
 
 if actions:
     with st.expander("\U0001f916 Auto-Trade Actions", expanded=True):
@@ -3299,7 +3299,7 @@ with c1:
             lambda x: f"Rs {float(x):,.0f}")
         show_buy["rank_deployment_headroom"] = show_buy["rank_deployment_headroom"].map(
             lambda x: f"Rs {float(x):,.0f}")
-        st.dataframe(show_buy, use_container_width=True, hide_index=True)
+        st.dataframe(show_buy, width='stretch', hide_index=True)
 
 with c2:
     st.subheader("\U0001f9ca Top 5 Sell Signals")
@@ -3332,7 +3332,7 @@ with c2:
             lambda x: f"Rs {float(x):,.0f}")
         show_sell["rank_deployment_headroom"] = show_sell["rank_deployment_headroom"].map(
             lambda x: f"Rs {float(x):,.0f}")
-        st.dataframe(show_sell, use_container_width=True, hide_index=True)
+        st.dataframe(show_sell, width='stretch', hide_index=True)
 
 st.subheader("\U0001f4c8 Open Positions")
 if holdings_df.empty:
@@ -3348,7 +3348,7 @@ else:
         view_h[col] = view_h[col].map(lambda x: f"Rs {float(x):.2f}")
     if "pnl_pct" in view_h.columns:
         view_h["pnl_pct"] = view_h["pnl_pct"].map(lambda x: f"{float(x):.2f}%")
-    st.dataframe(view_h, use_container_width=True, hide_index=True)
+    st.dataframe(view_h, width='stretch', hide_index=True)
 
 st.subheader("\U0001f4d2 Trade History")
 log_df = pd.DataFrame(st.session_state.s_log)
@@ -3359,7 +3359,7 @@ else:
     for col in ["price", "charges", "cash_after"]:
         if col in view_log.columns:
             view_log[col] = view_log[col].map(lambda x: f"Rs {float(x):.2f}")
-    st.dataframe(view_log, use_container_width=True, hide_index=True)
+    st.dataframe(view_log, width='stretch', hide_index=True)
 
 if scan_errors:
     with st.expander("Scan errors", expanded=False):

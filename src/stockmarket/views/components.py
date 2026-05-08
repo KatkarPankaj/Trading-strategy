@@ -155,7 +155,7 @@ def render_positions_table(positions_df: pd.DataFrame) -> None:
     if 'PnL %' in display_df.columns:
         display_df['PnL %'] = display_df['PnL %'].apply(lambda x: f"{x:+.2f}%")
     
-    st.dataframe(display_df, use_container_width=True)
+    st.dataframe(display_df, width='stretch')
 
 
 def render_trades_table(trades: List[Dict]) -> None:
@@ -177,7 +177,7 @@ def render_trades_table(trades: List[Dict]) -> None:
     display_cols = ['symbol', 'trade_type', 'qty', 'entry_price', 'exit_price', 'pnl', 'status']
     display_df = trades_df[[col for col in display_cols if col in trades_df.columns]]
     
-    st.dataframe(display_df, use_container_width=True)
+    st.dataframe(display_df, width='stretch')
 
 
 def render_app_logs(logs: List[str], title: str = "📋 Application Logs") -> None:
@@ -241,7 +241,7 @@ def render_price_chart(prices: Dict[str, float], symbols: List[str]) -> None:
     }
     prices_df = pd.DataFrame(data)
     
-    st.dataframe(prices_df, use_container_width=True)
+    st.dataframe(prices_df, width='stretch')
 
 
 def render_error_message(message: str) -> None:

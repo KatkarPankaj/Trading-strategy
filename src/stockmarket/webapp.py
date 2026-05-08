@@ -50,9 +50,9 @@ cfg = replace(cfg, symbol=symbol, interval=interval,
               period=period, market_timezone=market_timezone)
 
 col1, col2, col3 = st.columns(3)
-run_backtest_btn = col1.button("Run Backtest", use_container_width=True)
-show_signals_btn = col2.button("Show Signals", use_container_width=True)
-run_sweep_btn = col3.button("Run Sweep", use_container_width=True)
+run_backtest_btn = col1.button("Run Backtest", width='stretch')
+show_signals_btn = col2.button("Show Signals", width='stretch')
+run_sweep_btn = col3.button("Run Sweep", width='stretch')
 
 st.divider()
 
@@ -76,7 +76,7 @@ if run_backtest_btn:
         else:
             out_file = _save_csv(result.trades, "web_trades", cfg.symbol)
             st.success(f"Trades saved to {out_file}")
-            st.dataframe(result.trades, use_container_width=True)
+            st.dataframe(result.trades, width='stretch')
 
     except Exception as exc:
         st.error(f"Backtest failed: {exc}")
@@ -102,7 +102,7 @@ if show_signals_btn:
             "short_signal",
         ]
         st.subheader("Latest Signals")
-        st.dataframe(sdf[cols].tail(20), use_container_width=True)
+        st.dataframe(sdf[cols].tail(20), width='stretch')
 
     except Exception as exc:
         st.error(f"Signals failed: {exc}")
@@ -117,7 +117,7 @@ if run_sweep_btn:
     top_n = st.number_input("Top rows", min_value=1,
                             max_value=100, value=10, step=1)
 
-    if st.button("Execute Sweep", use_container_width=True):
+    if st.button("Execute Sweep", width='stretch'):
         try:
             with st.spinner("Running parameter sweep..."):
                 df = _load_data(cfg.symbol, cfg.interval,
@@ -140,7 +140,7 @@ if run_sweep_btn:
             else:
                 out_file = _save_csv(table, "web_sweep", cfg.symbol)
                 st.success(f"Sweep saved to {out_file}")
-                st.dataframe(table.head(int(top_n)), use_container_width=True)
+                st.dataframe(table.head(int(top_n)), width='stretch')
 
         except Exception as exc:
             st.error(f"Sweep failed: {exc}")

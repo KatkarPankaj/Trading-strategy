@@ -2421,9 +2421,9 @@ with st.sidebar:
                     key="scan_small_quota",
                     disabled=not bool(scan_enable_cap_quota),
                 ))
-    scan_button = st.button("Scan Top 5", use_container_width=True)
-    refresh = st.button("Refresh Selected Symbol", use_container_width=True)
-    reset_paper = st.button("Reset Dummy Portfolio", use_container_width=True)
+    scan_button = st.button("Scan Top 5", width='stretch')
+    refresh = st.button("Refresh Selected Symbol", width='stretch')
+    reset_paper = st.button("Reset Dummy Portfolio", width='stretch')
 
     st.subheader("Live Refresh")
     auto_refresh_enabled = st.checkbox("Auto refresh (NSE)", value=True)
@@ -2447,7 +2447,7 @@ with st.sidebar:
         help="Hide heavy non-essential panels by default for faster interaction.",
     )
     refresh_holdings_prices = st.button(
-        "Refresh Bought Stock Prices", use_container_width=True)
+        "Refresh Bought Stock Prices", width='stretch')
 
     st.subheader("🤖 Automated Trading")
     auto_trade_enabled = st.checkbox(
@@ -2569,7 +2569,7 @@ with st.sidebar:
         step=1000.0,
         format="%.2f",
     )
-    add_funds_btn = st.button("Add Funds", use_container_width=True)
+    add_funds_btn = st.button("Add Funds", width='stretch')
 
 cfg.symbol = symbol
 cfg.starting_capital = starting_capital_input
@@ -2769,7 +2769,7 @@ pending_order_qty = int(pm3.number_input(
 ))
 
 pm4, pm5 = st.columns(2)
-if pm4.button("Add Pending Buy", use_container_width=True, key="add_pending_buy_btn"):
+if pm4.button("Add Pending Buy", width='stretch', key="add_pending_buy_btn"):
     try:
         _add_pending_buy_order(
             pending_order_symbol,
@@ -2784,7 +2784,7 @@ if pm4.button("Add Pending Buy", use_container_width=True, key="add_pending_buy_
     except Exception as err:
         st.error(f"Could not add pending buy: {err}")
 
-if pm5.button("Arm Selected Symbol", use_container_width=True, key="arm_selected_symbol_btn"):
+if pm5.button("Arm Selected Symbol", width='stretch', key="arm_selected_symbol_btn"):
     try:
         _arm_symbol(symbol, strategy_mode)
         st.success(f"Armed {symbol} for persistent strategy watching")
@@ -2799,13 +2799,13 @@ if pending_orders:
     ]].copy()
     pending_df["target_price"] = pending_df["target_price"].map(
         lambda x: f"Rs {float(x):.2f}")
-    st.dataframe(pending_df, use_container_width=True)
+    st.dataframe(pending_df, width='stretch')
     cancel_pending_symbol = st.selectbox(
         "Cancel pending buy",
         options=[str(item["symbol"]) for item in pending_orders],
         key="cancel_pending_symbol",
     )
-    if st.button("Cancel Pending Buy", use_container_width=True, key="cancel_pending_buy_btn"):
+    if st.button("Cancel Pending Buy", width='stretch', key="cancel_pending_buy_btn"):
         _remove_pending_buy_order(cancel_pending_symbol)
         st.success(f"Canceled pending buy for {cancel_pending_symbol}")
         st.rerun()
@@ -2816,13 +2816,13 @@ armed_symbols = _armed_symbols()
 if armed_symbols:
     armed_df = pd.DataFrame(armed_symbols)[
         ["symbol", "strategy", "armed_at"]].copy()
-    st.dataframe(armed_df, use_container_width=True)
+    st.dataframe(armed_df, width='stretch')
     disarm_symbol = st.selectbox(
         "Disarm watched symbol",
         options=[str(item["symbol"]) for item in armed_symbols],
         key="disarm_symbol",
     )
-    if st.button("Disarm Symbol", use_container_width=True, key="disarm_symbol_btn"):
+    if st.button("Disarm Symbol", width='stretch', key="disarm_symbol_btn"):
         _disarm_symbol(disarm_symbol)
         st.success(f"Disarmed {disarm_symbol}")
         st.rerun()
@@ -3033,7 +3033,7 @@ else:
                     "These are not in the current Top list but historically performed better in your closed trades."
                 )
                 st.dataframe(show_suggestion_df,
-                             use_container_width=True, hide_index=True)
+                             width='stretch', hide_index=True)
 
     if scan_expansion_active:
         st.caption(
@@ -3057,7 +3057,7 @@ else:
         lambda x: f"Rs {x:.2f}")
     show_df["trigger_hit"] = show_df["trigger_hit"].map(
         {True: "READY", False: "WAIT"})
-    st.dataframe(show_df, use_container_width=True)
+    st.dataframe(show_df, width='stretch')
 
     pick_options = [
         f"{r.symbol} | Rs {r.price:.2f} | {r.action}" for r in ranked_df.itertuples(index=False)]
@@ -3145,7 +3145,7 @@ else:
         f"Estimated margin+charges needed: Rs {est_total_needed:.2f}"
     )
 
-    if st.button("Auto Buy Selected Combination", use_container_width=True, key="top5_auto_buy_btn"):
+    if st.button("Auto Buy Selected Combination", width='stretch', key="top5_auto_buy_btn"):
         if not selected_candidates:
             st.warning("No eligible triggered stocks right now for auto-buy.")
         else:
@@ -3283,7 +3283,7 @@ else:
             "Buy Now",
             key=f"top5_buy_{idx}_{row_symbol}",
             disabled=row_buy_disabled,
-            use_container_width=True,
+            width='stretch',
         ):
             try:
                 _execute_paper_order(
@@ -3305,7 +3305,7 @@ else:
             "Exit",
             key=f"top5_exit_{idx}_{row_symbol}",
             disabled=not row_exit_ready,
-            use_container_width=True,
+            width='stretch',
         ):
             try:
                 _execute_paper_order(
@@ -3421,7 +3421,7 @@ else:
         "profit_loss",
     ]:
         show_bought[c] = show_bought[c].map(lambda x: f"Rs {float(x):.2f}")
-    st.dataframe(show_bought, use_container_width=True)
+    st.dataframe(show_bought, width='stretch')
     st.caption(
         f"Total invested margin: Rs {total_invested_margin:.2f} | Total actual capital used (margin + entry charges): Rs {total_actual_capital:.2f}"
     )
@@ -3456,7 +3456,7 @@ else:
             "Exit",
             key=f"holdings_exit_{hs}",
             disabled=not holdings_exit_ready,
-            use_container_width=True,
+            width='stretch',
         ):
             try:
                 _execute_paper_order(
@@ -3506,7 +3506,7 @@ order_price = oc4.number_input(
 )
 order_note = st.text_input("Order note (optional)", value="")
 
-if st.button("Place Dummy Order", use_container_width=True):
+if st.button("Place Dummy Order", width='stretch'):
     try:
         _execute_paper_order(
             symbol=order_symbol,
@@ -3535,7 +3535,7 @@ with hc1:
         show_holdings = holdings_df.copy()
         for c in ["avg_price", "ltp", "cost_value", "market_value", "unrealized_pnl"]:
             show_holdings[c] = show_holdings[c].map(lambda x: f"Rs {x:.2f}")
-        st.dataframe(show_holdings, use_container_width=True)
+        st.dataframe(show_holdings, width='stretch')
 
 with hc2:
     st.markdown("**Dummy Trade Log**")
@@ -3550,7 +3550,7 @@ with hc2:
         for c in ["price", "value", "cash_after"]:
             show_log[c] = show_log[c].map(lambda x: f"Rs {x:.2f}")
         st.dataframe(show_log.sort_index(ascending=False),
-                     use_container_width=True)
+                     width='stretch')
 
 st.divider()
 st.subheader("History and Learning")
@@ -3615,7 +3615,7 @@ else:
                 lambda x: round(float(x), 2))
         st.markdown("**Trade Parameter Summary by Strategy**")
         st.dataframe(strat_summary.sort_values(
-            "total_pnl", ascending=False), use_container_width=True, hide_index=True)
+            "total_pnl", ascending=False), width='stretch', hide_index=True)
 
     symbol_summary = summary_df[summary_df["side"] == "SELL"].groupby("symbol", as_index=False).agg(
         trades=("side", "count"),
@@ -3629,7 +3629,7 @@ else:
                 lambda x: round(float(x), 2))
         st.markdown("**Trade Parameter Summary by Symbol**")
         st.dataframe(symbol_summary.sort_values(
-            "total_pnl", ascending=False), use_container_width=True, hide_index=True)
+            "total_pnl", ascending=False), width='stretch', hide_index=True)
 
     # Beginner-friendly explanation: pair each BUY with its corresponding SELL.
     explain_rows: list[dict[str, Any]] = []
@@ -3681,7 +3681,7 @@ else:
             show_explain[c] = show_explain[c].map(
                 lambda x: f"Rs {float(x):.2f}")
         st.dataframe(show_explain.sort_values(
-            "exit_time", ascending=False), use_container_width=True, hide_index=True)
+            "exit_time", ascending=False), width='stretch', hide_index=True)
 
     show_history = history_df.copy()
     for c in ["price", "value", "charges", "realized_pnl", "cash_after"]:
@@ -3690,7 +3690,7 @@ else:
                 float).map(lambda x: f"Rs {x:.2f}")
     st.markdown("**Order History (Persistent)**")
     st.dataframe(show_history.sort_index(
-        ascending=False), use_container_width=True)
+        ascending=False), width='stretch')
 
     if "timestamp_ist" in history_df.columns:
         daily = history_df.copy()
@@ -3715,7 +3715,7 @@ else:
 
         st.markdown("**End-of-Day PnL Summary**")
         st.dataframe(show_daily.sort_values(
-            "trade_date", ascending=False), use_container_width=True)
+            "trade_date", ascending=False), width='stretch')
 
     st.markdown("**Learning Insights**")
     for tip in _learning_summary(history_df):
@@ -3726,7 +3726,7 @@ else:
     if strat_df.empty:
         st.info("No closed trades with strategy labels yet.")
     else:
-        st.dataframe(strat_df, use_container_width=True, hide_index=True)
+        st.dataframe(strat_df, width='stretch', hide_index=True)
 
     _export_daily_pnl(history_df)
     st.caption(f"Daily PnL auto-exported to {DAILY_PNL_FILE}")
