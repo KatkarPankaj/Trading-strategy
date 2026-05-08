@@ -1,0 +1,36 @@
+{
+  "app": {
+    "name": "Trading Strategy Simulator",
+    "version": "2.0.0",
+    "description": "Budget-based paper trading simulator with automated strategies"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "max_log_entries": 100,
+    "ui_display_entries": 50
+  },
+  "streamlit": {
+    "port": 8507,
+    "host": "localhost",
+    "theme": "dark"
+  },
+  "cache": {
+    "ttl_current_day_seconds": 300,
+    "ttl_historical_seconds": 21600,
+    "directory": ".cache/market_data"
+  },
+  "api": {
+    "nse": {
+      "endpoint": "https://www.nseindia.com/api/quote-equity",
+      "timeout_seconds": 10,
+      "retry_attempts": 3,
+      "backoff_base_seconds": 2
+    },
+    "yfinance": {
+      "timeout_seconds": 10,
+      "retry_attempts": 3,
+      "backoff_base_seconds": 2
+    }
+  }
+}

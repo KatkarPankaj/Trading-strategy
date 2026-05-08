@@ -1,0 +1,19 @@
+{
+  "storage": {
+    "type": "sqlite",
+    "database_path": ".database/trading.db",
+    "file_storage_path": ".data"
+  },
+  "sqlite": {
+    "journal_mode": "WAL",
+    "timeout": 10,
+    "check_same_thread": false
+  },
+  "postgresql": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "trading_db",
+    "user": "trading_user",
+    "password": "your_password_here"
+  }
+}

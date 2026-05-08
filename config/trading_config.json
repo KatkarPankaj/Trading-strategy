@@ -1,0 +1,26 @@
+{
+  "default_trading": {
+    "starting_capital": 200000.0,
+    "max_trades_per_day": 1,
+    "max_open_positions": 3,
+    "stop_loss_pct": 0.4,
+    "take_profit_pct": 0.8,
+    "risk_per_trade_pct": 0.5,
+    "allow_short": false
+  },
+  "strategy_parameters": {
+    "opening_range_minutes": 15,
+    "time_exit_minutes": 60,
+    "volume_ma_window": 20,
+    "volume_spike_threshold": 1.2,
+    "default_interval": "5m",
+    "default_period": "30d"
+  },
+  "market_learning": {
+    "lookback_years": 2,
+    "min_samples_for_training": 100,
+    "train_test_split": 0.8,
+    "learning_rate": 0.001,
+    "neural_net_hidden_layers": [64, 32, 16]
+  }
+}

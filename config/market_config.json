@@ -1,0 +1,50 @@
+{
+  "markets": {
+    "NSE": {
+      "name": "National Stock Exchange (India)",
+      "currency": "₹",
+      "timezone": "Asia/Kolkata",
+      "market_open": "09:15",
+      "market_close": "15:30",
+      "entry_cutoff_time": "13:30",
+      "square_off_time": "15:15",
+      "watchlist": [
+        "IEX.NS", "BHEL.NS", "IRCTC.NS", "FEDERALBNK.NS", "IDFCFIRSTB.NS",
+        "AUROPHARMA.NS", "COFORGE.NS", "BSE.NS", "CDSL.NS", "TATAPOWER.NS",
+        "MOTHERSON.NS", "PERSISTENT.NS", "RELIANCE.NS", "TCS.NS", "INFY.NS",
+        "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "AXISBANK.NS", "LT.NS",
+        "ITC.NS", "HINDUNILVR.NS", "BHARTIARTL.NS", "TITAN.NS", "MARUTI.NS",
+        "BAJFINANCE.NS", "KOTAKBANK.NS", "ASIANPAINT.NS", "ULTRACEMCO.NS",
+        "HCLTECH.NS", "WIPRO.NS", "SUNPHARMA.NS", "NTPC.NS", "POWERGRID.NS",
+        "ONGC.NS", "TATASTEEL.NS", "HINDALCO.NS", "ADANIPORTS.NS", "GRASIM.NS",
+        "TECHM.NS"
+      ],
+      "intraday_charges": {
+        "commission_pct": 0.03,
+        "gst_pct": 18,
+        "stt_pct": 0.025,
+        "exchange_turnover_pct": 0.00325,
+        "clearing_house_pct": 0.0002,
+        "sebi_turnover_pct": 0.000001
+      }
+    },
+    "US": {
+      "name": "NASDAQ/NYSE (USA)",
+      "currency": "$",
+      "timezone": "America/New_York",
+      "market_open": "09:30",
+      "market_close": "16:00",
+      "entry_cutoff_time": "15:00",
+      "square_off_time": "15:45",
+      "watchlist": [
+        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
+        "NFLX", "AVGO", "JPM", "BAC", "WMT", "COST", "KO", "MCD",
+        "CRM", "ADBE", "INTC", "QCOM"
+      ],
+      "intraday_charges": {
+        "commission_pct": 0.01,
+        "slippage_pct": 0.05
+      }
+    }
+  }
+}
