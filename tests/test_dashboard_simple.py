@@ -5,6 +5,7 @@ Run with: python -m pytest tests/test_dashboard_simple.py -v
 
 import sys
 import json
+import pandas as pd
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -117,6 +118,100 @@ class TestHelperFunctions:
         charges_sell = dashboard_simple._intraday_charges("SELL", 10000.0)
         assert charges_sell > 0, "SELL charges should be positive"
         assert charges_sell < 500, "SELL charges should be reasonable"
+
+    def test_completed_trade_pairs_buy_sell(self):
+        """Test completed trade pairing and computed P&L columns."""
+        import dashboard_simple
+
+        sample_log = [
+            {
+                "ts": "2026-01-01 09:00:00",
+                "symbol": "RELIANCE",
+                "side": "BUY",
+                "qty": 10,
+                "price": 100.0,
+                "charges": 2.0,
+                "reason": "initial buy",
+                "cash_after": 1000.0,
+            },
+            {
+                "ts": "2026-01-01 10:00:00",
+                "symbol": "RELIANCE",
+                "side": "SELL",
+                "qty": 10,
+                "price": 120.0,
+                "charges": 3.0,
+                "reason": "take profit target\nsome details",
+                "cash_after": 1195.0,
+            },
+        ]
+
+        df = dashboard_simple._completed_trades_from_log(sample_log)
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 1
+
+        row = df.iloc[0]
+        assert row["symbol"] == "RELIANCE"
+        assert row["side"] == "LONG"
+        assert row["quantity"] == 10
+        assert row["buying_price"] == 100.0
+        assert row["selling_price"] == 120.0
+        assert row["charges"] == 5.0
+        assert row["total_invested"] == 1002.0
+        assert row["total_collected"] == 1197.0
+        assert row["realized_pnl"] == 195.0
+        assert row["reason"] == "take profit target"
+        assert row["cash_in_hand"] == 1195.0
+
+    def test_completed_trade_partial_exit_pnl_allocation(self):
+        """Test partial exits allocate charges proportionally across lots."""
+        import dashboard_simple
+
+        sample_log = [
+            {
+                "ts": "2026-01-01 09:00:00",
+                "symbol": "TCS",
+                "side": "BUY",
+                "qty": 10,
+                "price": 100.0,
+                "charges": 10.0,
+                "reason": "buy first lot",
+                "cash_after": 1000.0,
+            },
+            {
+                "ts": "2026-01-01 09:30:00",
+                "symbol": "TCS",
+                "side": "SELL",
+                "qty": 5,
+                "price": 130.0,
+                "charges": 5.0,
+                "reason": "partial target",
+                "cash_after": 1125.0,
+            },
+            {
+                "ts": "2026-01-01 10:00:00",
+                "symbol": "TCS",
+                "side": "SELL",
+                "qty": 5,
+                "price": 140.0,
+                "charges": 6.0,
+                "reason": "final exit",
+                "cash_after": 1335.0,
+            },
+        ]
+
+        df = dashboard_simple._completed_trades_from_log(sample_log)
+        assert len(df) == 2
+
+        ordered = df.sort_values("timestamp")
+        first, second = ordered.iloc[0], ordered.iloc[1]
+        assert first["realized_pnl"] == (130.0 - 100.0) * 5 - 5.0 - 5.0
+        assert first["total_invested"] == (5 * 100.0) + 5.0
+        assert first["total_collected"] == (5 * 130.0) - 2.5
+        assert first["reason"] == "partial target"
+        assert second["realized_pnl"] == (140.0 - 100.0) * 5 - 5.0 - 6.0
+        assert second["total_invested"] == (5 * 100.0) + 5.0
+        assert second["total_collected"] == (5 * 140.0) - 6.0
 
 
 class TestAPIConnections:

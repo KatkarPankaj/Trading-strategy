@@ -1464,6 +1464,110 @@ def _record_trade(
     _save_state()
 
 
+def _completed_trades_from_log(log_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Return completed long round-trips by FIFO matching BUY -> SELL rows."""
+    if not log_rows:
+        return pd.DataFrame()
+
+    rows = [row for row in log_rows if isinstance(row, dict)]
+    if not rows:
+        return pd.DataFrame()
+
+    open_buys: dict[str, list[dict[str, Any]]] = {}
+    completed: list[dict[str, Any]] = []
+
+    ordered = sorted(rows, key=lambda r: str(r.get("ts", "")))
+
+    for row in ordered:
+        side = str(row.get("side", "")).upper()
+        symbol = str(row.get("symbol", "")).strip()
+        if not symbol:
+            continue
+
+        qty = int(float(row.get("qty", 0.0) or 0))
+        if qty <= 0:
+            continue
+
+        price = float(row.get("price", 0.0) or 0.0)
+        total_charges = float(row.get("charges", 0.0) or 0.0)
+        ts = str(row.get("ts", ""))
+        cash_after = float(row.get("cash_after", 0.0) or 0.0)
+
+        if side == "BUY":
+            open_buys.setdefault(symbol, []).append(
+                {
+                    "qty": qty,
+                    "price": price,
+                    "charges": total_charges,
+                    "ts": ts,
+                }
+            )
+            continue
+
+        if side != "SELL":
+            continue
+
+        open_lots = open_buys.get(symbol)
+        if not open_lots:
+            continue
+
+        close_qty = qty
+        while close_qty > 0 and open_lots:
+            buy_leg = open_lots[0]
+            open_qty = int(buy_leg.get("qty", 0) or 0)
+            if open_qty <= 0:
+                open_lots.pop(0)
+                continue
+
+            matched_qty = min(close_qty, open_qty)
+            sell_qty = qty
+            if sell_qty <= 0:
+                matched_qty = 0
+
+            if matched_qty <= 0:
+                break
+
+            buy_qty = float(buy_leg.get("qty", 0.0) or 0.0)
+            buy_leg_charges = float(buy_leg.get("charges", 0.0) or 0.0)
+            buy_ratio = matched_qty / buy_qty if buy_qty > 0 else 0.0
+            sell_ratio = matched_qty / sell_qty if sell_qty > 0 else 0.0
+
+            matched_buy_charges = buy_leg_charges * buy_ratio
+            matched_sell_charges = total_charges * sell_ratio
+            pair_charges = matched_buy_charges + matched_sell_charges
+            pair_qty = float(matched_qty)
+            buy_price = float(buy_leg.get("price", 0.0) or 0.0)
+            sell_price = float(price)
+            pnl = (sell_price - buy_price) * pair_qty - pair_charges
+
+            completed.append(
+                {
+                    "timestamp": ts,
+                    "symbol": symbol,
+                    "side": "LONG",
+                    "quantity": matched_qty,
+                    "buying_price": buy_price,
+                    "selling_price": sell_price,
+                    "charges": pair_charges,
+                    "total_invested": (pair_qty * buy_price) + matched_buy_charges,
+                    "total_collected": (pair_qty * sell_price) - matched_sell_charges,
+                    "realized_pnl": pnl,
+                    "reason": str(row.get("reason", "")).strip().splitlines()[0],
+                    "cash_in_hand": cash_after,
+                }
+            )
+
+            close_qty -= matched_qty
+            buy_leg["qty"] = open_qty - matched_qty
+            if buy_leg["qty"] <= 0:
+                open_lots.pop(0)
+
+    if not completed:
+        return pd.DataFrame()
+
+    return pd.DataFrame(completed)
+
+
 def _top_up_small_holdings(target_qty: int, sl_pct: float, tp_pct: float, ignore_cash_check: bool = False) -> list[str]:
     actions: list[str] = []
     target = int(max(1, target_qty))
@@ -2711,14 +2815,110 @@ def _fragment_live_tables_and_errors(
 
     st.subheader("\U0001f4d2 Trade History")
     log_df = pd.DataFrame(st.session_state.s_log)
-    if log_df.empty:
-        st.info("No trades yet")
+    completed_trades = _completed_trades_from_log(st.session_state.s_log)
+
+    if completed_trades.empty:
+        st.info("No completed trades yet")
     else:
-        view_log = log_df.sort_values("ts", ascending=False).copy()
-        for col in ["price", "charges", "cash_after"]:
-            if col in view_log.columns:
-                view_log[col] = view_log[col].map(lambda x: f"Rs {float(x):,.2f}")
-        st.dataframe(view_log, width='stretch', hide_index=True)
+        _trade_col_map: list[tuple[str, str]] = [
+            ("timestamp", "Timestamp"),
+            ("symbol", "Symbol"),
+            ("side", "Side"),
+            ("quantity", "Quantity"),
+            ("buying_price", "Buying price"),
+            ("selling_price", "Selling price"),
+            ("charges", "Charges"),
+            ("total_invested", "Total invested"),
+            ("total_collected", "Total collected"),
+            ("realized_pnl", "Realized P&L"),
+            ("reason", "Reason"),
+            ("cash_in_hand", "Cash after trade"),
+        ]
+        _sorted = completed_trades.sort_values("timestamp", ascending=False)
+        _order_src = [src for src, _ in _trade_col_map if src in _sorted.columns]
+        _rename = {src: dst for src, dst in _trade_col_map if src in _sorted.columns}
+        show_history = _sorted[_order_src].rename(columns=_rename)
+
+        def _rs_amount(v: object) -> float:
+            if not isinstance(v, str):
+                return 0.0
+            s = v.replace("Rs ", "", 1).replace(",", "").strip()
+            if not s:
+                return 0.0
+            return float(s)
+
+        def _fmt_reason_cell(v: object) -> str:
+            t = str(v).strip()
+            if not t:
+                return "\u2014"
+            line = t.splitlines()[0].strip()
+            if len(line) > 120:
+                return line[:119] + "\u2026"
+            return line
+
+        _cur_cols = [
+            "Buying price",
+            "Selling price",
+            "Charges",
+            "Total invested",
+            "Total collected",
+            "Realized P&L",
+            "Cash after trade",
+        ]
+        for _c in _cur_cols:
+            if _c in show_history.columns:
+                show_history[_c] = show_history[_c].map(lambda x: f"Rs {float(x):,.2f}")
+
+        if "Quantity" in show_history.columns:
+            show_history["Quantity"] = show_history["Quantity"].map(
+                lambda x: int(float(x)))
+
+        if "Reason" in show_history.columns:
+            show_history["Reason"] = show_history["Reason"].map(_fmt_reason_cell)
+
+        _pnl_label = "Realized P&L"
+
+        def _highlight_trade_pnl(s: pd.Series) -> list[str]:
+            return [
+                "color: #16a34a" if _rs_amount(v) > 0 else
+                "color: #dc2626" if _rs_amount(v) < 0 else
+                ""
+                for v in s
+            ]
+
+        st.dataframe(
+            show_history.style.apply(_highlight_trade_pnl, subset=[_pnl_label]),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Timestamp": st.column_config.TextColumn("Timestamp", width="medium"),
+                "Symbol": st.column_config.TextColumn("Symbol", width="small"),
+                "Side": st.column_config.TextColumn("Side", width="small"),
+                "Quantity": st.column_config.NumberColumn("Quantity", format="%d", width="small"),
+                "Buying price": st.column_config.TextColumn("Buying price", width="small"),
+                "Selling price": st.column_config.TextColumn("Selling price", width="small"),
+                "Charges": st.column_config.TextColumn("Charges", width="small"),
+                "Total invested": st.column_config.TextColumn("Total invested", width="medium"),
+                "Total collected": st.column_config.TextColumn("Total collected", width="medium"),
+                _pnl_label: st.column_config.TextColumn(_pnl_label, width="medium"),
+                "Reason": st.column_config.TextColumn("Reason", width="large"),
+                "Cash after trade": st.column_config.TextColumn(
+                    "Cash after trade", width="medium"
+                ),
+            },
+        )
+
+    if not log_df.empty:
+        with st.expander("Raw order log (all legs)", expanded=False):
+            view_log = log_df.sort_values("ts", ascending=False).copy()
+            for col in ["price", "charges", "cash_after"]:
+                if col in view_log.columns:
+                    view_log[col] = view_log[col].map(
+                        lambda x: f"Rs {float(x):,.2f}")
+            st.dataframe(view_log, width='stretch', hide_index=True)
+    elif not completed_trades.empty:
+        with st.expander("Raw order log (all legs)", expanded=False):
+            st.info("No raw trade legs yet.")
 
     if scan_errors:
         with st.expander("Scan errors", expanded=False):

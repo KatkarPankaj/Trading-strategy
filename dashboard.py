@@ -1,4 +1,17 @@
 """
+DEPRECATED — legacy complex intraday scanner UI.
+
+This module is retained only for backward compatibility with
+`streamlit run dashboard.py`. Do not add features or fixes here unless you
+explicitly maintain that legacy entry point.
+
+Use the supported app instead:
+  PYTHONPATH=src streamlit run app.py
+
+That loads `dashboard_simple.py` (see `app.py`).
+
+---
+
 Intraday Strategy Dashboard — NSE/BSE
 Run with: PYTHONPATH=src streamlit run dashboard.py
 """
