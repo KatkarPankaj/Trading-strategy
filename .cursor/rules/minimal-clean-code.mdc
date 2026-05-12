@@ -1,0 +1,36 @@
+---
+description: Prefer minimal, clear code; modern syntax only when it pays off; mind complexity
+alwaysApply: true
+---
+
+# Minimal, purposeful code
+
+- Write only what is needed to satisfy the task. Avoid boilerplate, speculative abstractions, and “clever” patterns that don’t reduce real complexity.
+- Prefer the **simplest** syntax when behavioral and algorithmic complexity are unchanged. Modern language features are welcome when they **improve clarity, safety, or brevity**—not when they only look newer.
+- Before finishing non-trivial logic, consider **time (and space) complexity**. Optimize real hotspots (nested loops, repeated scans, redundant work) **without** changing observable behavior or weakening edge-case handling unless explicitly requested.
+- Fewer lines are good when they stay **readable**: merge only when it removes noise, not when it buries important branching or invariants.
+
+## Examples
+
+```python
+# Prefer: direct and one pass when equivalent
+seen = set()
+for x in items:
+    if x in seen:
+        continue
+    seen.add(x)
+    process(x)
+
+# Avoid: extra structure when it doesn’t buy clarity
+# (e.g. nested helpers, classes, or decorators that only wrap the loop above)
+```
+
+```python
+# Good: walrus or match/case when they shorten real branches
+if (n := len(data)) > 0:
+    return n
+
+# Avoid: walrus/match everywhere “because we can” when a plain if reads faster
+```
+
+When in doubt: **simplest correct implementation first**, then tighten only where profiling or obvious complexity warrants it.
