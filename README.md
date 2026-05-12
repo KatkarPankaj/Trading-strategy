@@ -61,6 +61,14 @@ $env:PYTHONPATH = "src"
 
 Then open the local URL shown in terminal (usually http://localhost:8501).
 
+## Launch unified dashboard (recommended)
+Starts in **Simple** mode; switch to **Complex scanner** from the sidebar.
+
+```powershell
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
 ## Launch advanced scanner + dummy trading app
 This app includes:
 - Top 5 intraday candidates scanner
