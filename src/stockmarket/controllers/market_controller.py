@@ -87,47 +87,31 @@ class MarketController:
     
     @st.cache_data(ttl=15, show_spinner=False)
     def _cached_fetch_nse_quote(self, symbol: str) -> Optional[Dict]:
-        """Cached NSE quote fetch (streamlit cache).
-        
-        Args:
-            symbol: Stock symbol
-            
-        Returns:
-            Quote dictionary or None
-        """
+        """Cached NSE quote fetch (streamlit cache)."""
         try:
-            from nsepython import nsefetch
-            
-            # Convert to NSE symbol format if needed
-            nse_symbol = symbol.replace('.NS', '').upper()
-            
-            self.logger.info(f"Fetching NSE quote: {nse_symbol}")
-            quote_data = nsefetch(nse_symbol)
-            
-            if not quote_data:
-                self.logger.warning(f"No data for NSE {nse_symbol}")
-                return None
-            
-            price = float(quote_data.get('price', 0))
-            change = float(quote_data.get('change', 0))
-            pchange = float(quote_data.get('pchange', 0))
-            
+            from ..quotes import get_default_quote_service
+
+            nse_sym = symbol.replace(".NS", "").upper()
+            self.logger.info(f"Fetching NSE quote: {nse_sym}")
+            q = get_default_quote_service().get_nse_quote(symbol)
+            price = float(q.price)
+            pchange = float(q.pchange)
+
             quote = MarketQuote(
                 symbol=symbol,
                 price=price,
-                change_pct=pchange
+                change_pct=pchange,
             )
-            
             self.market_data.update_quote(quote)
-            self.logger.info(f"NSE {nse_symbol}: Rs {price:.2f} ({pchange:+.2f}%)")
-            
+            self.logger.info(f"NSE {nse_sym}: Rs {price:.2f} ({pchange:+.2f}%)")
+
             return {
-                'symbol': symbol,
-                'price': price,
-                'change': change,
-                'pchange': pchange,
+                "symbol": symbol,
+                "price": price,
+                "change": 0.0,
+                "pchange": pchange,
             }
-        
+
         except Exception as e:
             if "429" in str(e) or "Rate limit" in str(e):
                 self.logger.error(f"NSE API rate limit (429) for {symbol}: {e}")
@@ -139,64 +123,29 @@ class MarketController:
     
     @st.cache_data(ttl=15, show_spinner=False)
     def _cached_fetch_us_quote(self, symbol: str) -> Optional[Dict]:
-        """Cached US quote fetch (streamlit cache).
-        
-        Args:
-            symbol: Stock symbol
-            
-        Returns:
-            Quote dictionary or None
-        """
+        """Cached US quote fetch (streamlit cache)."""
         try:
-            import yfinance as yf
-            
+            from ..quotes import get_default_quote_service
+
             self.logger.info(f"Fetching US quote: {symbol}")
-            ticker = yf.Ticker(symbol.upper())
-            
-            # Get intraday data
-            intraday = ticker.history(period="1d", interval="1m", prepost=False, auto_adjust=False)
-            
-            if intraday is None or intraday.empty:
-                intraday = ticker.history(period="5d", interval="5m", prepost=False, auto_adjust=False)
-            
-            if intraday is None or intraday.empty:
-                self.logger.warning(f"No data for US {symbol}")
-                return None
-            
-            intraday = intraday.dropna(subset=["Close"]).copy()
-            if intraday.empty:
-                return None
-            
-            latest = intraday.iloc[-1]
-            price = float(latest.get("Close") or 0.0)
-            
-            # Get daily data for change %
-            daily_hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
-            prev_close = 0.0
-            if daily_hist is not None and not daily_hist.empty:
-                daily_hist = daily_hist.dropna(subset=["Close"])
-                if len(daily_hist) >= 2:
-                    prev_close = float(daily_hist.iloc[-2]["Close"] or 0.0)
-                elif len(daily_hist) == 1:
-                    prev_close = float(daily_hist.iloc[-1]["Close"] or 0.0)
-            
-            pchange = ((price - prev_close) / max(prev_close, 1e-6)) * 100 if prev_close > 0 else 0.0
-            
+            q = get_default_quote_service().get_us_quote(symbol)
+            price = float(q.price)
+            pchange = float(q.pchange)
+
             quote = MarketQuote(
                 symbol=symbol,
                 price=price,
-                change_pct=pchange
+                change_pct=pchange,
             )
-            
             self.market_data.update_quote(quote)
             self.logger.info(f"US {symbol}: ${price:.2f} ({pchange:+.2f}%)")
-            
+
             return {
-                'symbol': symbol,
-                'price': price,
-                'pchange': pchange,
+                "symbol": symbol,
+                "price": price,
+                "pchange": pchange,
             }
-        
+
         except Exception as e:
             if "429" in str(e) or "Rate limit" in str(e):
                 self.logger.error(f"yfinance rate limit (429) for {symbol}: {e}")
