@@ -9,6 +9,7 @@ import random as _rng_mod
 import json
 import math
 import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,9 +29,18 @@ try:
 except Exception:
     yf = None
 
+try:
+    import requests
+except Exception:
+    requests = None
+
 
 IST = pytz.timezone("Asia/Kolkata")
 US_EASTERN = pytz.timezone("America/New_York")
+
+# Finnhub API Configuration (completely free, real-time, no rate limits for 60 calls/min)
+FINNHUB_API_KEY = "d80uma9r01qler4gai3gd80uma9r01qler4gai40"
+FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
 WATCHLIST_NSE = [
     "IEX.NS",
@@ -105,6 +115,7 @@ MARKET_CONFIG = {
         "market_open": time(9, 15),
         "entry_cutoff": time(13, 30),
         "square_off": time(15, 15),
+        "opening_range_minutes": 15,
         "watchlist": WATCHLIST_NSE,
         "state_file": Path("outputs") / "simple_paper_state.json",
         "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light.csv",
@@ -121,6 +132,7 @@ MARKET_CONFIG = {
         "market_open": time(9, 30),
         "entry_cutoff": time(13, 30),
         "square_off": time(15, 45),
+        "opening_range_minutes": 15,
         "watchlist": WATCHLIST_US,
         "state_file": Path("outputs") / "simple_paper_state_us.json",
         "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light_us.csv",
@@ -285,6 +297,27 @@ def _run_optimizer_from_dashboard(
         return None, None, f"Optimizer run failed: {exc}"
 
 
+def _run_optimizer_with_timeout(
+    lookback_trades: int,
+    min_train_trades: int,
+    quality_threshold: float,
+    timeout_seconds: int = 20,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None, str | None]:
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(
+                _run_optimizer_from_dashboard,
+                int(lookback_trades),
+                int(min_train_trades),
+                float(quality_threshold),
+            )
+            return fut.result(timeout=max(5, int(timeout_seconds)))
+    except FuturesTimeoutError:
+        return None, None, f"Optimizer timed out after {int(timeout_seconds)}s. Try manual run when market is calmer."
+    except Exception as exc:
+        return None, None, f"Optimizer run failed: {exc}"
+
+
 def ist_now() -> datetime:
     return datetime.now(pytz.utc).astimezone(IST)
 
@@ -300,12 +333,13 @@ def _auto_refresh(seconds: int) -> None:
         <script>
             (function() {{
                 const delayMs = {int(seconds) * 1000};
-                setTimeout(function() {{
+                if (window._sbtsRefreshTimer) {{
+                    clearTimeout(window._sbtsRefreshTimer);
+                }}
+                window._sbtsRefreshTimer = setTimeout(function() {{
                     try {{
                         window.parent.postMessage({{isStreamlitMessage: true, type: 'streamlit:rerunScript'}}, '*');
-                    }} catch (e) {{
-                        try {{ window.location.reload(); }} catch (ee) {{}}
-                    }}
+                    }} catch (e) {{}}
                 }}, delayMs);
             }})();
         </script>
@@ -323,7 +357,23 @@ def _quick_portfolio_metrics() -> None:
     realized = float(st.session_state.s_realized)
     charges = float(st.session_state.s_charges)
     cash = float(st.session_state.s_cash)
-    equity = cash + invested_capital + unrealized
+    long_market_value = 0.0
+    short_market_value = 0.0
+    for sym, h in st.session_state.s_holdings.items():
+        qty = int(h.get("qty", 0))
+        avg = float(h.get("avg", 0.0))
+        ltp = float(st.session_state.s_prices.get(sym, avg))
+        if qty > 0 and ltp > 0:
+            long_market_value += qty * ltp
+    for sym, h in st.session_state.s_shorts.items():
+        qty = int(h.get("qty", 0))
+        avg = float(h.get("avg", 0.0))
+        ltp = float(st.session_state.s_prices.get(sym, avg))
+        if qty > 0 and ltp > 0:
+            short_market_value += qty * ltp
+
+    # Net liquidation equity = cash + long value - short liability.
+    equity = cash + long_market_value - short_market_value
 
     today = market_now().strftime("%Y-%m-%d")
     today_realized = sum(
@@ -359,87 +409,177 @@ def _to_nse_symbol(symbol: str) -> str:
 
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_nse_quote(symbol: str) -> dict[str, float]:
+    """Fetch NSE quote from NSEpy (official NSE API). Includes retry with exponential backoff."""
     if nsefetch is None:
         raise ValueError(
             "nsepython is not installed. Run: pip install nsepython")
 
     nse_symbol = _to_nse_symbol(symbol)
-    data = nsefetch(
-        f"https://www.nseindia.com/api/quote-equity?symbol={nse_symbol}")
-    p = data.get("priceInfo", {})
 
-    price = float(p.get("lastPrice") or 0.0)
-    vwap = float(p.get("vwap") or 0.0)
-    pchange = float(p.get("pChange") or 0.0)
-    ihl = p.get("intraDayHighLow", {}) or {}
-    day_low = float(ihl.get("min") or 0.0)
-    day_high = float(ihl.get("max") or 0.0)
-    range_pct = ((day_high - day_low) / max(price, 1e-6)) * \
-        100 if price > 0 else 0.0
+    # Retry logic with exponential backoff
+    import time as _time_mod
+    max_retries = 3
+    last_err = None
 
-    return {
-        "symbol": symbol,
-        "price": price,
-        "vwap": vwap,
-        "pchange": pchange,
-        "range_pct": range_pct,
-    }
+    for attempt in range(max_retries):
+        try:
+            data = nsefetch(
+                f"https://www.nseindia.com/api/quote-equity?symbol={nse_symbol}")
+            p = data.get("priceInfo", {})
+
+            price = float(p.get("lastPrice") or 0.0)
+            vwap = float(p.get("vwap") or 0.0)
+            pchange = float(p.get("pChange") or 0.0)
+            ihl = p.get("intraDayHighLow", {}) or {}
+            day_low = float(ihl.get("min") or 0.0)
+            day_high = float(ihl.get("max") or 0.0)
+            range_pct = ((day_high - day_low) / max(price, 1e-6)) * \
+                100 if price > 0 else 0.0
+
+            return {
+                "symbol": symbol,
+                "price": price,
+                "vwap": vwap,
+                "pchange": pchange,
+                "range_pct": range_pct,
+            }
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                wait = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s
+                _time_mod.sleep(wait)
+            continue
+
+    raise ValueError(
+        f"NSEpy failed after {max_retries} attempts for {nse_symbol}: {last_err}")
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+def _fetch_finnhub_quote_raw(symbol: str, max_retries: int = 3) -> dict[str, Any] | None:
+    """Fetch real-time quote from Finnhub API with exponential backoff retry."""
+    if requests is None:
+        return None
+
+    import time as _time_mod
+    symbol_upper = str(symbol).upper()
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(
+                f"{FINNHUB_BASE_URL}/quote",
+                params={"symbol": symbol_upper, "token": FINNHUB_API_KEY},
+                timeout=5
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data and "c" in data:  # c = current price
+                return data
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s
+                _time_mod.sleep(wait)
+            continue
+    return None
+
+
+@st.cache_data(ttl=8, show_spinner=False)
 def fetch_us_quote(symbol: str) -> dict[str, float]:
-    if yf is None:
-        raise ValueError(
-            "yfinance is not installed. Run: pip install yfinance")
+    """Fetch US stock quote from Finnhub (real-time, <1s latency). Fallback to cached price if unavailable."""
+    symbol_upper = str(symbol).upper()
 
-    ticker = yf.Ticker(str(symbol).upper())
-    intraday = ticker.history(
-        period="1d", interval="1m", prepost=False, auto_adjust=False)
-    if intraday is None or intraday.empty:
-        intraday = ticker.history(
-            period="5d", interval="5m", prepost=False, auto_adjust=False)
-    if intraday is None or intraday.empty:
-        raise ValueError(f"No US intraday market data for {symbol}")
+    # Try Finnhub first (real-time, free)
+    data = _fetch_finnhub_quote_raw(symbol_upper)
+    if data:
+        price = float(data.get("c") or 0.0)  # c = current price
+        high = float(data.get("h") or price)  # h = high
+        low = float(data.get("l") or price)  # l = low
+        open_price = float(data.get("o") or price)  # o = open
+        prev_close = float(data.get("pc") or price)  # pc = previous close
 
-    intraday = intraday.dropna(subset=["Close"]).copy()
-    if intraday.empty:
-        raise ValueError(
-            f"US intraday market data empty after cleanup for {symbol}")
+        if price > 0:
+            # Calculate VWAP as simple average (Finnhub doesn't provide intraday volume)
+            vwap = (high + low + open_price + price) / 4.0
+            pchange = ((price - prev_close) / max(prev_close, 1e-6)
+                       ) * 100.0 if prev_close > 0 else 0.0
+            range_pct = ((high - low) / max(price, 1e-6)) * 100.0
 
-    latest = intraday.iloc[-1]
-    price = float(latest.get("Close") or 0.0)
-    high = float(intraday["High"].max() or price)
-    low = float(intraday["Low"].min() or price)
-    open_price = float(intraday.iloc[0].get("Open") or price)
+            return {
+                "symbol": symbol_upper,
+                "price": price,
+                "vwap": vwap,
+                "pchange": pchange,
+                "range_pct": range_pct,
+            }
 
-    volume_series = intraday.get("Volume")
-    if volume_series is not None and float(volume_series.fillna(0).sum()) > 0:
-        close_volume = (intraday["Close"].fillna(
-            0.0) * volume_series.fillna(0.0)).sum()
-        total_volume = float(volume_series.fillna(0.0).sum())
-        vwap = float(close_volume / max(total_volume, 1e-6))
-    else:
-        vwap = (high + low + open_price + price) / 4.0 if price > 0 else 0.0
+    # Fallback: Try to use cached price from session state
+    cached_price = float(st.session_state.s_prices.get(symbol_upper, 0.0))
+    if cached_price > 0:
+        return {
+            "symbol": symbol_upper,
+            "price": cached_price,
+            "vwap": cached_price,
+            "pchange": 0.0,
+            "range_pct": 0.0,
+        }
 
-    daily_hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
-    prev_close = 0.0
-    if daily_hist is not None and not daily_hist.empty:
-        daily_hist = daily_hist.dropna(subset=["Close"])
-        if len(daily_hist) >= 2:
-            prev_close = float(daily_hist.iloc[-2]["Close"] or 0.0)
-        elif len(daily_hist) == 1:
-            prev_close = float(daily_hist.iloc[-1]["Close"] or 0.0)
-    pchange = ((price - prev_close) / max(prev_close, 1e-6)) * \
-        100.0 if prev_close > 0 else 0.0
-    range_pct = ((high - low) / max(price, 1e-6)) * 100.0 if price > 0 else 0.0
+    # Ultimate fallback: yfinance with retry
+    if yf is not None:
+        try:
+            ticker = yf.Ticker(symbol_upper)
+            intraday = ticker.history(
+                period="1d", interval="1m", prepost=False, auto_adjust=False)
+            if intraday is None or intraday.empty:
+                intraday = ticker.history(
+                    period="5d", interval="5m", prepost=False, auto_adjust=False)
+            if intraday is None or intraday.empty:
+                raise ValueError(
+                    f"No US intraday market data for {symbol_upper}")
 
-    return {
-        "symbol": symbol,
-        "price": price,
-        "vwap": vwap,
-        "pchange": pchange,
-        "range_pct": range_pct,
-    }
+            intraday = intraday.dropna(subset=["Close"]).copy()
+            if intraday.empty:
+                raise ValueError(f"US intraday data empty for {symbol_upper}")
+
+            latest = intraday.iloc[-1]
+            price = float(latest.get("Close") or 0.0)
+            high = float(intraday["High"].max() or price)
+            low = float(intraday["Low"].min() or price)
+            open_price = float(intraday.iloc[0].get("Open") or price)
+
+            volume_series = intraday.get("Volume")
+            if volume_series is not None and float(volume_series.fillna(0).sum()) > 0:
+                close_volume = (intraday["Close"].fillna(
+                    0.0) * volume_series.fillna(0.0)).sum()
+                total_volume = float(volume_series.fillna(0.0).sum())
+                vwap = float(close_volume / max(total_volume, 1e-6))
+            else:
+                vwap = (high + low + open_price + price) / \
+                    4.0 if price > 0 else 0.0
+
+            daily_hist = ticker.history(
+                period="2d", interval="1d", auto_adjust=False)
+            prev_close = 0.0
+            if daily_hist is not None and not daily_hist.empty:
+                daily_hist = daily_hist.dropna(subset=["Close"])
+                if len(daily_hist) >= 2:
+                    prev_close = float(daily_hist.iloc[-2]["Close"] or 0.0)
+                elif len(daily_hist) == 1:
+                    prev_close = float(daily_hist.iloc[-1]["Close"] or 0.0)
+            pchange = ((price - prev_close) / max(prev_close, 1e-6)
+                       ) * 100.0 if prev_close > 0 else 0.0
+            range_pct = ((high - low) / max(price, 1e-6)) * \
+                100.0 if price > 0 else 0.0
+
+            return {
+                "symbol": symbol_upper,
+                "price": price,
+                "vwap": vwap,
+                "pchange": pchange,
+                "range_pct": range_pct,
+            }
+        except Exception:
+            pass
+
+    raise ValueError(
+        f"Unable to fetch quote for {symbol_upper}: All sources failed")
 
 
 def fetch_market_quote(symbol: str) -> dict[str, float]:
@@ -1070,6 +1210,151 @@ def _hhmm_to_time(hhmm: int) -> time:
     return time(h, m)
 
 
+def _is_market_open_now(ts: datetime | None = None) -> bool:
+    now = ts or market_now()
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return _market_open_time() <= t <= _square_off_time()
+
+
+def _execution_config() -> dict[str, float | bool]:
+    ui = st.session_state.get("s_ui_config", {})
+    if not isinstance(ui, dict):
+        ui = {}
+    min_pf = float(ui.get("partial_fill_min_pct", 60.0))
+    max_pf = float(ui.get("partial_fill_max_pct", 95.0))
+    if min_pf > max_pf:
+        min_pf, max_pf = max_pf, min_pf
+    return {
+        "enable_realistic_execution": bool(ui.get("enable_realistic_execution", True)),
+        "spread_bps": float(ui.get("spread_bps", 4.0)),
+        "slippage_bps": float(ui.get("slippage_bps", 8.0)),
+        "partial_fill_chance_pct": float(ui.get("partial_fill_chance_pct", 25.0)),
+        "partial_fill_min_pct": min_pf,
+        "partial_fill_max_pct": max_pf,
+        "reject_chance_pct": float(ui.get("reject_chance_pct", 1.5)),
+        "paper_broker_bridge": bool(ui.get("paper_broker_bridge", False)),
+    }
+
+
+def _submit_to_paper_broker_bridge(order_payload: dict[str, Any]) -> dict[str, Any]:
+    # Hook point for broker paper API adapters. Default behavior simulates acceptance.
+    return {
+        "accepted": True,
+        "external_order_id": f"SIM-{int(market_now().timestamp() * 1000)}",
+        "raw": order_payload,
+    }
+
+
+def _simulate_execution(
+    symbol: str,
+    side: str,
+    qty: int,
+    quote_price: float,
+    reason: str,
+) -> dict[str, Any]:
+    now = market_now()
+    cfg = _execution_config()
+    side_u = str(side).upper()
+    quote = float(quote_price)
+    req_qty = max(0, int(qty))
+    state_path = ["NEW"]
+
+    if req_qty <= 0 or quote <= 0:
+        return {
+            "status": "REJECTED",
+            "state_path": state_path + ["REJECTED"],
+            "reject_reason": "INVALID_ORDER",
+            "filled_qty": 0,
+            "exec_price": quote,
+        }
+
+    if not _is_market_open_now(now):
+        return {
+            "status": "REJECTED",
+            "state_path": state_path + ["REJECTED"],
+            "reject_reason": "MARKET_CLOSED",
+            "filled_qty": 0,
+            "exec_price": quote,
+        }
+
+    # Prevent fresh entries after entry cutoff, while allowing exits/square-offs.
+    if side_u in {"BUY", "SHORT"} and now.time() > _entry_cutoff_time():
+        return {
+            "status": "REJECTED",
+            "state_path": state_path + ["REJECTED"],
+            "reject_reason": "ENTRY_CUTOFF",
+            "filled_qty": 0,
+            "exec_price": quote,
+        }
+
+    if cfg["paper_broker_bridge"]:
+        bridge_rsp = _submit_to_paper_broker_bridge(
+            {
+                "symbol": symbol,
+                "side": side_u,
+                "qty": req_qty,
+                "quote_price": quote,
+                "reason": reason,
+                "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        if not bool(bridge_rsp.get("accepted", False)):
+            return {
+                "status": "REJECTED",
+                "state_path": state_path + ["REJECTED"],
+                "reject_reason": "BROKER_REJECT",
+                "filled_qty": 0,
+                "exec_price": quote,
+                "bridge": bridge_rsp,
+            }
+
+    if cfg["enable_realistic_execution"] and _rng_mod.random() < (float(cfg["reject_chance_pct"]) / 100.0):
+        return {
+            "status": "REJECTED",
+            "state_path": state_path + ["REJECTED"],
+            "reject_reason": "SIMULATED_REJECT",
+            "filled_qty": 0,
+            "exec_price": quote,
+        }
+
+    exec_price = quote
+    if cfg["enable_realistic_execution"]:
+        spread = quote * (float(cfg["spread_bps"]) / 10000.0)
+        half_spread = spread * 0.5
+        slip = quote * \
+            ((_rng_mod.random() * float(cfg["slippage_bps"])) / 10000.0)
+
+        if side_u in {"BUY", "COVER"}:
+            exec_price = quote + half_spread + slip
+        else:
+            exec_price = max(0.01, quote - half_spread - slip)
+
+    fill_qty = req_qty
+    if req_qty > 1 and cfg["enable_realistic_execution"]:
+        if _rng_mod.random() < (float(cfg["partial_fill_chance_pct"]) / 100.0):
+            fill_pct = _rng_mod.uniform(
+                float(cfg["partial_fill_min_pct"]),
+                float(cfg["partial_fill_max_pct"]),
+            )
+            fill_qty = max(1, int(req_qty * (fill_pct / 100.0)))
+
+    if fill_qty < req_qty:
+        state_path.append("PARTIALLY_FILLED")
+    state_path.append("FILLED")
+
+    return {
+        "status": "PARTIALLY_FILLED" if fill_qty < req_qty else "FILLED",
+        "state_path": state_path,
+        "reject_reason": "",
+        "filled_qty": int(fill_qty),
+        "exec_price": float(exec_price),
+        "requested_qty": int(req_qty),
+        "requested_price": float(quote),
+    }
+
+
 def _record_trade(
     symbol: str,
     side: str,
@@ -1078,7 +1363,45 @@ def _record_trade(
     reason: str,
     sl_pct: float | None = None,
     tp_pct: float | None = None,
-) -> None:
+) -> dict[str, Any]:
+    sim = _simulate_execution(symbol, side, qty, price, reason)
+    order_status = str(sim.get("status", "REJECTED"))
+    filled_qty = int(sim.get("filled_qty", 0) or 0)
+    exec_price = float(sim.get("exec_price", price) or price)
+    requested_qty = int(sim.get("requested_qty", qty) or qty)
+    requested_price = float(sim.get("requested_price", price) or price)
+    state_path = list(sim.get("state_path", ["NEW", order_status]))
+    reject_reason = str(sim.get("reject_reason", "") or "")
+
+    if order_status == "REJECTED" or filled_qty <= 0:
+        st.session_state.s_log.append(
+            {
+                "ts": market_now().strftime("%Y-%m-%d %H:%M:%S"),
+                "symbol": symbol,
+                "side": side,
+                "qty": 0,
+                "requested_qty": int(requested_qty),
+                "price": float(requested_price),
+                "requested_price": float(requested_price),
+                "exec_price": float(requested_price),
+                "charges": 0.0,
+                "realized_delta": 0.0,
+                "reason": f"{reason} [{reject_reason or 'rejected'}]",
+                "order_status": "REJECTED",
+                "order_state_path": "->".join(state_path),
+                "cash_after": float(st.session_state.s_cash),
+            }
+        )
+        _save_state()
+        return {
+            "executed": False,
+            "status": "REJECTED",
+            "filled_qty": 0,
+            "filled_price": float(requested_price),
+        }
+
+    qty = int(filled_qty)
+    price = float(exec_price)
     value = float(qty) * float(price)
     ch = _intraday_charges(side, value)
     realized_delta = 0.0
@@ -1105,7 +1428,7 @@ def _record_trade(
         old_qty = int(h.get("qty", 0))
         old_avg = float(h.get("avg", 0.0))
         if old_qty <= 0:
-            return
+            return {"executed": False, "status": "REJECTED", "filled_qty": 0, "filled_price": float(price)}
         exit_qty = min(old_qty, int(qty))
         pnl = (float(price) - old_avg) * float(exit_qty)
         st.session_state.s_realized += pnl
@@ -1143,7 +1466,7 @@ def _record_trade(
         old_qty = int(h.get("qty", 0))
         old_avg = float(h.get("avg", 0.0))
         if old_qty <= 0:
-            return
+            return {"executed": False, "status": "REJECTED", "filled_qty": 0, "filled_price": float(price)}
         cover_qty = min(old_qty, int(qty))
         pnl = (old_avg - float(price)) * float(cover_qty)
         st.session_state.s_realized += pnl
@@ -1160,7 +1483,7 @@ def _record_trade(
         else:
             st.session_state.s_shorts.pop(symbol, None)
     else:
-        return
+        return {"executed": False, "status": "REJECTED", "filled_qty": 0, "filled_price": float(price)}
 
     st.session_state.s_charges += ch
     st.session_state.s_prices[symbol] = float(price)
@@ -1170,14 +1493,25 @@ def _record_trade(
             "symbol": symbol,
             "side": side,
             "qty": int(qty),
+            "requested_qty": int(requested_qty),
             "price": float(price),
+            "requested_price": float(requested_price),
+            "exec_price": float(price),
             "charges": float(ch),
             "realized_delta": float(realized_delta),
             "reason": reason,
+            "order_status": order_status,
+            "order_state_path": "->".join(state_path),
             "cash_after": float(st.session_state.s_cash),
         }
     )
     _save_state()
+    return {
+        "executed": True,
+        "status": order_status,
+        "filled_qty": int(qty),
+        "filled_price": float(price),
+    }
 
 
 def _top_up_small_holdings(target_qty: int, sl_pct: float, tp_pct: float, ignore_cash_check: bool = False) -> list[str]:
@@ -1220,15 +1554,24 @@ def _top_up_small_holdings(target_qty: int, sl_pct: float, tp_pct: float, ignore
     return actions
 
 
+def _opening_range_end_time() -> time:
+    cfg = _market_cfg()
+    opening_range_minutes = int(cfg.get("opening_range_minutes", 15))
+    market_open_dt = datetime.combine(datetime.today(), _market_open_time())
+    or_end_dt = market_open_dt + \
+        timedelta(minutes=max(1, opening_range_minutes))
+    return or_end_dt.time()
+
+
 def _in_entry_window() -> bool:
     now = market_now()
     if now.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
     t = now.time()
-    return _market_open_time() <= t <= _entry_cutoff_time()
+    return _opening_range_end_time() <= t <= _entry_cutoff_time()
 
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def _scan_watchlist(
     symbols: tuple[str, ...],
     min_price: float,
@@ -1237,14 +1580,28 @@ def _scan_watchlist(
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
     score_cfg = _market_score_config()
+    import time as _time
+    _scan_start = _time.monotonic()
+    verbose_scan = len(symbols) <= 20
+    print(f"[SCAN] Starting scan of {len(symbols)} symbols")
+    if verbose_scan:
+        print(f"[SCAN] Symbols: {list(symbols)}")
 
     for sym in symbols:
         try:
+            _t0 = _time.monotonic()
             q = fetch_market_quote(sym)
+            _elapsed = _time.monotonic() - _t0
             price = float(q["price"])
             if price <= 0:
+                if verbose_scan:
+                    print(
+                        f"[SCAN] {sym}: skipped (price={price}) [{_elapsed:.2f}s]")
                 continue
             if price < float(min_price) or price > float(max_price):
+                if verbose_scan:
+                    print(
+                        f"[SCAN] {sym}: skipped (price={price} out of range [{min_price}-{max_price}]) [{_elapsed:.2f}s]")
                 continue
 
             vwap = float(q["vwap"])
@@ -1273,30 +1630,62 @@ def _scan_watchlist(
             buy_score += min(45.0, max(0.0, pchange) * change_weight)
             buy_score += min(35.0, above * vwap_weight)
             buy_score += min(20.0, range_pct * range_weight)
-            buy_ready = price > vwap and pchange > ready_pchange_threshold and range_pct > ready_range_threshold
+            # Strict readiness gate keeps entries closer to ORB + VWAP behavior.
+            buy_ready = (
+                _in_entry_window()
+                and price > vwap
+                and pchange > max(ready_pchange_threshold, 0.35)
+                and range_pct > max(ready_range_threshold, 0.55)
+                and above >= 0.12
+            )
 
             sell_score += min(45.0, max(0.0, -pchange) * change_weight)
             sell_score += min(35.0, below * vwap_weight)
             sell_score += min(20.0, range_pct * range_weight)
-            sell_ready = price < vwap and pchange < - \
-                ready_pchange_threshold and range_pct > ready_range_threshold
-
-            rows.append(
-                {
-                    "symbol": sym,
-                    "price": round(price, 2),
-                    "buy_score": round(buy_score, 2),
-                    "buy_signal": "READY" if buy_ready else "WAIT",
-                    "sell_score": round(sell_score, 2),
-                    "sell_signal": "READY" if sell_ready else "WAIT",
-                    "pchange": round(pchange, 2),
-                    "range_pct": round(range_pct, 2),
-                    "vwap_gap_pct": round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0,
-                    "updated": market_now().strftime("%H:%M:%S"),
-                }
+            sell_ready = (
+                _in_entry_window()
+                and price < vwap
+                and pchange < -max(ready_pchange_threshold, 0.35)
+                and range_pct > max(ready_range_threshold, 0.55)
+                and below >= 0.12
             )
+
+            row = {
+                "symbol": sym,
+                "price": round(price, 2),
+                "buy_score": round(buy_score, 2),
+                "buy_signal": "READY" if buy_ready else "WAIT",
+                "sell_score": round(sell_score, 2),
+                "sell_signal": "READY" if sell_ready else "WAIT",
+                "pchange": round(pchange, 2),
+                "range_pct": round(range_pct, 2),
+                "vwap_gap_pct": round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0,
+                "updated": market_now().strftime("%H:%M:%S"),
+            }
+            rows.append(row)
+            if verbose_scan:
+                print(
+                    f"[SCAN] {sym}: price={price:.2f} pchange={pchange:.2f}% "
+                    f"vwap_gap={row['vwap_gap_pct']:+.2f}% range={range_pct:.2f}% "
+                    f"BUY={buy_score:.1f}({'READY' if buy_ready else 'wait'}) "
+                    f"SELL={sell_score:.1f}({'READY' if sell_ready else 'wait'}) [{_elapsed:.2f}s]"
+                )
         except Exception as e:
             errors.append(f"{sym}: {e}")
+            print(f"[SCAN] {sym}: ERROR - {e}")
+
+    _total = _time.monotonic() - _scan_start
+    print(
+        f"[SCAN] Done: {len(rows)} symbols scored, {len(errors)} errors in {_total:.2f}s")
+    if rows:
+        _top3_buy = sorted(
+            rows, key=lambda r: r['buy_score'], reverse=True)[:3]
+        _top3_sell = sorted(
+            rows, key=lambda r: r['sell_score'], reverse=True)[:3]
+        print(
+            f"[SCAN] Top BUY:  {[(r['symbol'], r['buy_score']) for r in _top3_buy]}")
+        print(
+            f"[SCAN] Top SELL: {[(r['symbol'], r['sell_score']) for r in _top3_sell]}")
 
     return pd.DataFrame(rows), errors
 
@@ -1304,17 +1693,27 @@ def _scan_watchlist(
 @st.cache_data(ttl=120, show_spinner=False)
 def _batch_ml_scores_cached(
     symbols: tuple[str, ...],
-    state_mtime: float,
+    state_version: float,
     model_mtime: float,
 ) -> dict[str, float]:
     scores: dict[str, float] = {}
     if get_symbol_quality_score is None:
         return scores
     state_file = _state_file()
+    # Prevent repeated expensive calls when upstream provider is rate-limited.
+    rl_until = float(st.session_state.get("s_ml_rate_limit_until", 0.0))
+    now_ts = ist_now().timestamp()
+    if now_ts < rl_until:
+        return scores
+
     for sym in symbols:
         try:
             scores[sym] = float(get_symbol_quality_score(sym, state_file))
-        except Exception:
+        except Exception as exc:
+            exc_text = str(exc)
+            if "YFRateLimitError" in exc_text or "Too Many Requests" in exc_text:
+                st.session_state.s_ml_rate_limit_until = now_ts + 180.0
+                break
             continue
     return scores
 
@@ -1356,15 +1755,15 @@ def _apply_effective_scores(
             state_file = _state_file()
             model_file = resolve_learning_model_path(
                 state_file) if resolve_learning_model_path is not None else Path("outputs") / "market_learning_model.pkl"
-            state_mtime = float(
-                state_file.stat().st_mtime) if state_file.exists() else 0.0
+            # Use a stable state version so cache is not invalidated by unrelated ui_config saves.
+            state_version = float(len(st.session_state.get("s_log", [])))
             model_mtime = float(
                 model_file.stat().st_mtime) if model_file.exists() else 0.0
 
             buy_symbols = tuple(
                 sorted({str(s) for s in buy_out["symbol"].astype(str).tolist()}))
             ml_scores = _batch_ml_scores_cached(
-                buy_symbols, state_mtime, model_mtime)
+                buy_symbols, state_version, model_mtime)
             buy_out["ml_quality_score"] = buy_out["symbol"].map(
                 lambda s: float(ml_scores.get(str(s), 0.5)))
             ml_score = pd.to_numeric(
@@ -1389,11 +1788,36 @@ def _apply_effective_scores(
             ).clip(lower=0.0, upper=95.0).round(2)
 
     if not sell_out.empty:
-        sell_out["effective_sell_score"] = (
-            pd.to_numeric(sell_out["sell_score"], errors="coerce").fillna(0.0)
-            + pd.to_numeric(sell_out["symbol_bias"],
-                            errors="coerce").fillna(0.0)
-        ).clip(lower=0.0, upper=95.0).round(2)
+        rule_sell_score = pd.to_numeric(
+            sell_out["sell_score"], errors="coerce").fillna(0.0)
+        sell_bias = pd.to_numeric(
+            sell_out["symbol_bias"], errors="coerce").fillna(0.0)
+
+        if ml_enabled and get_symbol_quality_score is not None:
+            state_file = _state_file()
+            model_file = resolve_learning_model_path(
+                state_file) if resolve_learning_model_path is not None else Path("outputs") / "market_learning_model.pkl"
+            state_version = float(len(st.session_state.get("s_log", [])))
+            model_mtime = float(
+                model_file.stat().st_mtime) if model_file.exists() else 0.0
+            sell_symbols = tuple(
+                sorted({str(s) for s in sell_out["symbol"].astype(str).tolist()}))
+            ml_scores_short = _batch_ml_scores_cached(
+                sell_symbols, state_version, model_mtime)
+            sell_out["ml_quality_score"] = sell_out["symbol"].map(
+                lambda s: float(ml_scores_short.get(str(s), 0.5)))
+            ml_score_short = pd.to_numeric(
+                sell_out["ml_quality_score"], errors="coerce").fillna(0.5)
+            # For shorts: penalise high ML quality (strong bull stocks are bad shorts).
+            # Invert: a symbol the model rates as low quality (0.2) is a better short.
+            short_quality_factor = 1.0 - ml_score_short
+            blended_sell_score = (0.65 * rule_sell_score) + \
+                (0.35 * (short_quality_factor * 100.0))
+            sell_out["effective_sell_score"] = (
+                blended_sell_score + sell_bias).clip(lower=0.0, upper=95.0).round(2)
+        else:
+            sell_out["effective_sell_score"] = (
+                rule_sell_score + sell_bias).clip(lower=0.0, upper=95.0).round(2)
 
     if not sell_exit_out.empty:
         sell_exit_out["effective_sell_score"] = (
@@ -2327,13 +2751,17 @@ with st.sidebar:
         "Max Invest Per Trade (% of deployed cap)", min_value=2.0, max_value=50.0,
         value=float(saved_ui.get("max_trade_invest_pct", 10.0)), step=1.0,
         help="Caps single-trade investment to this % of total deployed capital. E.g. 10% of Rs 16L cap = Rs 1.6L max per trade."))
+    _scan_cap = min(20, len(watchlist))
+    _saved_scan_count = int(saved_ui.get(
+        "scan_symbol_count", min(15, len(watchlist))))
+    _saved_scan_count = max(5, min(_saved_scan_count, _scan_cap))
     scan_symbol_count = int(st.number_input(
         "Symbols To Scan",
         min_value=5,
-        max_value=len(watchlist),
-        value=int(saved_ui.get("scan_symbol_count", min(25, len(watchlist)))),
+        max_value=_scan_cap,
+        value=_saved_scan_count,
         step=1,
-        help="Limits active scan universe for faster refresh. Uses the first N symbols from watchlist.",
+        help="Limits active scan universe for faster refresh. Capped at 20 symbols to keep UI responsive.",
     ))
 
     st.header("Signal Filter")
@@ -2400,6 +2828,63 @@ with st.sidebar:
         step=5,
         help="After a symbol hits stop-loss, block fresh entries in that symbol for this duration.",
     ))
+
+    st.subheader("Execution Realism")
+    enable_realistic_execution = st.checkbox(
+        "Enable realistic execution model",
+        value=bool(saved_ui.get("enable_realistic_execution", True)),
+        help="Applies spread/slippage, partial fills, and occasional broker-style rejects in paper mode.",
+    )
+    spread_bps = float(st.slider(
+        "Spread (bps)",
+        min_value=0.0,
+        max_value=25.0,
+        value=float(saved_ui.get("spread_bps", 4.0)),
+        step=0.5,
+    ))
+    slippage_bps = float(st.slider(
+        "Max slippage (bps)",
+        min_value=0.0,
+        max_value=40.0,
+        value=float(saved_ui.get("slippage_bps", 8.0)),
+        step=0.5,
+    ))
+    partial_fill_chance_pct = float(st.slider(
+        "Partial fill chance (%)",
+        min_value=0.0,
+        max_value=100.0,
+        value=float(saved_ui.get("partial_fill_chance_pct", 25.0)),
+        step=1.0,
+    ))
+    pf_col1, pf_col2 = st.columns(2)
+    with pf_col1:
+        partial_fill_min_pct = float(st.number_input(
+            "Partial fill min (%)",
+            min_value=1.0,
+            max_value=100.0,
+            value=float(saved_ui.get("partial_fill_min_pct", 60.0)),
+            step=1.0,
+        ))
+    with pf_col2:
+        partial_fill_max_pct = float(st.number_input(
+            "Partial fill max (%)",
+            min_value=1.0,
+            max_value=100.0,
+            value=float(saved_ui.get("partial_fill_max_pct", 95.0)),
+            step=1.0,
+        ))
+    reject_chance_pct = float(st.slider(
+        "Simulated reject chance (%)",
+        min_value=0.0,
+        max_value=15.0,
+        value=float(saved_ui.get("reject_chance_pct", 1.5)),
+        step=0.1,
+    ))
+    paper_broker_bridge = st.checkbox(
+        "Optional broker paper bridge mode",
+        value=bool(saved_ui.get("paper_broker_bridge", False)),
+        help="Routes orders through a bridge hook so future broker paper APIs can mirror external order responses.",
+    )
 
     st.header("Learning Agent")
     enable_learning_agent = st.checkbox(
@@ -2493,12 +2978,24 @@ if full_auto_paper_mode:
     auto_trade_on = True
     auto_refresh_on = True
     refresh_seconds = min(int(refresh_seconds), 10)
+    risk_pct = max(float(risk_pct), 0.8)
+    max_trades_day = min(int(max_trades_day), 12)
+    scan_symbol_count = min(max(15, int(scan_symbol_count)), 20)
+    min_buy_score = max(float(min_buy_score), 45.0)
+    min_short_score = max(float(min_short_score), 40.0)
+    idle_buy_fallback_minutes = max(int(idle_buy_fallback_minutes), 20)
+    reentry_cooldown_minutes = max(int(reentry_cooldown_minutes), 10)
+    sl_cooldown_after_stop_minutes = max(
+        int(sl_cooldown_after_stop_minutes), 120)
     enable_learning_agent = True
     auto_apply_learning_suggestions = True
     enable_signal_sell = True
     enable_profit_guard = True
     enable_regime_entry_gate = True
     optimizer_auto_run = True
+    optimizer_interval_minutes = min(int(optimizer_interval_minutes), 15)
+    optimizer_min_train_trades = min(int(optimizer_min_train_trades), 30)
+    optimizer_quality_threshold = min(float(optimizer_quality_threshold), 52.0)
 
     ui_cfg = st.session_state.get("s_ui_config", {})
     if not isinstance(ui_cfg, dict):
@@ -2506,7 +3003,6 @@ if full_auto_paper_mode:
     if not bool(ui_cfg.get("enable_ml_scoring", False)):
         ui_cfg["enable_ml_scoring"] = True
         st.session_state.s_ui_config = ui_cfg
-        _save_state()
 
 _init_state(total_capital)
 
@@ -2547,6 +3043,14 @@ current_ui_config = {
     "min_short_score": float(min_short_score),
     "enable_regime_entry_gate": bool(enable_regime_entry_gate),
     "sl_cooldown_after_stop_minutes": int(sl_cooldown_after_stop_minutes),
+    "enable_realistic_execution": bool(enable_realistic_execution),
+    "spread_bps": float(spread_bps),
+    "slippage_bps": float(slippage_bps),
+    "partial_fill_chance_pct": float(partial_fill_chance_pct),
+    "partial_fill_min_pct": float(partial_fill_min_pct),
+    "partial_fill_max_pct": float(partial_fill_max_pct),
+    "reject_chance_pct": float(reject_chance_pct),
+    "paper_broker_bridge": bool(paper_broker_bridge),
     "enable_learning_agent": bool(enable_learning_agent),
     "auto_apply_learning_suggestions": bool(auto_apply_learning_suggestions),
     "enable_profit_guard": bool(enable_profit_guard),
@@ -2566,6 +3070,12 @@ current_ui_config = {
     "optimizer_min_train_trades": int(optimizer_min_train_trades),
     "optimizer_quality_threshold": float(optimizer_quality_threshold),
 }
+
+if float(current_ui_config["partial_fill_min_pct"]) > float(current_ui_config["partial_fill_max_pct"]):
+    current_ui_config["partial_fill_min_pct"], current_ui_config["partial_fill_max_pct"] = (
+        float(current_ui_config["partial_fill_max_pct"]),
+        float(current_ui_config["partial_fill_min_pct"]),
+    )
 
 if st.session_state.get("s_ui_config", {}) != current_ui_config:
     st.session_state.s_ui_config = current_ui_config
@@ -2836,19 +3346,29 @@ optimizer_summary = st.session_state.get("s_optimizer_summary")
 optimizer_artifacts = st.session_state.get("s_optimizer_artifacts")
 optimizer_last_run_ts = float(
     st.session_state.get("s_optimizer_last_run_ts", 0.0))
+optimizer_last_attempt_ts = float(
+    st.session_state.get("s_optimizer_last_attempt_ts", optimizer_last_run_ts))
 _now_ts = ist_now().timestamp()
-_should_auto_run_optimizer = bool(optimizer_auto_run) and (
-    optimizer_last_run_ts <= 0.0
-    or (_now_ts - optimizer_last_run_ts) >= (float(optimizer_interval_minutes) * 60.0)
-)
+
+# Throttle auto-run by last ATTEMPT (not only last success) to avoid retry loops.
+_optimizer_interval_s = float(optimizer_interval_minutes) * 60.0
+_is_live_entry_window = bool(_in_entry_window())
+# Keep dashboard non-blocking: do not auto-run optimizer inside refresh loop.
+_should_auto_run_optimizer = False
+if bool(optimizer_auto_run):
+    st.caption(
+        "Auto optimizer is disabled in live dashboard to avoid blocking. Use 'Run Optimizer Now' when needed.")
+
 _should_run_optimizer = bool(
     run_optimizer_now_btn) or _should_auto_run_optimizer
 if _should_run_optimizer:
+    st.session_state.s_optimizer_last_attempt_ts = _now_ts
     with st.spinner("Running optimizer analysis..."):
-        _summary, _artifacts, _optimizer_err = _run_optimizer_from_dashboard(
+        _summary, _artifacts, _optimizer_err = _run_optimizer_with_timeout(
             lookback_trades=optimizer_lookback_trades,
             min_train_trades=optimizer_min_train_trades,
             quality_threshold=optimizer_quality_threshold,
+            timeout_seconds=20,
         )
     if _optimizer_err is None:
         st.session_state.s_optimizer_summary = _summary
@@ -3021,14 +3541,13 @@ with st.expander("🤖 ML Market Learning", expanded=False):
     ):
         st.subheader("Symbol ML Quality Scores")
         state_file = _state_file()
-        state_mtime = float(
-            state_file.stat().st_mtime) if state_file.exists() else 0.0
+        state_version = float(len(st.session_state.get("s_log", [])))
         model_file = resolve_learning_model_path(
             state_file) if resolve_learning_model_path is not None else Path("outputs") / "market_learning_model.pkl"
         model_mtime = float(
             model_file.stat().st_mtime) if model_file.exists() else 0.0
         scores = _batch_ml_scores_cached(
-            tuple(active_watchlist), state_mtime, model_mtime)
+            tuple(active_watchlist), state_version, model_mtime)
 
         if scores:
             score_df = pd.DataFrame(

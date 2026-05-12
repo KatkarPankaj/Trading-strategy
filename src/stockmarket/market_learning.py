@@ -132,17 +132,32 @@ class MarketDataFetcher:
 
     @staticmethod
     def compute_trend(symbol: str) -> dict[str, float]:
-        """Compute trend indicators: volatility, momentum, trend direction."""
-        df = MarketDataFetcher.fetch_daily_ohlcv(symbol, days=60)
-        if df is None or df.empty:
+        """Compute trend indicators from historical OHLCV (cache-first, falls back to today's quote)."""
+        # Use the cache-first historical fetch so NSE symbols get proper multi-day context.
+        cache_dir = Path("outputs") / "market_data_cache"
+        hist_df, _ = MarketDataFetcher.fetch_historical_ohlcv(
+            [symbol], days=30, cache_dir=cache_dir, return_meta=True
+        )
+        if hist_df is not None and not hist_df.empty:
+            sym_df = hist_df[hist_df["symbol"] == symbol].copy(
+            ) if "symbol" in hist_df.columns else hist_df.copy()
+            sym_df = sym_df.sort_values("date").reset_index(
+                drop=True) if "date" in sym_df.columns else sym_df
+        else:
+            sym_df = MarketDataFetcher.fetch_daily_ohlcv(
+                symbol, days=30) or pd.DataFrame()
+
+        if sym_df is None or sym_df.empty:
             return {
                 "volatility": 0.0,
                 "momentum": 0.0,
                 "trend": 0.0,
                 "strength": 0.0,
+                "rsi": 50.0,
+                "vol_ratio": 1.0,
             }
 
-        row = df.iloc[-1].to_dict() if not df.empty else {}
+        row = sym_df.iloc[-1].to_dict()
         volatility = float(row.get("atr", 0.0)) / \
             max(float(row.get("close", 1.0)), 1.0) * 100.0
         momentum = float(row.get("pchange", 0.0))
@@ -150,12 +165,24 @@ class MarketDataFetcher:
         trend = 1.0 if momentum > 0 else (-1.0 if momentum < 0 else 0.0)
         strength = min(1.0, abs(momentum) / 5.0)
 
+        # Volume ratio: today's vol vs 20-day average
+        vol_ratio = 1.0
+        if "volume" in sym_df.columns and len(sym_df) >= 5:
+            vol_series = pd.to_numeric(
+                sym_df["volume"], errors="coerce").fillna(0.0)
+            avg_vol = float(
+                vol_series.iloc[:-1].mean()) if len(vol_series) > 1 else 0.0
+            last_vol = float(vol_series.iloc[-1])
+            vol_ratio = float(last_vol / max(avg_vol, 1.0))
+            vol_ratio = min(10.0, max(0.0, vol_ratio))
+
         return {
             "volatility": float(volatility),
             "momentum": float(momentum),
             "trend": float(trend),
             "strength": float(strength),
             "rsi": float(rsi),
+            "vol_ratio": float(vol_ratio),
         }
 
     @staticmethod
@@ -542,6 +569,7 @@ class FeatureEngineer:
             "trend": 0.0,
             "strength": 0.0,
             "rsi": 50.0,
+            "vol_ratio": 1.0,
             "sentiment": 0.0,
             "win_rate": 0.0,
             "total_trades": 0.0,
@@ -586,6 +614,7 @@ class MarketLearningModel:
             "trend",
             "strength",
             "rsi",
+            "vol_ratio",
             "sentiment",
             "win_rate",
             "total_trades",
@@ -722,7 +751,7 @@ def train_market_learning_model(
     labels = []
     training_samples = 0
     historical_symbols_covered = 0
-    forward_return_threshold_pct = 0.35
+    forward_return_threshold_pct = 0.80  # Match live TP target (was 0.35)
     label_rebalanced = False
     hist_meta: dict[str, Any] = {
         "cache_hits": 0,
@@ -786,12 +815,22 @@ def train_market_learning_model(
                         trend_score = 1.0 if momentum > 0 else (
                             -1.0 if momentum < 0 else 0.0)
 
+                        # Volume ratio: today vs rolling 20-day average
+                        vol_series = pd.to_numeric(
+                            sym_hist["volume"], errors="coerce").fillna(0.0)
+                        avg_vol_20 = float(
+                            vol_series.iloc[max(0, i-20):i].mean()) if i > 0 else 0.0
+                        last_vol = float(vol_series.iloc[i])
+                        vol_ratio = min(
+                            10.0, max(0.0, last_vol / max(avg_vol_20, 1.0)))
+
                         features = {
                             "volatility": float(volatility),
                             "momentum": float(momentum),
                             "trend": float(trend_score),
                             "strength": float(min(1.0, abs(momentum) / 5.0)),
                             "rsi": float(rsi),
+                            "vol_ratio": float(vol_ratio),
                             "sentiment": 0.0,
                             "win_rate": float(base_win_rate),
                             "total_trades": float(base_total_trades),

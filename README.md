@@ -84,6 +84,58 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m streamlit run dashboard_simple.py --server.port 8507
 ```
 
+## Latest Dashboard Updates (May 2026)
+Recent fixes and improvements in `dashboard_simple.py` and ML learning pipeline:
+
+1. Equity calculation fix (important)
+- `Current Equity` now uses net liquidation logic:
+  - `equity = cash + long_market_value - short_market_value`
+- This prevents short notional from inflating displayed profit.
+
+2. Charges validation
+- `Total Charges` is tracked from executed orders and matches sum of per-trade `charges` in state log.
+
+3. ML feature quality upgrades
+- Added `vol_ratio` (current volume vs recent average volume) as an input feature.
+- Improved NSE trend inference to use historical OHLCV context (cache-first), not a single snapshot.
+
+4. ML objective alignment
+- Historical label threshold updated from `0.35%` to `0.80%` forward return to align with intraday TP behavior.
+
+5. Short-side ML integration
+- ML blending now applies to short ranking too.
+- High long-quality symbols are penalized for shorts by inverting quality during short scoring.
+
+6. Full auto mode consistency
+- Full auto mode ensures ML scoring remains enabled.
+
+## Quick Validation Guide (Recommended)
+Use this checklist after any strategy or dashboard update:
+
+1. Restart app
+```powershell
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe -m streamlit run dashboard_simple.py --server.port 8501
+```
+
+2. Confirm key toggles are ON
+- Full Auto Paper Mode
+- Enable learning + market research
+- Auto-apply learning suggestions
+- Enable ML scoring
+
+3. Retrain ML model once
+- Run optimizer/retrain from UI so persisted model uses current feature set.
+
+4. Verify PnL sanity
+- Expected equity delta should approximately track:
+  - `(realized - charges + open_pnl)`
+
+5. Verify charges consistency (optional)
+```powershell
+.\.venv\Scripts\python.exe -c "import json;from pathlib import Path;s=json.loads(Path('outputs/simple_paper_state.json').read_text());log=s.get('log',[]);sum_charges=sum(float(x.get('charges',0) or 0) for x in log);print('sum_log_charges',sum_charges);print('state_charges',float(s.get('charges',0) or 0));print('diff',float(s.get('charges',0) or 0)-sum_charges)"
+```
+
 ## Dashboard Strategy (Complete)
 The advanced dashboard in [dashboard.py](dashboard.py) is built for paper trading only and applies these rules:
 
