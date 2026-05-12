@@ -7,6 +7,8 @@ from datetime import datetime, date
 from pathlib import Path
 
 import pandas as pd
+
+from . import yfinance_tz  # noqa: F401  # configure cache path before yfinance
 import yfinance as yf
 
 
@@ -66,6 +68,40 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize_intraday_frame(
+    df: pd.DataFrame,
+    symbol: str,
+    interval: str,
+    period: str,
+    tz: str,
+) -> pd.DataFrame:
+    """Shared normalization after downloading Yahoo OHLCV for one symbol."""
+    df = _flatten_columns(df.copy())
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns from provider: {missing}")
+
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC").tz_convert(tz)
+    else:
+        df.index = df.index.tz_convert(tz)
+
+    df = df.sort_index()
+    df = df.loc[:, REQUIRED_COLUMNS]
+    df = df[~df.index.duplicated(keep="first")]
+    df = df.between_time("09:15", "15:30")
+
+    if df.empty:
+        raise ValueError(
+            "Data exists but no rows are in regular market session 09:15-15:30 IST"
+        )
+
+    _save_cache(symbol, interval, period, df)
+    return df
+
+
 def _download_yahoo(symbol: str, interval: str, period: str,
                     max_retries: int = 4, backoff_base: float = 5.0) -> pd.DataFrame:
     """Download from Yahoo Finance with exponential backoff retries."""
@@ -116,33 +152,96 @@ def fetch_intraday_data(
         backoff_base=backoff_base,
     )
 
-    df = _flatten_columns(df)
-    df.columns = [str(c).strip().lower() for c in df.columns]
-
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns from provider: {missing}")
-
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC").tz_convert(tz)
-    else:
-        df.index = df.index.tz_convert(tz)
-
-    df = df.sort_index()
-    df = df.loc[:, REQUIRED_COLUMNS]
-    df = df[~df.index.duplicated(keep="first")]
-
-    # Keep regular session only (NSE/BSE cash session).
-    df = df.between_time("09:15", "15:30")
-
-    if df.empty:
-        raise ValueError(
-            "Data exists but no rows are in regular market session 09:15-15:30 IST")
-
-    # 3. Save to cache before returning
-    _save_cache(symbol, interval, period, df)
+    df = _normalize_intraday_frame(df, symbol, interval, period, tz)
 
     return df
+
+
+def batch_fetch_intraday_data(
+    symbols: list[str],
+    interval: str,
+    period: str,
+    tz: str = "Asia/Kolkata",
+    max_retries: int = 1,
+    backoff_base: float = 1.0,
+) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    """Fetch many NSE/BSE Yahoo symbols with one ``yf.download`` where possible.
+
+    Returns (ok_map, error_messages).
+    """
+    results: dict[str, pd.DataFrame] = {}
+    errors: list[str] = []
+    if not symbols:
+        return results, errors
+
+    need: list[str] = []
+    for sym in symbols:
+        cached = _load_cache(sym, interval, period)
+        if cached is not None:
+            results[sym] = cached
+        else:
+            need.append(sym)
+
+    if not need:
+        return results, errors
+
+    tickers = " ".join(need)
+    last_err: Exception | None = None
+    raw: pd.DataFrame | None = None
+    for attempt in range(max(1, max_retries)):
+        try:
+            raw = yf.download(
+                tickers=tickers,
+                interval=interval,
+                period=period,
+                auto_adjust=False,
+                progress=False,
+                threads=True,
+                group_by="ticker",
+            )
+            if raw is not None and not raw.empty:
+                break
+            last_err = ValueError("empty batch response")
+        except Exception as e:
+            last_err = e
+        wait = backoff_base * (2 ** attempt)
+        _time_mod.sleep(wait)
+
+    if raw is None or raw.empty:
+        errors.append(f"batch download failed: {last_err}")
+        return results, errors
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        level0 = list(raw.columns.get_level_values(0).unique())
+        for s in need:
+            key = None
+            for cand in level0:
+                if str(cand).upper() == str(s).upper():
+                    key = cand
+                    break
+            if key is None:
+                errors.append(f"{s}: not present in batch Yahoo response")
+                continue
+            try:
+                sub = raw[key].copy()
+                sub.columns = [str(c).strip() for c in sub.columns]
+                results[s] = _normalize_intraday_frame(
+                    sub, s, interval, period, tz
+                )
+            except Exception as e:
+                errors.append(f"{s}: {e}")
+    else:
+        if len(need) == 1:
+            try:
+                results[need[0]] = _normalize_intraday_frame(
+                    raw.copy(), need[0], interval, period, tz
+                )
+            except Exception as e:
+                errors.append(f"{need[0]}: {e}")
+        else:
+            errors.append("unexpected single-frame multi-symbol response")
+
+    return results, errors
 
 
 def latest_bars(df: pd.DataFrame, count: int = 5) -> pd.DataFrame:

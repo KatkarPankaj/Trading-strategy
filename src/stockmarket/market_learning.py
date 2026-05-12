@@ -26,6 +26,8 @@ except Exception:
     equity_history = None
     quote_equity = None
 
+from . import yfinance_tz  # noqa: F401  # configure cache path before yfinance
+
 try:
     import yfinance as yf
     YF_AVAILABLE = True
