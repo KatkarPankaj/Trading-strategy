@@ -1,7 +1,9 @@
 """
-Unified launcher: Simple dashboard by default, optional Complex mode.
+Unified launcher: Simple dashboard only.
 
 Run: PYTHONPATH=src streamlit run app.py
+
+The legacy complex scanner lives in dashboard.py and is not loaded from this entry point.
 """
 
 from __future__ import annotations
@@ -60,26 +62,20 @@ def main() -> None:
         page_icon="📊",
     )
     inject_theme()
-    mode = st.sidebar.radio(
-        "Dashboard mode",
-        ["Simple (default)", "Complex scanner"],
-        index=0,
+    st.sidebar.info(
+        "**Complex scanner** is deprecated for this unified app. "
+        "Only the Simple dashboard runs here. "
+        "Legacy UI: `streamlit run dashboard.py` (unsupported)."
     )
-    if mode.startswith("Simple"):
-        _aglog(
-            "H1",
-            "app.py:import_simple",
-            "before_dashboard_simple",
-            {"py": list(sys.version_info[:3])},
-        )
-        from dashboard_simple import render_simple_dashboard
+    _aglog(
+        "H1",
+        "app.py:import_simple",
+        "before_dashboard_simple",
+        {"py": list(sys.version_info[:3])},
+    )
+    from dashboard_simple import render_simple_dashboard
 
-        render_simple_dashboard(standalone=False)
-    else:
-        _aglog("H1", "app.py:import_complex", "before_dashboard", {})
-        from dashboard import render_complex_dashboard
-
-        render_complex_dashboard(standalone=False)
+    render_simple_dashboard(standalone=False)
 
 
 if __name__ == "__main__":

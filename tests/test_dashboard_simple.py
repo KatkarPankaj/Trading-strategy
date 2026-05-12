@@ -53,7 +53,7 @@ class TestDashboardImports:
             "_init_state",
             "_save_state",
             "_portfolio_view",
-            "_render_app_logs",
+            "_render_activity_and_logs",
             "market_now",
             "_auto_refresh",
             "fetch_market_quote",
@@ -157,7 +157,7 @@ class TestStateManagement:
             "s_cash", "s_start", "s_realized", "s_charges",
             "s_holdings", "s_shorts", "s_ui_config", "s_log",
             "s_prices", "s_agent_memory", "s_peak_open_pnl",
-            "s_app_logs", "selected_market"
+            "selected_market",
         ]
         
         for key in required_state_keys:

@@ -9,6 +9,7 @@ import random as _rng_mod
 import json
 import logging
 import math
+import html
 import sys
 from pathlib import Path
 
@@ -151,11 +152,7 @@ logger = logging.getLogger("dashboard_simple")
 
 
 def _app_log(level: str, message: str) -> None:
-    """Log to both server console and session state for UI display."""
-    timestamp = datetime.now(IST).strftime("%H:%M:%S")
-    log_entry = f"[{timestamp}] {message}"
-    
-    # Log to server console
+    """Log to server console (Streamlit session verbose UI removed)."""
     if level.upper() == "INFO":
         logger.info(message)
     elif level.upper() == "WARNING":
@@ -164,20 +161,136 @@ def _app_log(level: str, message: str) -> None:
         logger.error(message)
     else:
         logger.debug(message)
-    
-    # Add to session state for UI display
-    if "s_app_logs" not in st.session_state:
-        st.session_state.s_app_logs = []
-    
-    st.session_state.s_app_logs.append({
-        "timestamp": timestamp,
-        "level": level.upper(),
-        "message": message,
-    })
-    
-    # Keep only last 100 logs to prevent memory bloat
-    if len(st.session_state.s_app_logs) > 100:
-        st.session_state.s_app_logs = st.session_state.s_app_logs[-100:]
+
+
+_ACTIVITY_STEPS_MAX = 15
+
+
+def _normalize_activity_steps() -> list[dict[str, str]]:
+    """Ensure s_activity_steps is list[{ts, msg}]; coerce legacy string rows."""
+    raw = st.session_state.get("s_activity_steps")
+    if not isinstance(raw, list):
+        st.session_state.s_activity_steps = []
+        return []
+    if len(raw) == 0:
+        st.session_state.s_activity_steps = []
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if isinstance(item, dict) and "msg" in item:
+            out.append(
+                {
+                    "ts": str(item.get("ts", "—")),
+                    "msg": str(item.get("msg", "")),
+                }
+            )
+        elif isinstance(item, str):
+            out.append({"ts": "—", "msg": item})
+    st.session_state.s_activity_steps = out
+    return out
+
+
+def _activity_step(message: str) -> None:
+    """Append one timestamped phase line for the Activity panel."""
+    _normalize_activity_steps()
+    ts = datetime.now(IST).strftime("%H:%M:%S")
+    steps = st.session_state.s_activity_steps
+    steps.append({"ts": ts, "msg": message})
+    if len(steps) > _ACTIVITY_STEPS_MAX:
+        del steps[: len(steps) - _ACTIVITY_STEPS_MAX]
+
+
+def _activity_finish_summary(
+    *,
+    auto_refresh_on: bool,
+    refresh_seconds: int,
+    auto_trade_on: bool,
+    scan_errors: int,
+) -> None:
+    bits: list[str] = []
+    if auto_trade_on:
+        bits.append("auto-trade on")
+    if auto_refresh_on:
+        bits.append(f"refresh every {int(refresh_seconds)}s")
+    mode = ", ".join(bits) if bits else "manual refresh only"
+    err = f", {scan_errors} scan error(s)" if scan_errors else ""
+    _activity_step(f"Run summary: {mode}{err}")
+
+
+def _render_activity_and_logs(
+    *,
+    auto_refresh_on: bool,
+    refresh_seconds: int,
+    auto_trade_on: bool,
+) -> None:
+    """Processing/idle header, resizable scrollable activity list, refresh."""
+    steps = _normalize_activity_steps()
+    live = bool(auto_refresh_on or auto_trade_on)
+    title = "Processing" if live else "Idle"
+    dot = "#198754" if live else "#dc3545"
+    latest_preview = ""
+    if steps:
+        last = steps[-1]
+        latest_preview = f"{last['ts']} — {last['msg']}"
+
+    preview_html = ""
+    if latest_preview:
+        preview_html = (
+            '<br/><span style="color:#495057;font-size:13px;">'
+            + html.escape(latest_preview)
+            + "</span>"
+        )
+
+    if steps:
+        parts: list[str] = []
+        for entry in steps:
+            ts_e = html.escape(entry["ts"])
+            msg_e = html.escape(entry["msg"])
+            parts.append(
+                f'<div style="line-height:1.35;"><strong>{ts_e}</strong> — {msg_e}</div>'
+            )
+        lines_html = "".join(parts)
+    else:
+        lines_html = (
+            '<div style="line-height:1.35;color:#6c757d;">'
+            "No activity steps recorded yet.</div>"
+        )
+
+    # ~15 lines tall by default; scrollbar inside; vertical resize; content does not stretch page.
+    scroll_box = (
+        '<div style="line-height:1.35;font-size:14px;color:#212529;margin-top:6px;">'
+        '<div style="color:#6c757d;font-size:12px;margin-bottom:4px;">'
+        "Activity (newest last)</div>"
+        '<div style="'
+        "overflow-y:auto;overflow-x:auto;resize:vertical;"
+        "height:15lh;min-height:8rem;max-height:40rem;"
+        "box-sizing:border-box;border:1px solid #dee2e6;border-radius:6px;"
+        "padding:8px 10px;background:#fafafa;"
+        '">'
+        f"{lines_html}</div></div>"
+    )
+
+    with st.expander("Activity", expanded=False):
+        hdr_l, hdr_r = st.columns([4, 1])
+        with hdr_l:
+            st.markdown(
+                f'<p style="font-size:14px;line-height:1.35;margin:0;">'
+                f'<span style="color:{dot};font-weight:700;">●</span>'
+                f'<span style="font-weight:600;"> {title}</span>'
+                f"{preview_html}"
+                f"</p>",
+                unsafe_allow_html=True,
+            )
+        with hdr_r:
+            if st.button(
+                "Refresh now",
+                key="simple_manual_refresh",
+                help="Full dashboard rerun (quotes, ranking, auto-trade).",
+            ):
+                st.rerun()
+
+        st.html(scroll_box)
+
 
 try:
     from stockmarket.quotes import get_default_quote_service
@@ -642,7 +755,6 @@ def _init_state(starting_capital: float) -> None:
         "s_profit_ladder_armed",
         "s_profit_ladder_pullback_started",
         "s_profit_ladder_exited_day",
-        "s_app_logs",
     ]:
         st.session_state.pop(key, None)
 
@@ -679,7 +791,6 @@ def _init_state(starting_capital: float) -> None:
             st.session_state.s_profit_ladder_exited_day = str(
                 data.get("profit_ladder_exited_day", "")
             )
-            st.session_state.s_app_logs = []
             st.session_state.s_state_file = state_key
             _app_log("info", f"Loaded state for {_selected_market()} market")
             return
@@ -704,7 +815,6 @@ def _init_state(starting_capital: float) -> None:
     st.session_state.s_profit_ladder_armed = False
     st.session_state.s_profit_ladder_pullback_started = False
     st.session_state.s_profit_ladder_exited_day = ""
-    st.session_state.s_app_logs = []
     st.session_state.s_state_file = state_key
     _app_log(
         "info",
@@ -1666,6 +1776,7 @@ def _rank_signals(
         symbol_exposure[sym] = symbol_exposure.get(sym, 0.0) + val
         total_exposure += val
 
+    _activity_step("Fetching watchlist quotes & ranking")
     with st.spinner("Fetching watchlist quotes…"):
         all_df, errors = _scan_watchlist(
             tuple(symbols), float(min_price), float(max_price))
@@ -1868,9 +1979,31 @@ def _rank_signals(
 
 
 def _refresh_holding_prices() -> None:
-    symbols = set(st.session_state.s_holdings.keys()) | set(
-        st.session_state.s_shorts.keys())
-    for sym in list(symbols):
+    symbols = list(
+        set(st.session_state.s_holdings.keys()) | set(st.session_state.s_shorts.keys())
+    )
+    if not symbols:
+        return
+    svc = _quote_service()
+    quotes_map: dict[str, Any] = {}
+    try:
+        if _selected_market() == "US":
+            quotes_map = svc.get_us_quotes(symbols)
+        else:
+            quotes_map = svc.get_nse_quotes(symbols)
+    except Exception:
+        quotes_map = {}
+
+    for sym in symbols:
+        qobj = quotes_map.get(sym)
+        if qobj is not None:
+            try:
+                p = float(qobj.to_simple_dict().get("price") or 0.0)
+                if p > 0:
+                    st.session_state.s_prices[sym] = p
+                continue
+            except Exception:
+                pass
         try:
             q = fetch_market_quote(sym)
             p = float(q.get("price") or 0.0)
@@ -2426,39 +2559,6 @@ def _auto_paper_cycle(
 
     _refresh_holding_prices()
     return actions
-
-
-def _render_app_logs() -> None:
-    """Display application logs in a scrollable container."""
-    logs = st.session_state.get("s_app_logs", [])
-    if not logs:
-        return
-    
-    with st.expander("📋 Activity Logs", expanded=False):
-        # Create a scrollable container using a container with fixed height via CSS
-        log_container = st.container()
-        
-        # Display logs in reverse order (latest first)
-        with log_container:
-            for log_entry in reversed(logs[-50:]):  # Show last 50 logs
-                level = log_entry.get("level", "INFO")
-                message = log_entry.get("message", "")
-                timestamp = log_entry.get("timestamp", "")
-                
-                # Color code based on level
-                if level == "ERROR":
-                    st.markdown(f"🔴 **{timestamp}** ERROR: {message}")
-                elif level == "WARNING":
-                    st.markdown(f"🟡 **{timestamp}** WARNING: {message}")
-                elif level == "INFO":
-                    st.markdown(f"ℹ️ **{timestamp}** {message}")
-                else:
-                    st.markdown(f"⚪ **{timestamp}** {message}")
-        
-        # Add a button to clear logs
-        if st.button("Clear Logs", key="clear_logs_btn"):
-            st.session_state.s_app_logs = []
-            st.rerun()
 
 
 def _portfolio_view() -> tuple[pd.DataFrame, float, float]:
@@ -3046,7 +3146,10 @@ def render_simple_dashboard(standalone: bool = True) -> None:
             _shuffled_wl.insert(0, _s)
     _n = max(5, min(int(scan_symbol_count), len(_shuffled_wl)))
     active_watchlist = _shuffled_wl[:_n]
-    
+    _activity_step(
+        f"Scan universe: {len(active_watchlist)} symbols ({_selected_market()})"
+    )
+
     buy_df, sell_df, sell_exit_df, scan_errors = _rank_signals(
         active_watchlist,
         min_price=min_price,
@@ -3167,7 +3270,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
     
     actions: list[str] = []
     if auto_trade_on:
-        _app_log("info", "Starting auto-trade cycle...")
+        _activity_step("Auto-trade cycle")
         actions = _auto_paper_cycle(
             buy_df=buy_df,
             sell_df=sell_df,
@@ -3203,9 +3306,9 @@ def render_simple_dashboard(standalone: bool = True) -> None:
             idle_buy_fallback_minutes=idle_buy_fallback_minutes,
             max_trade_invest_pct=max_trade_invest_pct,
         )
-    
+
         if actions:
-            _app_log("info", f"Auto-trade cycle complete: {len(actions)} action(s)")
+            _activity_step(f"Auto-trade done ({len(actions)} action(s))")
             # Show latest Top-5 after any executed trade in this cycle.
             buy_df, sell_df, sell_exit_df, scan_errors = _rank_signals(
                 active_watchlist,
@@ -3228,7 +3331,10 @@ def render_simple_dashboard(standalone: bool = True) -> None:
                 sell_exit_df,
                 symbol_bias,
             )
-    
+
+        else:
+            _activity_step("Auto-trade done (no actions)")
+
     if topup_small_positions_btn:
         topup_actions = _top_up_small_holdings(
             target_qty=topup_target_qty,
@@ -3256,6 +3362,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
     _should_run_optimizer = bool(
         run_optimizer_now_btn) or _should_auto_run_optimizer
     if _should_run_optimizer:
+        _activity_step("Optimizer")
         with st.spinner("Running optimizer analysis..."):
             _summary, _artifacts, _optimizer_err = _run_optimizer_from_dashboard(
                 lookback_trades=optimizer_lookback_trades,
@@ -3271,11 +3378,20 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         else:
             st.session_state.s_optimizer_error = _optimizer_err
     
+    _activity_finish_summary(
+        auto_refresh_on=auto_refresh_on,
+        refresh_seconds=refresh_seconds,
+        auto_trade_on=auto_trade_on,
+        scan_errors=len(scan_errors),
+    )
+    _render_activity_and_logs(
+        auto_refresh_on=auto_refresh_on,
+        refresh_seconds=refresh_seconds,
+        auto_trade_on=auto_trade_on,
+    )
+
     # Display portfolio metrics with auto price refresh every page load/refresh
     _quick_portfolio_metrics()
-    
-    # Display application activity logs
-    _render_app_logs()
     
     # Get holdings dataframe for the Open Positions section below
     holdings_df, _, _ = _portfolio_view()
