@@ -438,7 +438,7 @@ def _apply_market_cap_quota(
     return out.reset_index(drop=True)
 
 
-def _strategy_plan_from_yahoo(last_row: pd.Series, cfg: TradingConfig, strategy_mode: str) -> dict[str, Any]:
+def _strategy_plan_from_intraday_row(last_row: pd.Series, cfg: TradingConfig, strategy_mode: str) -> dict[str, Any]:
     close = float(last_row["close"])
     vwap = float(last_row["vwap"])
     or_high = float(last_row["or_high"])
@@ -504,7 +504,7 @@ def _strategy_plan_from_nse_quote(quote: dict[str, float], cfg: TradingConfig, s
         trigger = in_window and (chg < -0.8) and (vwap == 0 or price > vwap)
         reason = "Need oversold reversal confirmation"
     else:
-        # NSE-only fast path: avoid Yahoo bar fetches in live quote mode.
+        # NSE-only fast path: avoid intraday bar fetches in live quote mode.
         expected = vwap if vwap > 0 else price
         trigger = in_window and (vwap > 0) and (
             price >= expected) and (chg > 0.4)
@@ -735,7 +735,7 @@ def _fetch_live_plan(
         sdf = add_strategy_columns(df, cfg)
         last_row = sdf.iloc[-1]
         price = float(last_row["close"])
-        plan = _strategy_plan_from_yahoo(
+        plan = _strategy_plan_from_intraday_row(
             last_row=last_row,
             cfg=cfg,
             strategy_mode=strategy_mode,
@@ -1567,7 +1567,7 @@ def scan_top_stocks(
         try:
             df = batch_map.get(sym)
             if df is None:
-                errors.append(f"{sym}: no Yahoo intraday data in batch")
+                errors.append(f"{sym}: no NSE intraday data in batch")
                 continue
             sdf = add_strategy_columns(df, scan_cfg)
             latest = sdf.iloc[-1]
@@ -1577,7 +1577,7 @@ def scan_top_stocks(
                 continue
             score, action, bias = score_signal(
                 latest, mode, scan_cfg.allow_short)
-            plan = _strategy_plan_from_yahoo(
+            plan = _strategy_plan_from_intraday_row(
                 last_row=latest,
                 cfg=scan_cfg,
                 strategy_mode=mode,
@@ -2213,7 +2213,7 @@ def render_complex_dashboard(standalone: bool = True) -> None:
     
         data_source = st.selectbox(
             "Data source",
-            ["NSE Quote API (non-Yahoo)", "Yahoo (OHLC bars)"],
+            ["NSE Quote API (non-Yahoo)", "Intraday OHLC (NSE-backed)"],
             index=0,
         )
     
@@ -2555,7 +2555,7 @@ def render_complex_dashboard(standalone: bool = True) -> None:
         st.success("Bought stock prices refreshed")
     
     if refresh:
-        if data_source == "Yahoo (OHLC bars)":
+        if data_source == "Intraday OHLC (NSE-backed)":
             cp = _cache_path(symbol, cfg.interval, cfg.period)
             cp.unlink(missing_ok=True)
         st.rerun()

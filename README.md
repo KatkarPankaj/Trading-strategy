@@ -18,8 +18,8 @@ Personal-use paper-trading app to test whether a strategy can grow a fixed budge
 - Learning feedback: summaries of what worked and what failed.
 
 ## What this includes
-- Intraday data fetch from Yahoo Finance via `yfinance`.
-- NSE/BSE symbols support with Yahoo suffixes:
+- Intraday OHLCV: **US** symbols via Finnhub (`FINNHUB_API_KEY`); **India** (`.NS`, `^NSEI`) via NSE archives / niftyindices-backed daily series expanded to session bars (see `src/stockmarket/data.py`, `nse_intraday.py`).
+- NSE/BSE symbols use common suffixes:
   - NSE: `RELIANCE.NS`, `TCS.NS`
   - BSE: `RELIANCE.BO`, `TCS.BO`
 - Opening Range Breakout strategy with VWAP and volume filters.
@@ -36,6 +36,8 @@ python -m pip install -r requirements.txt
 
 ## Configure
 Create `config.json` from the template and adjust values.
+
+For **US** symbols (Finnhub quotes and candles), set `FINNHUB_API_KEY` in your environment **or** create a gitignored `.env` in the repo root (copy from `.env.example`).
 ```powershell
 Copy-Item config.example.json config.json
 ```
@@ -69,6 +71,8 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
+Run the command from the repo root so `.streamlit/config.toml` applies: saving Python files triggers an automatic app rerun (“hot reload”) without restarting the server.
+
 ## Launch advanced scanner + dummy trading app
 This app includes:
 - Top 5 intraday candidates scanner
@@ -91,6 +95,9 @@ This page is optimized for quick load and minimal controls:
 $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m streamlit run dashboard_simple.py --server.port 8507
 ```
+
+US quotes for `dashboard_simple.py` use Finnhub; set `FINNHUB_API_KEY` in your environment.
+Optional `dashboard_simple_data_config.json` field `us_market_data_batch_size` controls parallel US quote requests in the scanner.
 
 ## Dashboard Strategy (Complete)
 The advanced dashboard in [dashboard.py](dashboard.py) is built for paper trading only and applies these rules:

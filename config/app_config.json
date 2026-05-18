@@ -27,7 +27,7 @@
       "retry_attempts": 3,
       "backoff_base_seconds": 2
     },
-    "yfinance": {
+    "finnhub": {
       "timeout_seconds": 10,
       "retry_attempts": 3,
       "backoff_base_seconds": 2

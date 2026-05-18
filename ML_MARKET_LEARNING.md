@@ -3,7 +3,7 @@
 ## Overview
 
 The ML Market Learning system enhances your trading simulator with **data-driven symbol scoring** based on:
-- **2-Month Historical OHLCV Data**: Technical patterns from 60 days of price action (via yfinance)
+- **2-Month Historical OHLCV Data**: Technical patterns from 60 days of price action (via Finnhub (US) / NSE sources)
 - **Personal Trade History**: Win rates, average profit, trade frequency per symbol
 - **Live Market Trends**: Real-time indicators (volatility, momentum, trend, RSI)
 
@@ -20,7 +20,7 @@ Your personal trade history alone (5-10 trades) isn't statistically significant.
 
 #### 1. **MarketDataFetcher** (`market_learning.py`)
 - **`fetch_daily_ohlcv(symbol, days=60)`**: Fetches live NSE OHLCV data via `nsepython`
-- **`fetch_historical_ohlcv(symbols, days=60, cache_dir)`**: Fetches 60 days of historical OHLCV from **yfinance** (NSE.NS symbols)
+- **`fetch_historical_ohlcv(symbols, days=60, cache_dir)`**: Fetches 60 days of historical OHLCV from **Finnhub (US) / NSE sources** (NSE.NS symbols)
   - Auto-caches locally to `outputs/market_data_cache/` for fast re-runs
   - Computes: Open, High, Low, Close, Volume, pchange, ATR, RSI, VWAP
   - First run: ~10-15s per symbol (network fetch); subsequent runs: instant (cached)
@@ -47,7 +47,7 @@ Your personal trade history alone (5-10 trades) isn't statistically significant.
 
 ```
 PHASE 1: Historical Bootstrap (60 days OHLCV)
-├─ Fetch 60 days of daily OHLCV for all 12 symbols (yfinance)
+├─ Fetch 60 days of daily OHLCV for all 12 symbols (Finnhub (US) / NSE sources)
 ├─ Extract: volatility, momentum, trend, RSI per symbol
 ├─ Cache locally: outputs/market_data_cache/
 ├─ Label: 1 if recent_uptrend + healthy_RSI, else 0
@@ -89,7 +89,7 @@ For any symbol:
 **Sidebar → "🤖 ML Market Learning" → "Train ML Model"**
 
 **First Run (takes ~15-30 seconds):**
-- Downloads 60 days of daily OHLCV from yfinance for all 12 symbols
+- Downloads 60 days of daily OHLCV from Finnhub (US) / NSE sources for all 12 symbols
 - Caches locally to `outputs/market_data_cache/` for future runs
 - Combines historical patterns + your personal trade history
 - Trains Logistic Regression + Random Forest ensemble
@@ -128,17 +128,17 @@ Shows all 12 symbols ranked by ML score:
 Install dependencies for ML training + historical data fetching:
 
 ```bash
-pip install scikit-learn yfinance
+pip install scikit-learn
 ```
 
 **What each library does:**
 - **scikit-learn**: Logistic Regression + Random Forest models
-- **yfinance**: Fetches 60 days of historical OHLCV from NSE (India stock prices)
-```
+- **Finnhub** (`FINNHUB_API_KEY`): US historical daily OHLCV
+- **nsepython** / NSE archives: India (`.NS`) historical series and intraday-related paths
 
 If not installed:
 - Dashboard still runs (graceful degradation)
-- ML training button shows error: "ML module not available; install: pip install scikit-learn yfinance"
+- ML training button shows error: "ML module not available; install: pip install scikit-learn"
 - Personal trade history analysis still works
 
 ## Example Training Output
@@ -184,7 +184,7 @@ If not installed:
 ## Improvement Path
 
 ### ✅ Phase 1 (COMPLETE): Historical OHLCV Bootstrap
-- Fetch 60 days of historical data from yfinance
+- Fetch 60 days of historical data from Finnhub (US) / NSE sources
 - Cache locally for speed
 - Train initial model immediately (day 1)
 - Refine with personal trades as you accumulate history
@@ -216,10 +216,10 @@ If not installed:
 ## FAQs & Troubleshooting
 
 ### "ML module not available"
-- Install: `pip install scikit-learn yfinance`
+- Install: `pip install scikit-learn` (and set `FINNHUB_API_KEY` for US symbols; `nsepython` for India)
 
 ### Slow first training (15-30 seconds)
-- First run downloads 60 days × 12 symbols from yfinance
+- First run downloads 60 days × 12 symbols from Finnhub (US) / NSE sources
 - Subsequent runs use cache (instant, 2-5 seconds)
 - Disable firewall if getting timeout errors
 
@@ -273,7 +273,7 @@ If not installed:
 - ✅ Adapts as market regime changes (daily updates)
 
 **Cons / Caveats:**
-- ⚠️ First run slower (~20s for yfinance download)
+- ⚠️ First run slower (~20s for Finnhub (US) / NSE sources download)
 - ⚠️ Historical patterns may not apply if market crashes
 - ⚠️ Limited to 60 days look-back (could add 6-month option later)
 - ⚠️ Overfitting risk if not careful (RF `max_depth=5` prevents this)

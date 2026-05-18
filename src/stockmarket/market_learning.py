@@ -26,13 +26,7 @@ except Exception:
     equity_history = None
     quote_equity = None
 
-from . import yfinance_tz  # noqa: F401  # configure cache path before yfinance
-
-try:
-    import yfinance as yf
-    YF_AVAILABLE = True
-except Exception:
-    YF_AVAILABLE = False
+from .finnhub_client import fetch_candles, fetch_quote
 
 try:
     from sklearn.ensemble import RandomForestClassifier
@@ -65,14 +59,8 @@ class MarketDataFetcher:
         return str(symbol).upper().endswith(".NS")
 
     @staticmethod
-    def _yf_symbol(symbol: str) -> str:
-        return str(symbol).upper() if "." in str(symbol) else str(symbol).upper()
-
-    @staticmethod
     def fetch_daily_ohlcv(symbol: str, days: int = 60) -> pd.DataFrame | None:
-        """Fetch last N days of daily OHLCV. Simulated for now."""
-        # In production, use yfinance or NSE API; for now, return mock data
-        # Real implementation would call actual market data API
+        """Fetch last N days of daily OHLCV (NSE quote API; US Finnhub)."""
         try:
             if MarketDataFetcher._is_nse_symbol(symbol):
                 if nsefetch is None:
@@ -89,25 +77,20 @@ class MarketDataFetcher:
                 vol = float(pi.get("totalTradedVolume") or 0)
                 pch = float(pi.get("pChange") or 0)
             else:
-                if not YF_AVAILABLE:
-                    return None
-                ticker = yf.Ticker(MarketDataFetcher._yf_symbol(symbol))
-                history_days = max(5, int(days))
-                hist = ticker.history(period=f"{history_days}d")
-                if hist is None or hist.empty:
-                    return None
-                latest = hist.tail(2)
-                row = latest.iloc[-1]
-                prev_close = float(
-                    latest.iloc[-2]["Close"]) if len(latest) > 1 else float(row.get("Close") or 0.0)
-                p = float(row.get("Close") or 0.0)
-                high = float(row.get("High") or p)
-                low = float(row.get("Low") or p)
-                vol = float(row.get("Volume") or 0.0)
-                pch = ((p - prev_close) / max(prev_close, 1e-6)
-                       * 100.0) if prev_close > 0 else 0.0
-                vwap = (float(row.get("Open") or p) + high +
-                        low + p) / 4.0 if p > 0 else 0.0
+                sym = str(symbol).upper().strip()
+                q = fetch_quote(sym)
+                p = float(q.get("c") or 0.0)
+                high = float(q.get("h") or p)
+                low = float(q.get("l") or p)
+                o = float(q.get("o") or p)
+                prev_close = float(q.get("pc") or 0.0)
+                vol = 0.0
+                pch = (
+                    ((p - prev_close) / max(prev_close, 1e-6)) * 100.0
+                    if prev_close > 0
+                    else 0.0
+                )
+                vwap = (o + high + low + p) / 4.0 if p > 0 else 0.0
 
             # Compute simple indicators
             atr = (high - low) if high > low else 0.0
@@ -167,7 +150,7 @@ class MarketDataFetcher:
         cache_dir: Path | None = None,
         return_meta: bool = False,
     ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
-        """Fetch historical OHLCV data using cache-first strategy with yfinance fallback."""
+        """Fetch historical OHLCV (NSE equity_history + bhavcopy; US Finnhub daily)."""
 
         cache_dir = cache_dir or Path("outputs") / "market_data_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -191,30 +174,29 @@ class MarketDataFetcher:
                 meta["cache_hits"] += 1
                 continue
 
-            if not YF_AVAILABLE:
-                meta["failed_symbols"].append(sym)
-                meta["errors"][sym] = "yfinance not installed"
-                continue
+            fetched_df: pd.DataFrame | None = None
+            fetch_error: str | None = None
+            nse_error: str | None = None
 
-            fetched_df, fetch_error = MarketDataFetcher._fetch_history_with_retry(
-                symbol=sym,
-                days=days,
-                max_attempts=4,
-                base_backoff_seconds=1.5,
-            )
-            if fetched_df is None or fetched_df.empty:
-                # Yahoo failed: try NSE historical fallback.
+            if MarketDataFetcher._is_nse_symbol(sym):
                 nse_df, nse_error = MarketDataFetcher._fetch_nse_history_with_retry(
                     symbol=sym,
                     days=days,
                     max_attempts=3,
                     base_backoff_seconds=1.0,
                 )
-                if nse_df is not None and not nse_df.empty:
-                    fetched_df = nse_df
-                    meta["nse_fallback_hits"] += 1
-                else:
-                    # Final fallback: synthesize a short bootstrap series from NSE quote snapshot.
+                fetched_df = nse_df
+                if fetched_df is None or fetched_df.empty:
+                    try:
+                        from .nse_intraday import fetch_daily_equity_series_bhavcopy
+
+                        daily = fetch_daily_equity_series_bhavcopy(sym, days + 5)
+                        fetched_df = MarketDataFetcher._finalize_hist_from_ohlcv(
+                            sym, daily)
+                        meta["nse_fallback_hits"] += 1
+                    except Exception as exc:
+                        fetch_error = str(exc)
+                if fetched_df is None or fetched_df.empty:
                     quote_df = MarketDataFetcher._fallback_from_nse_quote(sym)
                     if quote_df is not None and not quote_df.empty:
                         fetched_df = quote_df
@@ -223,11 +205,28 @@ class MarketDataFetcher:
                         meta["failed_symbols"].append(sym)
                         if fetch_error:
                             meta["errors"][sym] = fetch_error
-                            if "rate limit" in fetch_error.lower() or "too many requests" in fetch_error.lower():
-                                meta["rate_limited"] = True
                         if nse_error and sym not in meta["errors"]:
                             meta["errors"][sym] = nse_error
+                        if fetch_error and (
+                            "rate limit" in fetch_error.lower()
+                            or "too many requests" in fetch_error.lower()
+                        ):
+                            meta["rate_limited"] = True
                         continue
+            else:
+                fetched_df, fetch_error = MarketDataFetcher._fetch_us_history_finnhub(
+                    symbol=sym,
+                    days=days,
+                    max_attempts=4,
+                    base_backoff_seconds=1.5,
+                )
+                if fetched_df is None or fetched_df.empty:
+                    meta["failed_symbols"].append(sym)
+                    if fetch_error:
+                        meta["errors"][sym] = fetch_error
+                        if "rate limit" in fetch_error.lower() or "too many requests" in fetch_error.lower():
+                            meta["rate_limited"] = True
+                    continue
 
             try:
                 fetched_df.to_csv(cache_file, index=False)
@@ -268,66 +267,72 @@ class MarketDataFetcher:
             return None
 
     @staticmethod
-    def _fetch_history_with_retry(
+    def _finalize_hist_from_ohlcv(symbol: str, hist: pd.DataFrame) -> pd.DataFrame:
+        h = hist.copy()
+        h["date"] = pd.to_datetime(h["date"], errors="coerce")
+        h = h.dropna(subset=["date"])
+        for c in ("open", "high", "low", "close", "volume"):
+            h[c] = pd.to_numeric(h[c], errors="coerce")
+        h = h.dropna(subset=["close"])
+        h["symbol"] = symbol
+        h["pchange"] = (
+            (h["close"] - h["close"].shift(1)) / h["close"].shift(1) * 100.0
+        ).fillna(0.0)
+        h["atr"] = (h["high"] - h["low"]).rolling(window=5).mean().fillna(
+            h["high"] - h["low"]
+        )
+        h["rsi"] = MarketDataFetcher._compute_rsi(h["close"], period=14)
+        vw = (h["close"] * h["volume"]).rolling(window=20).sum() / h[
+            "volume"
+        ].rolling(window=20).sum()
+        h["vwap"] = vw.fillna(h["close"])
+        return h[MarketDataFetcher._HIST_COLS].dropna(subset=["close"])
+
+    @staticmethod
+    def _fetch_us_history_finnhub(
         symbol: str,
         days: int,
         max_attempts: int = 3,
         base_backoff_seconds: float = 1.0,
     ) -> tuple[pd.DataFrame | None, str | None]:
-        ticker_symbol = MarketDataFetcher._yf_symbol(symbol)
+        sym = str(symbol).upper().strip()
         last_error: str | None = None
-
+        to_u = int(time.time())
+        from_u = to_u - (int(days) + 10) * 86400
         for attempt in range(max_attempts):
             try:
-                ticker = yf.Ticker(ticker_symbol)
-                hist = ticker.history(period=f"{days}d")
-                if hist is None or hist.empty:
-                    last_error = "empty response"
+                raw = fetch_candles(
+                    sym, resolution="D", from_unix=from_u, to_unix=to_u
+                )
+                if not isinstance(raw, dict) or raw.get("s") != "ok":
+                    last_error = str(raw.get("s", "no data"))
                 else:
-                    prepared = MarketDataFetcher._prepare_history_df(
-                        symbol, hist)
-                    if not prepared.empty:
-                        return prepared, None
-                    last_error = "prepared history is empty"
+                    ts = raw.get("t") or []
+                    if not ts:
+                        last_error = "empty Finnhub daily candles"
+                    else:
+                        df = pd.DataFrame(
+                            {
+                                "date": pd.to_datetime(
+                                    pd.Series(ts, dtype="int64"), unit="s", utc=True
+                                ),
+                                "open": raw.get("o"),
+                                "high": raw.get("h"),
+                                "low": raw.get("l"),
+                                "close": raw.get("c"),
+                                "volume": raw.get("v"),
+                            }
+                        )
+                        df["date"] = df["date"].dt.tz_convert(None).dt.normalize()
+                        prepared = MarketDataFetcher._finalize_hist_from_ohlcv(sym, df)
+                        if not prepared.empty:
+                            return prepared, None
+                        last_error = "prepared Finnhub history is empty"
             except Exception as exc:
                 last_error = str(exc)
-
             if attempt < max_attempts - 1:
-                sleep_for = base_backoff_seconds * (2 ** attempt)
-                time.sleep(sleep_for)
-
+                time.sleep(base_backoff_seconds * (2**attempt))
         return None, last_error
-
-    @staticmethod
-    def _prepare_history_df(symbol: str, hist: pd.DataFrame) -> pd.DataFrame:
-        hist = hist.reset_index()
-        hist.columns = [
-            "date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "dividends",
-            "stock_splits",
-        ]
-        hist["symbol"] = symbol
-        hist["pchange"] = (
-            (hist["close"] - hist["close"].shift(1))
-            / hist["close"].shift(1)
-            * 100.0
-        ).fillna(0.0)
-        hist["atr"] = (hist["high"] - hist["low"]).rolling(window=5).mean().fillna(
-            hist["high"] - hist["low"]
-        )
-        hist["rsi"] = MarketDataFetcher._compute_rsi(hist["close"], period=14)
-        hist["vwap"] = (
-            (hist["close"] * hist["volume"]).rolling(window=20).sum()
-            / hist["volume"].rolling(window=20).sum()
-        )
-        hist["vwap"] = hist["vwap"].fillna(hist["close"])
-        hist = hist[MarketDataFetcher._HIST_COLS]
-        return hist
 
     @staticmethod
     def _fetch_nse_history_with_retry(
@@ -714,7 +719,8 @@ def train_market_learning_model(
     Main orchestration: build training dataset from market + personal history,
     then train ensemble model.
 
-    If use_historical_data=True, fetches 60+ days of historical OHLCV from yfinance
+    If use_historical_data=True, fetches 60+ days of historical OHLCV from Finnhub (US)
+    or NSE (India: equity_history with bhavcopy fallback).
     and bootstraps the model with price-action patterns before using trade history.
     """
     if not SK_AVAILABLE:
@@ -864,7 +870,7 @@ def train_market_learning_model(
             hist_meta.get("failed_symbols", []))
         short_result["label_rebalanced"] = bool(label_rebalanced)
         if hist_meta.get("rate_limited"):
-            short_result["historical_warning"] = "yfinance rate limit detected; using cache where available."
+            short_result["historical_warning"] = "Data provider rate limit detected; using cache where available."
         return short_result
 
     model = MarketLearningModel(resolve_learning_model_path(state_file))
@@ -886,7 +892,7 @@ def train_market_learning_model(
         result["historical_failed_symbols"] = list(
             hist_meta.get("failed_symbols", []))
         if hist_meta.get("rate_limited"):
-            result["historical_warning"] = "yfinance rate limit detected; using cache where available."
+            result["historical_warning"] = "Data provider rate limit detected; using cache where available."
     result["label_rebalanced"] = bool(label_rebalanced)
     result["training_note"] = (
         f"Rolling bootstrap: {training_samples} historical rows across {historical_symbols_covered} symbols; "

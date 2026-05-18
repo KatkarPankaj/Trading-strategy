@@ -1,4 +1,4 @@
-"""Central quote service: NSE (parallel + TTL) and US (batch yf.download)."""
+"""Central quote service: NSE (parallel + TTL) and US (Finnhub)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .nse import (
 )
 from .ttl_cache import TtlCache
 from .types import Quote
-from . import yahoo_quotes
+from . import finnhub_quotes
 
 try:
     from nsepython import nsefetch as _default_nsefetch
@@ -97,7 +97,7 @@ class QuoteService:
         key = f"us:{symbol.upper()}"
 
         def _load() -> Quote:
-            return yahoo_quotes.us_quote_from_yfinance(symbol)
+            return finnhub_quotes.us_quote_from_finnhub(symbol)
 
         return self._us_cache.get_or_set(key, _load)
 
@@ -114,7 +114,7 @@ class QuoteService:
             else:
                 need_batch.append(s)
         if need_batch:
-            batch = yahoo_quotes.download_us_intraday_batch(need_batch)
+            batch = finnhub_quotes.download_us_intraday_batch(need_batch)
             for sym, q in batch.items():
                 self._us_cache.set(f"us:{sym.upper()}", q)
             for s in need_batch:

@@ -148,13 +148,13 @@ class MarketController:
 
         except Exception as e:
             if "429" in str(e) or "Rate limit" in str(e):
-                self.logger.error(f"yfinance rate limit (429) for {symbol}: {e}")
+                self.logger.error(f"US quote provider rate limit (429) for {symbol}: {e}")
             elif "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                self.logger.warning(f"yfinance timeout for {symbol}: {e}")
+                self.logger.warning(f"US quote provider timeout for {symbol}: {e}")
             elif "No data found" in str(e):
                 self.logger.warning(f"No data for {symbol} (invalid ticker?)")
             else:
-                self.logger.error(f"yfinance error for {symbol}: {e}")
+                self.logger.error(f"US quote provider error for {symbol}: {e}")
             return None
     
     def fetch_quote(self, symbol: str, market: str) -> Optional[Dict]:

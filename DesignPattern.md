@@ -324,7 +324,7 @@ View (Display Price)
 Controllers are typically instantiated once and reused across the session.
 
 ### 4. **Strategy Pattern**
-Different market APIs (NSE, yfinance) can be swapped via market selection.
+Different market APIs (NSE, Finnhub for US) are selected by symbol/market routing.
 
 ### 5. **Observer Pattern** (Streamlit)
 Session state changes automatically trigger re-renders.

@@ -392,7 +392,7 @@ def _in_entry_window() -> bool:
 **Issue**: Price data is outdated (market had moved but app used old price).
 
 **Solution**: 
-- Refresh prices from yfinance every cycle
+- Refresh prices from market APIs every cycle (NSE / Finnhub)
 - If fetch fails, use last known price (not ideal but safe)
 
 ### 3. **Platform Timezone Issues**
@@ -559,7 +559,7 @@ dashboard_simple.py (PRIMARY)
 cli.py (BACKTEST)
 ├─ imports data.py
 │   └─ calls fetch_intraday_data()
-│       └─ yfinance.download()
+│       └─ data.fetch_intraday_data() (Finnhub US / NSE India)
 ├─ imports strategy.py
 └─ imports backtest.py
     └─ calls run_backtest()

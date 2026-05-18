@@ -234,13 +234,11 @@ class TestAPIConnections:
         # Test should work with mock
         assert mock_nsefetch is not None
     
-    @patch('dashboard_simple.yf')
-    def test_yfinance_integration(self, mock_yf):
-        """Verify yfinance integration."""
-        import dashboard_simple
-        
-        # Verify yfinance reference exists
-        assert dashboard_simple.yf is not None or dashboard_simple.yf is None  # Either exists or is None
+    def test_finnhub_client_import(self):
+        """Finnhub client module is importable (API key may be unset in CI)."""
+        import stockmarket.finnhub_client as fc
+
+        assert hasattr(fc, "fetch_quote")
 
 
 class TestStateManagement:

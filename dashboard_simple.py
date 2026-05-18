@@ -1,6 +1,8 @@
 """
 Simple Budget-Based Trading Simulator (Paper Trading)
 Run with: streamlit run dashboard_simple.py --server.port 8507
+
+From repo root, ``.streamlit/config.toml`` enables save-to-rerun (no server restart).
 """
 
 from __future__ import annotations
@@ -30,17 +32,18 @@ except Exception:
     nsefetch = None
 
 try:
-    from stockmarket import yfinance_tz  # noqa: F401
+    from stockmarket.finnhub_client import fetch_quote as _finnhub_fetch_quote
 except Exception:
-    pass
-try:
-    import yfinance as yf
-except Exception:
-    yf = None
+    _finnhub_fetch_quote = None  # type: ignore
 
 
 IST = pytz.timezone("Asia/Kolkata")
 US_EASTERN = pytz.timezone("America/New_York")
+
+_DASHBOARD_DATA_CONFIG_PATH = Path("dashboard_simple_data_config.json")
+_DASHBOARD_DATA_CONFIG_DEFAULTS = {
+    "us_market_data_batch_size": 20,
+}
 
 WATCHLIST_NSE = [
     "IEX.NS",
@@ -354,6 +357,51 @@ def _quote_service():
     return get_default_quote_service()
 
 
+def _load_dashboard_data_config() -> dict[str, Any]:
+    """Load dashboard_simple-specific data settings with safe defaults."""
+    cfg = dict(_DASHBOARD_DATA_CONFIG_DEFAULTS)
+    if not _DASHBOARD_DATA_CONFIG_PATH.exists():
+        return cfg
+    try:
+        data = json.loads(_DASHBOARD_DATA_CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return cfg
+        cfg["us_market_data_batch_size"] = max(1, int(data.get("us_market_data_batch_size", cfg["us_market_data_batch_size"])))
+    except Exception:
+        return dict(_DASHBOARD_DATA_CONFIG_DEFAULTS)
+    return cfg
+
+
+def _us_market_data_batch_size() -> int:
+    cfg = _load_dashboard_data_config()
+    return max(1, int(cfg.get("us_market_data_batch_size", 20)))
+
+
+def _to_simple_quote(qobj: Any) -> dict[str, float]:
+    """Normalize a quote object or dict to dashboard_simple numeric payload."""
+    if qobj is None:
+        raise ValueError("missing quote")
+    if hasattr(qobj, "to_simple_dict") and callable(qobj.to_simple_dict):
+        raw = qobj.to_simple_dict()
+        if isinstance(raw, dict):
+            return {
+                "symbol": str(raw.get("symbol", "")),
+                "price": float(raw.get("price", 0.0) or 0.0),
+                "vwap": float(raw.get("vwap", 0.0) or 0.0),
+                "pchange": float(raw.get("pchange", 0.0) or 0.0),
+                "range_pct": float(raw.get("range_pct", 0.0) or 0.0),
+            }
+    if isinstance(qobj, dict):
+        return {
+            "symbol": str(qobj.get("symbol", "")),
+            "price": float(qobj.get("price", 0.0) or 0.0),
+            "vwap": float(qobj.get("vwap", 0.0) or 0.0),
+            "pchange": float(qobj.get("pchange", 0.0) or 0.0),
+            "range_pct": float(qobj.get("range_pct", 0.0) or 0.0),
+        }
+    raise ValueError("invalid quote payload")
+
+
 def _selected_market() -> str:
     market = str(st.session_state.get("selected_market", "NSE")).upper()
     return market if market in MARKET_CONFIG else "NSE"
@@ -518,11 +566,11 @@ def _quick_portfolio_metrics() -> None:
     """Render portfolio metrics with live price updates. Called on every refresh."""
     _refresh_holding_prices()
 
-    holdings_df, unrealized, invested_capital = _portfolio_view()
+    holdings_df, unrealized, positions_mtm = _portfolio_view()
     realized = float(st.session_state.s_realized)
     charges = float(st.session_state.s_charges)
     cash = float(st.session_state.s_cash)
-    equity = cash + invested_capital + unrealized
+    equity = cash + positions_mtm
 
     today = market_now().strftime("%Y-%m-%d")
     today_realized = sum(
@@ -646,6 +694,12 @@ def _quick_portfolio_metrics() -> None:
         100.0 if daily_profit_target > 0 else 0.0
     st.progress(min(1.0, max(0.0, progress / 100.0)),
                 text=f"Today: {currency_symbol} {daily_pnl:,.2f} / {currency_symbol} {daily_profit_target:,.2f} ({progress:.1f}%)")
+    st.caption(
+        "Equity = Cash + Σ(long: last price × qty) + short unrealized PnL. "
+        "Short-sale proceeds are already in Cash. "
+        "Δ vs start is not equal to Open PnL + net realized unless you have no open longs and no capital adjustments. "
+        f"Net (under Total Charges) = Realized PnL − charges ({currency_symbol} {net_realized:,.2f})."
+    )
 
 
 def _to_nse_symbol(symbol: str) -> str:
@@ -680,26 +734,93 @@ def fetch_nse_quote(symbol: str) -> dict[str, float]:
 
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_us_quote(symbol: str) -> dict[str, float]:
-    if yf is None:
-        _app_log("error", f"yfinance library not available for {symbol}")
+    return _fetch_us_quote_finnhub(symbol)
+
+
+def _fetch_us_quote_finnhub(symbol: str) -> dict[str, float]:
+    raw = _fetch_finnhub_quote_raw(symbol)
+    _app_log("info", f"Fetching US quote via finnhub: {symbol}")
+    if raw is None:
         raise ValueError(
-            "yfinance is not installed. Run: pip install yfinance")
-    try:
-        _app_log("info", f"Fetching US quote: {symbol}")
-        quote = _quote_service().get_us_quote(symbol)
-        result = quote.to_simple_dict()
-        _app_log("info", f"US {symbol}: ${result['price']:.2f} ({result['pchange']:+.2f}%)")
-        return result
-    except Exception as e:
-        if "429" in str(e) or "Rate limit" in str(e):
-            _app_log("error", f"yfinance API rate limit (429) for {symbol}: {e}")
-        elif "timeout" in str(e).lower() or "timed out" in str(e).lower():
-            _app_log("warning", f"yfinance API timeout for {symbol}: {e}")
-        elif "No data found" in str(e):
-            _app_log("warning", f"No data for {symbol} (invalid ticker?): {e}")
-        else:
-            _app_log("error", f"yfinance API error for {symbol}: {e}")
-        raise
+            "Unable to fetch US quote from Finnhub (check FINNHUB_API_KEY and network)."
+        )
+    return _finnhub_payload_to_simple_dict(symbol, raw)
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _fetch_finnhub_quote_raw(symbol: str, max_retries: int = 3) -> dict[str, Any] | None:
+    """Fetch raw Finnhub quote with retry for transient failures."""
+    if _finnhub_fetch_quote is None:
+        _app_log("error", "stockmarket.finnhub_client unavailable for Finnhub quote fetch")
+        return None
+    import time as _time_mod
+    for attempt in range(max_retries):
+        try:
+            return _finnhub_fetch_quote(symbol)
+        except ValueError as exc:
+            _app_log("error", str(exc))
+            return None
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                _time_mod.sleep(0.5 * (2 ** attempt))
+                continue
+            _app_log("warning", f"Finnhub quote fetch failed for {symbol}: {exc}")
+            return None
+    return None
+
+
+def _finnhub_payload_to_simple_dict(symbol: str, payload: dict[str, Any]) -> dict[str, float]:
+    price = float(payload.get("c") or 0.0)
+    high = float(payload.get("h") or price)
+    low = float(payload.get("l") or price)
+    open_price = float(payload.get("o") or price)
+    prev_close = float(payload.get("pc") or price)
+    vwap = (high + low + open_price + price) / 4.0 if price > 0 else 0.0
+    pchange = ((price - prev_close) / max(prev_close, 1e-6)) * 100.0 if prev_close > 0 else 0.0
+    range_pct = ((high - low) / max(price, 1e-6)) * 100.0 if price > 0 else 0.0
+    return {
+        "symbol": str(symbol).upper(),
+        "price": float(price),
+        "vwap": float(vwap),
+        "pchange": float(pchange),
+        "range_pct": float(range_pct),
+    }
+
+
+def _fetch_us_quotes_finnhub(symbols: list[str], batch_size: int = 20) -> dict[str, dict[str, float]]:
+    # Finnhub has no batch quote endpoint; emulate batching with chunked parallel requests.
+    if _finnhub_fetch_quote is None or not symbols:
+        return {}
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    out: dict[str, dict[str, float]] = {}
+    workers = max(1, min(12, max(1, int(batch_size))))
+    symbols_list = list(symbols)
+    chunks = [
+        symbols_list[idx: idx + workers]
+        for idx in range(0, len(symbols_list), workers)
+    ]
+    for chunk in chunks:
+        if not chunk:
+            continue
+        with ThreadPoolExecutor(max_workers=len(chunk)) as pool:
+            future_map = {pool.submit(_fetch_finnhub_quote_raw, sym): sym for sym in chunk}
+            for fut in as_completed(future_map):
+                sym = future_map[fut]
+                try:
+                    raw = fut.result()
+                except Exception:
+                    raw = None
+                if isinstance(raw, dict):
+                    out[sym] = _finnhub_payload_to_simple_dict(sym, raw)
+    return out
+
+
+def _fetch_us_quotes(symbols: list[str]) -> dict[str, Any]:
+    """US bulk quotes via Finnhub (parallel requests)."""
+    if _selected_market() != "US":
+        return {}
+    batch_size = _us_market_data_batch_size()
+    return _fetch_us_quotes_finnhub(list(symbols), batch_size=batch_size)
 
 
 def fetch_market_quote(symbol: str) -> dict[str, float]:
@@ -1568,6 +1689,85 @@ def _completed_trades_from_log(log_rows: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(completed)
 
 
+def _build_raw_order_log(log_rows: list[dict[str, Any]], currency_symbol: str) -> pd.DataFrame:
+    """Normalize raw trade legs with open/closed status and amounts."""
+    if not log_rows:
+        return pd.DataFrame()
+    rows = [row for row in log_rows if isinstance(row, dict)]
+    if not rows:
+        return pd.DataFrame()
+
+    ordered = sorted(rows, key=lambda r: str(r.get("ts", "")))
+    positions: dict[str, float] = {}
+    out: list[dict[str, Any]] = []
+
+    for row in ordered:
+        side = str(row.get("side", "")).upper()
+        symbol = str(row.get("symbol", "")).strip()
+        if not symbol:
+            continue
+        qty = int(float(row.get("qty", 0.0) or 0))
+        if qty <= 0:
+            continue
+        price = float(row.get("price", 0.0) or 0.0)
+        ts = str(row.get("ts", ""))
+        reason = str(row.get("reason", "")).strip()
+        realized_delta = float(row.get("realized_delta", 0.0) or 0.0)
+
+        delta = 0
+        buy_price = None
+        buy_amount = None
+        sell_price = None
+        sell_amount = None
+
+        if side == "BUY":
+            delta = qty
+            buy_price = price
+            buy_amount = float(qty) * price
+        elif side == "SELL":
+            delta = -qty
+            sell_price = price
+            sell_amount = float(qty) * price
+        elif side == "SHORT":
+            delta = -qty
+            sell_price = price
+            sell_amount = float(qty) * price
+        elif side == "COVER":
+            delta = qty
+            buy_price = price
+            buy_amount = float(qty) * price
+        else:
+            continue
+
+        prev_pos = float(positions.get(symbol, 0.0))
+        new_pos = prev_pos + float(delta)
+        positions[symbol] = new_pos
+        status = "Closed" if abs(new_pos) < 1e-9 else "Open"
+
+        out.append(
+            {
+                "Timestamp": ts,
+                "Symbol": symbol,
+                "Side": side,
+                "Qty": qty,
+                "Buy price": buy_price,
+                "Buy amount": buy_amount,
+                "Sell price": sell_price,
+                "Sell amount": sell_amount,
+                "Profit/Loss amount": realized_delta,
+                "Reason": reason,
+                "Status": status,
+            }
+        )
+
+    if not out:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(out)
+    df = df.sort_values("Timestamp", ascending=False).reset_index(drop=True)
+    return df
+
+
 def _top_up_small_holdings(target_qty: int, sl_pct: float, tp_pct: float, ignore_cash_check: bool = False) -> list[str]:
     actions: list[str] = []
     target = int(max(1, target_qty))
@@ -1629,10 +1829,10 @@ def _scan_watchlist(
     sym_list = list(symbols)
     quotes_map: dict[str, Any] = {}
     try:
-        svc = _quote_service()
         if _selected_market() == "US":
-            quotes_map = svc.get_us_quotes(sym_list)
+            quotes_map = _fetch_us_quotes(sym_list)
         else:
+            svc = _quote_service()
             quotes_map = svc.get_nse_quotes(sym_list)
     except Exception as e:
         errors.append(f"batch quotes: {e}")
@@ -1642,7 +1842,7 @@ def _scan_watchlist(
             qobj = quotes_map.get(sym)
             if qobj is None:
                 raise ValueError("missing quote after batch fetch")
-            q = qobj.to_simple_dict()
+            q = _to_simple_quote(qobj)
             price = float(q["price"])
             if price <= 0:
                 continue
@@ -2088,12 +2288,12 @@ def _refresh_holding_prices() -> None:
     )
     if not symbols:
         return
-    svc = _quote_service()
     quotes_map: dict[str, Any] = {}
     try:
         if _selected_market() == "US":
-            quotes_map = svc.get_us_quotes(symbols)
+            quotes_map = _fetch_us_quotes(symbols)
         else:
+            svc = _quote_service()
             quotes_map = svc.get_nse_quotes(symbols)
     except Exception:
         quotes_map = {}
@@ -2102,7 +2302,7 @@ def _refresh_holding_prices() -> None:
         qobj = quotes_map.get(sym)
         if qobj is not None:
             try:
-                p = float(qobj.to_simple_dict().get("price") or 0.0)
+                p = float(_to_simple_quote(qobj).get("price") or 0.0)
                 if p > 0:
                     st.session_state.s_prices[sym] = p
                 continue
@@ -2666,9 +2866,18 @@ def _auto_paper_cycle(
 
 
 def _portfolio_view() -> tuple[pd.DataFrame, float, float]:
+    """Build holdings table and PnL figures.
+
+    Third return value is the **mark-to-market add-on for equity** (excludes cash):
+    sum(long: ltp*qty) + sum(short: (avg-ltp)*qty).
+
+    Short sale proceeds are already included in ``s_cash``; we must not add
+    ``avg*qty`` again for shorts (that would double-count and inflate equity).
+    """
     rows: list[dict[str, Any]] = []
     unreal = 0.0
-    total_invested = 0.0
+    long_market_value = 0.0
+    short_unrealized = 0.0
     for sym, h in st.session_state.s_holdings.items():
         qty = int(h.get("qty", 0))
         avg = float(h.get("avg", 0.0))
@@ -2679,7 +2888,7 @@ def _portfolio_view() -> tuple[pd.DataFrame, float, float]:
         pnl = (ltp - avg) * qty
         pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
         unreal += pnl
-        total_invested += invested
+        long_market_value += ltp * qty
         rows.append(
             {
                 "symbol": sym,
@@ -2705,7 +2914,7 @@ def _portfolio_view() -> tuple[pd.DataFrame, float, float]:
         pnl = (avg - ltp) * qty
         pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
         unreal += pnl
-        total_invested += invested
+        short_unrealized += pnl
         rows.append(
             {
                 "symbol": sym,
@@ -2720,7 +2929,8 @@ def _portfolio_view() -> tuple[pd.DataFrame, float, float]:
                 "pnl_pct": round(pnl_pct, 2),
             }
         )
-    return pd.DataFrame(rows), float(unreal), float(total_invested)
+    equity_mtm_addon = long_market_value + short_unrealized
+    return pd.DataFrame(rows), float(unreal), float(equity_mtm_addon)
 
 
 @st.fragment
@@ -2762,7 +2972,27 @@ def _fragment_live_tables_and_errors(
                 lambda x: f"Rs {float(x):,.0f}")
             show_buy["rank_deployment_headroom"] = show_buy["rank_deployment_headroom"].map(
                 lambda x: f"Rs {float(x):,.0f}")
-            st.dataframe(show_buy, width='stretch', hide_index=True)
+            st.dataframe(
+                show_buy,
+                width='stretch',
+                hide_index=True,
+                column_config={
+                    "symbol": st.column_config.TextColumn("Symbol", width="small"),
+                    "price": st.column_config.TextColumn("Price", width="small"),
+                    "rank_qty": st.column_config.NumberColumn("Qty", format="%d", width="small"),
+                    "rank_order_value": st.column_config.TextColumn("Order value", width="medium"),
+                    "rank_expected_profit": st.column_config.TextColumn("Expected profit", width="medium"),
+                    "rank_symbol_headroom": st.column_config.TextColumn("Symbol headroom", width="medium"),
+                    "rank_deployment_headroom": st.column_config.TextColumn("Deployment headroom", width="medium"),
+                    "buy_score": st.column_config.NumberColumn("Score", format="%.1f", width="small"),
+                    "research_buy_score": st.column_config.NumberColumn("Research", format="%.1f", width="small"),
+                    "research_tag": st.column_config.TextColumn("Tag", width="medium"),
+                    "effective_buy_score": st.column_config.NumberColumn("Effective", format="%.1f", width="small"),
+                    "buy_signal": st.column_config.TextColumn("Signal", width="small"),
+                    "pchange": st.column_config.NumberColumn("%Chg", format="%.2f", width="small"),
+                    "updated": st.column_config.TextColumn("Updated", width="medium"),
+                },
+            )
 
     with c2:
         st.subheader("\U0001f9ca Top 5 Sell Signals")
@@ -2795,7 +3025,27 @@ def _fragment_live_tables_and_errors(
                 lambda x: f"Rs {float(x):,.0f}")
             show_sell["rank_deployment_headroom"] = show_sell["rank_deployment_headroom"].map(
                 lambda x: f"Rs {float(x):,.0f}")
-            st.dataframe(show_sell, width='stretch', hide_index=True)
+            st.dataframe(
+                show_sell,
+                width='stretch',
+                hide_index=True,
+                column_config={
+                    "symbol": st.column_config.TextColumn("Symbol", width="small"),
+                    "price": st.column_config.TextColumn("Price", width="small"),
+                    "rank_qty": st.column_config.NumberColumn("Qty", format="%d", width="small"),
+                    "rank_order_value": st.column_config.TextColumn("Order value", width="medium"),
+                    "rank_expected_profit": st.column_config.TextColumn("Expected profit", width="medium"),
+                    "rank_symbol_headroom": st.column_config.TextColumn("Symbol headroom", width="medium"),
+                    "rank_deployment_headroom": st.column_config.TextColumn("Deployment headroom", width="medium"),
+                    "sell_score": st.column_config.NumberColumn("Score", format="%.1f", width="small"),
+                    "research_sell_score": st.column_config.NumberColumn("Research", format="%.1f", width="small"),
+                    "research_tag": st.column_config.TextColumn("Tag", width="medium"),
+                    "effective_sell_score": st.column_config.NumberColumn("Effective", format="%.1f", width="small"),
+                    "sell_signal": st.column_config.TextColumn("Signal", width="small"),
+                    "pchange": st.column_config.NumberColumn("%Chg", format="%.2f", width="small"),
+                    "updated": st.column_config.TextColumn("Updated", width="medium"),
+                },
+            )
 
     st.subheader("\U0001f4c8 Open Positions")
     if holdings_df.empty:
@@ -2811,7 +3061,23 @@ def _fragment_live_tables_and_errors(
             view_h[col] = view_h[col].map(lambda x: f"Rs {float(x):.2f}")
         if "pnl_pct" in view_h.columns:
             view_h["pnl_pct"] = view_h["pnl_pct"].map(lambda x: f"{float(x):.2f}%")
-        st.dataframe(view_h, width='stretch', hide_index=True)
+        st.dataframe(
+            view_h,
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "side": st.column_config.TextColumn("Side", width="small"),
+                "symbol": st.column_config.TextColumn("Symbol", width="small"),
+                "qty": st.column_config.NumberColumn("Qty", format="%d", width="small"),
+                "avg": st.column_config.TextColumn("Avg", width="small"),
+                "ltp": st.column_config.TextColumn("LTP", width="small"),
+                "stop": st.column_config.TextColumn("Stop", width="small"),
+                "target": st.column_config.TextColumn("Target", width="small"),
+                "invested": st.column_config.TextColumn("Invested", width="medium"),
+                "pnl": st.column_config.TextColumn("PnL", width="medium"),
+                "pnl_pct": st.column_config.TextColumn("PnL %", width="small"),
+            },
+        )
 
     st.subheader("\U0001f4d2 Trade History")
     log_df = pd.DataFrame(st.session_state.s_log)
@@ -2910,12 +3176,47 @@ def _fragment_live_tables_and_errors(
 
     if not log_df.empty:
         with st.expander("Raw order log (all legs)", expanded=False):
-            view_log = log_df.sort_values("ts", ascending=False).copy()
-            for col in ["price", "charges", "cash_after"]:
-                if col in view_log.columns:
-                    view_log[col] = view_log[col].map(
-                        lambda x: f"Rs {float(x):,.2f}")
-            st.dataframe(view_log, width='stretch', hide_index=True)
+            view_log = _build_raw_order_log(st.session_state.s_log, _currency_symbol())
+            if view_log.empty:
+                st.info("No raw trade legs yet.")
+            else:
+                cur = _currency_symbol()
+                def _fmt_money(val: object) -> str:
+                    if val is None or (isinstance(val, float) and pd.isna(val)):
+                        return "—"
+                    return f"{cur} {float(val):,.2f}"
+
+                money_cols = [
+                    "Buy price",
+                    "Buy amount",
+                    "Sell price",
+                    "Sell amount",
+                    "Profit/Loss amount",
+                ]
+                for col in money_cols:
+                    if col in view_log.columns:
+                        view_log[col] = view_log[col].map(_fmt_money)
+                if "Qty" in view_log.columns:
+                    view_log["Qty"] = view_log["Qty"].map(lambda x: int(float(x)))
+
+                st.dataframe(
+                    view_log,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Timestamp": st.column_config.TextColumn("Timestamp", width="medium"),
+                        "Symbol": st.column_config.TextColumn("Symbol", width="small"),
+                        "Side": st.column_config.TextColumn("Side", width="small"),
+                        "Qty": st.column_config.NumberColumn("Qty", format="%d", width="small"),
+                        "Buy price": st.column_config.TextColumn("Buy price", width="small"),
+                        "Buy amount": st.column_config.TextColumn("Buy amount", width="medium"),
+                        "Sell price": st.column_config.TextColumn("Sell price", width="small"),
+                        "Sell amount": st.column_config.TextColumn("Sell amount", width="medium"),
+                        "Profit/Loss amount": st.column_config.TextColumn("Profit/Loss amount", width="medium"),
+                        "Reason": st.column_config.TextColumn("Reason", width="large"),
+                        "Status": st.column_config.TextColumn("Status", width="small"),
+                    },
+                )
     elif not completed_trades.empty:
         with st.expander("Raw order log (all legs)", expanded=False):
             st.info("No raw trade legs yet.")
@@ -3209,7 +3510,11 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         enable_profit_guard = True
         enable_regime_entry_gate = True
         optimizer_auto_run = True
-    
+
+    _init_state(total_capital)
+
+    # Must run after _init_state: _save_state reads s_cash and other keys.
+    if full_auto_paper_mode:
         ui_cfg = st.session_state.get("s_ui_config", {})
         if not isinstance(ui_cfg, dict):
             ui_cfg = {}
@@ -3217,8 +3522,6 @@ def render_simple_dashboard(standalone: bool = True) -> None:
             ui_cfg["enable_ml_scoring"] = True
             st.session_state.s_ui_config = ui_cfg
             _save_state()
-    
-    _init_state(total_capital)
     
     # If user changed Total Capital in the sidebar, scale cash and start accordingly
     _saved_start = float(st.session_state.get("s_start", total_capital))
@@ -3364,7 +3667,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         min_order_value=min_order_value,
         max_trade_invest_pct=max_trade_invest_pct,
     )
-    
+
     learning_memory = _update_learning_memory()
     market_research = _market_research_from_signals(buy_df, sell_exit_df)
     symbol_bias = _symbol_bias_map()
@@ -3675,7 +3978,8 @@ def render_simple_dashboard(standalone: bool = True) -> None:
                 train_market_learning_model, _, _, _ = _market_learning_imports()
                 if train_market_learning_model is None:
                     st.error(
-                        "ML module not available; install: pip install scikit-learn yfinance")
+                        "ML module not available; install: pip install scikit-learn"
+                    )
                 else:
                     with st.spinner("🔄 Fetching 60 days historical data + training model..."):
                         try:

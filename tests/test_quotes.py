@@ -88,7 +88,7 @@ def test_quote_service_nse_quotes_parallel_fetches(monkeypatch):
 
 
 def test_quote_service_us_batch_called_once(monkeypatch):
-    import stockmarket.quotes.yahoo_quotes as yq
+    import stockmarket.quotes.finnhub_quotes as fq
     from stockmarket.quotes.types import Quote
 
     called = {"n": 0}
@@ -103,12 +103,13 @@ def test_quote_service_us_batch_called_once(monkeypatch):
                 pchange=1.0,
                 day_high=101.0,
                 day_low=98.0,
+                open_price=99.0,
                 range_pct=2.0,
                 provider="t",
             )
         }
 
-    monkeypatch.setattr(yq, "download_us_intraday_batch", fake_batch)
+    monkeypatch.setattr(fq, "download_us_intraday_batch", fake_batch)
     svc = QuoteService(us_ttl_sec=60.0)
     svc._us_cache.clear()
     m1 = svc.get_us_quotes(["AAPL"])

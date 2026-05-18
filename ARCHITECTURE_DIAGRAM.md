@@ -29,7 +29,7 @@ flowchart LR
   subgraph Quotes["Market Data Provider Layer"]
     QuoteSvc["src/stockmarket/quotes/service.py"]
     QuoteNSE["src/stockmarket/quotes/nse.py"]
-    QuoteYF["src/stockmarket/quotes/yahoo_quotes.py"]
+    QuoteFH["src/stockmarket/quotes/finnhub_quotes.py"]
     QuoteCache["src/stockmarket/quotes/ttl_cache.py"]
     QuoteTypes["src/stockmarket/quotes/types.py"]
   end
@@ -93,10 +93,10 @@ flowchart LR
   SimpleDash -.-> Optim
 
   QuoteSvc --> QuoteNSE
-  QuoteSvc --> QuoteYF
+  QuoteSvc --> QuoteFH
   QuoteSvc --> QuoteCache
   QuoteNSE --> QuoteTypes
-  QuoteYF --> QuoteTypes
+  QuoteFH --> QuoteTypes
 
   Data --> Data
   Strategy --> Config

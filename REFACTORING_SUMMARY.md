@@ -64,7 +64,7 @@ The codebase has been successfully refactored to follow the **Model-View-Control
   "logging": { level, format, max_entries },
   "streamlit": { port, host, theme },
   "cache": { ttl_current_day, ttl_historical, directory },
-  "api": { nse, yfinance endpoints and retry settings }
+  "api": { nse, finnhub endpoints and retry settings }
 }
 ```
 
