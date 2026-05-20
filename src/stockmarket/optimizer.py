@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,33 @@ import pandas as pd
 from .config import TradingConfig
 from .data import fetch_intraday_data
 from .strategy import add_strategy_columns
+
+# #region agent log
+_AGENT_DBG_PATH = "/Users/garya/Documents/Work/Learn/python/Trading-strategy/.cursor/debug-d6b078.log"
+
+
+def _agent_dbg_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        with open(_AGENT_DBG_PATH, "a", encoding="utf-8") as _af:
+            _af.write(
+                json.dumps(
+                    {
+                        "sessionId": "d6b078",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
+# #endregion
 
 
 @dataclass
@@ -348,6 +376,22 @@ def enrich_trade_features(trades: pd.DataFrame, cfg: TradingConfig) -> pd.DataFr
         except Exception:
             continue
 
+    # #region agent log
+    _agent_dbg_log(
+        "H5",
+        "optimizer.py:enrich_trade_features",
+        "feature_maps_ready",
+        {
+            "market_timezone": str(cfg.market_timezone),
+            "index_bench": "^NSEI",
+            "index_loaded": index_features is not None,
+            "index_rows": int(len(index_features)) if index_features is not None else 0,
+            "symbol_maps": int(len(feature_map)),
+            "trade_rows": int(len(trades)),
+        },
+    )
+    # #endregion
+
     enriched_rows: list[dict[str, Any]] = []
     for _, trade in trades.iterrows():
         row = trade.to_dict()
@@ -485,7 +529,39 @@ MIN_TRAIN_TRADES_DEFAULT = 50
 def _ridge_fit(X: np.ndarray, y: np.ndarray, alpha: float = 1.0) -> np.ndarray:
     reg = np.eye(X.shape[1]) * alpha
     reg[0, 0] = 0.0
-    return np.linalg.pinv(X.T @ X + reg) @ X.T @ y
+    gram = X.T @ X + reg
+    # #region agent log
+    _agent_dbg_log(
+        "H1",
+        "optimizer.py:_ridge_fit",
+        "pre_pinv",
+        {
+            "n": int(X.shape[0]),
+            "p": int(X.shape[1]),
+            "alpha": float(alpha),
+            "gram_max": float(np.nanmax(np.abs(gram))),
+            "gram_has_nan": bool(np.isnan(gram).any()),
+            "gram_has_inf": bool(np.isinf(gram).any()),
+            "x_max": float(np.nanmax(np.abs(X))),
+            "x_has_nan": bool(np.isnan(X).any()),
+            "x_has_inf": bool(np.isinf(X).any()),
+        },
+    )
+    # #endregion
+    beta = np.linalg.pinv(gram) @ X.T @ y
+    # #region agent log
+    _agent_dbg_log(
+        "H2",
+        "optimizer.py:_ridge_fit",
+        "post_pinv",
+        {
+            "beta_max": float(np.nanmax(np.abs(beta))),
+            "beta_has_nan": bool(np.isnan(beta).any()),
+            "beta_has_inf": bool(np.isinf(beta).any()),
+        },
+    )
+    # #endregion
+    return beta
 
 
 def _prepare_model_matrix(trades: pd.DataFrame) -> tuple[pd.DataFrame, list[str], pd.Series, pd.Series]:
@@ -922,6 +998,18 @@ def run_intelligent_optimization(
     min_train_trades: int = MIN_TRAIN_TRADES_DEFAULT,
     quality_threshold: float = QUALITY_THRESHOLD_DEFAULT,
 ) -> OptimizationReport:
+    # #region agent log
+    _agent_dbg_log(
+        "H4",
+        "optimizer.py:run_intelligent_optimization",
+        "entry",
+        {
+            "market_timezone": str(cfg.market_timezone),
+            "lookback_trades": int(lookback_trades),
+            "min_train_trades": int(min_train_trades),
+        },
+    )
+    # #endregion
     trades, collection_summary = collect_clean_closed_trades(
         trade_file,
         lookback_trades=lookback_trades,

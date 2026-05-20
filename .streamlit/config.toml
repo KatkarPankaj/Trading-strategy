@@ -1,2 +1,16 @@
+# Hot reload: when you save a Python file, the app reruns automatically (no server restart).
+# Start Streamlit from the repository root so this file is used
+# (e.g. `PYTHONPATH=src streamlit run app.py`).
+#
+# Docker / Windows bind mounts: if saves don’t trigger a rerun, set
+# fileWatcherType = "poll" under [server].
+
 [theme]
 base = "light"
+
+[server]
+runOnSave = true
+fileWatcherType = "auto"
+
+[runner]
+fastReruns = true

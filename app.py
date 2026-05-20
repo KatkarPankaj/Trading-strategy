@@ -1,7 +1,10 @@
 """
 Unified launcher: Simple dashboard only.
 
-Run: PYTHONPATH=src streamlit run app.py
+Run from repo root: PYTHONPATH=src streamlit run app.py
+
+``.streamlit/config.toml`` enables ``runOnSave``: after you save a ``.py`` file, the
+app reruns in the browser without restarting the Streamlit process.
 
 The legacy complex scanner lives in dashboard.py and is not loaded from this entry point.
 """
