@@ -8,6 +8,7 @@ from .components import (
     render_market_selector,
     render_app_logs,
 )
+from .simple_signals_tables import render_live_tables_and_errors_fragment
 from .theme import inject_theme
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "render_trades_table",
     "render_market_selector",
     "render_app_logs",
+    "render_live_tables_and_errors_fragment",
     "inject_theme",
 ]

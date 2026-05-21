@@ -64,7 +64,7 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m stockmarket.cli backtest --config config.json
 ```
 
-## Launch browser app
+## Launch browser app (legacy research UI)
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -72,6 +72,7 @@ $env:PYTHONPATH = "src"
 ```
 
 Then open the local URL shown in terminal (usually [http://localhost:8501](http://localhost:8501)).
+This entrypoint is legacy and overlaps CLI research flows.
 
 ## Launch unified dashboard (recommended)
 
@@ -84,7 +85,7 @@ $env:PYTHONPATH = "src"
 
 Run the command from the repo root so `.streamlit/config.toml` applies: saving Python files triggers an automatic app rerun (“hot reload”) without restarting the server.
 
-## Launch advanced scanner + dummy trading app
+## Launch advanced scanner + dummy trading app (legacy)
 
 This app includes:
 
@@ -96,6 +97,9 @@ This app includes:
 $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m streamlit run dashboard.py
 ```
+
+This scanner is deprecated and kept for backward compatibility only.
+Use `streamlit run app.py` for the supported dashboard. See [arch migration plan.md](arch migration plan.md).
 
 ## Launch simple lightweight simulator (fast page)
 
@@ -116,6 +120,7 @@ Optional `dashboard_simple_data_config.json` field `us_market_data_batch_size` c
 Set `USE_PAPER_REPO=1` to exercise the flagged JSON repository path for simple paper state persistence.
 Set `USE_APP_SETTINGS=1` to resolve NSE/US market watchlists and session times from `config/market_config.json` (default uses inline dashboard constants).
 Set `DISABLE_ML_SCORER=1` to skip sklearn market-learning scoring in `dashboard_simple.py` (effective scores use rule scores + trade-history bias only).
+Set `USE_SIMPLE_VIEWS=1` to render extracted simple dashboard view modules while keeping legacy inline render blocks available for parity checks.
 
 ## Dashboard Strategy (Complete)
 

@@ -544,6 +544,10 @@ def _use_trading_cycle() -> bool:
     return os.environ.get("USE_TRADING_CYCLE") == "1"
 
 
+def _use_simple_views() -> bool:
+    return os.environ.get("USE_SIMPLE_VIEWS") == "1"
+
+
 def _paper_repo():
     return get_paper_repo(_state_file(), market=_selected_market())
 
@@ -2457,32 +2461,21 @@ def _rank_signals_for_cycle(**kwargs):
 
 
 def _build_cycle_services():
-    from stockmarket.cycle.adapters.dashboard_signals import DashboardSignalSource
-    from stockmarket.cycle.adapters.live_clock import LiveClock
-    from stockmarket.cycle.adapters.log_history import LogHistoryQuery
-    from stockmarket.cycle.adapters.session_prices import SessionPriceRefresh
-    from stockmarket.cycle.adapters.session_repo import SessionPaperRepo
-    from stockmarket.cycle.adapters.streamlit_broker import StreamlitBroker
-    from stockmarket.cycle.services import Services
+    from stockmarket.cycle.factory import build_services
 
-    if _use_paper_repo():
-        repo = get_paper_repo(_state_file(), _selected_market())
-    else:
-        repo = SessionPaperRepo(st.session_state, persist_fn=_save_state)
-
-    return Services(
-        clock=LiveClock(
-            market_now,
-            market_open=_market_open_time(),
-            entry_cutoff=_entry_cutoff_time(),
-            square_off=_square_off_time(),
-        ),
-        broker=StreamlitBroker(_intraday_charges),
-        signals=DashboardSignalSource(_rank_signals_for_cycle),
-        history=LogHistoryQuery(_market_open_time()),
-        repo=repo,
-        prices=SessionPriceRefresh(st.session_state, _refresh_holding_prices),
+    return build_services(
+        session=st.session_state,
+        market_now_fn=market_now,
+        market_open=_market_open_time(),
+        entry_cutoff=_entry_cutoff_time(),
+        square_off=_square_off_time(),
         charges_fn=_intraday_charges,
+        rank_signals_fn=_rank_signals_for_cycle,
+        refresh_prices_fn=_refresh_holding_prices,
+        persist_state_fn=_save_state,
+        use_paper_repo=_use_paper_repo(),
+        state_file=_state_file(),
+        market=_selected_market(),
         scorer=_dashboard_scorer(_symbol_bias_map()),
     )
 
@@ -4374,12 +4367,31 @@ def render_simple_dashboard(standalone: bool = True) -> None:
                 for k, v in optimizer_artifacts.items():
                     st.caption(f"- {k}: {v}")
     
-    _fragment_live_tables_and_errors(
-        buy_df,
-        sell_df,
-        holdings_df,
-        scan_errors,
-    )
+    if _use_simple_views():
+        from stockmarket.views.simple_signals_tables import (
+            render_live_tables_and_errors_fragment,
+        )
+
+        trade_log = list(st.session_state.get("s_log", []))
+        completed_trades = _completed_trades_from_log(trade_log)
+        raw_order_log = _build_raw_order_log(trade_log, _currency_symbol())
+        render_live_tables_and_errors_fragment(
+            buy_df=buy_df,
+            sell_df=sell_df,
+            holdings_df=holdings_df,
+            scan_errors=scan_errors,
+            trade_log=trade_log,
+            completed_trades=completed_trades,
+            raw_order_log=raw_order_log,
+            currency_symbol=_currency_symbol(),
+        )
+    else:
+        _fragment_live_tables_and_errors(
+            buy_df,
+            sell_df,
+            holdings_df,
+            scan_errors,
+        )
 
     
     if auto_refresh_on:

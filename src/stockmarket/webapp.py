@@ -16,6 +16,12 @@ from stockmarket.sweep import run_parameter_sweep
 st.set_page_config(page_title="StockMarket Intraday App", layout="wide")
 st.title("StockMarket Intraday App (NSE/BSE)")
 st.caption("Personal-use intraday research UI")
+st.warning(
+    "Legacy research UI. Prefer CLI commands: "
+    "`python -m stockmarket.cli backtest`, "
+    "`python -m stockmarket.cli sweep`, "
+    "`python -m stockmarket.cli optimize`."
+)
 
 
 @st.cache_data(ttl=300)

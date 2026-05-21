@@ -2160,6 +2160,9 @@ def render_complex_dashboard(standalone: bool = True) -> None:
         st.set_page_config(page_title="NSE/BSE Intraday Dashboard",
                            page_icon="📈", layout="wide")
     st.subheader("NSE/BSE Intraday Paper-Testing Dashboard")
+    st.warning(
+        "Legacy scanner — use `streamlit run app.py` for the supported dashboard."
+    )
     
     boot_cfg = load_config("config.json")
     now_market = market_now(boot_cfg.market_timezone)
