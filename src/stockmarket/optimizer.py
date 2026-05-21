@@ -349,20 +349,28 @@ def _prepare_market_features(df: pd.DataFrame, cfg: TradingConfig) -> pd.DataFra
     return out
 
 
+def _benchmark_symbol_for_cfg(cfg: TradingConfig) -> str:
+    tz = str(cfg.market_timezone or "").lower()
+    if "new_york" in tz or tz in {"us/eastern", "america/new_york"}:
+        return "SPY"
+    return "^NSEI"
+
+
 def enrich_trade_features(trades: pd.DataFrame, cfg: TradingConfig) -> pd.DataFrame:
     symbols = sorted(
         {str(sym) for sym in trades["symbol"].dropna().unique() if str(sym) != "None"})
     feature_map: dict[str, pd.DataFrame] = {}
     index_features: pd.DataFrame | None = None
+    index_symbol = _benchmark_symbol_for_cfg(cfg)
+    fetch_kwargs = dict(max_retries=1, backoff_base=0.5)
 
     try:
         index_df = fetch_intraday_data(
-            "^NSEI",
+            index_symbol,
             cfg.interval,
             cfg.period,
             tz=cfg.market_timezone,
-            max_retries=1,
-            backoff_base=0.5,
+            **fetch_kwargs,
         )
         index_features = _prepare_market_features(index_df, cfg)
     except Exception:
@@ -371,7 +379,12 @@ def enrich_trade_features(trades: pd.DataFrame, cfg: TradingConfig) -> pd.DataFr
     for symbol in symbols:
         try:
             market_df = fetch_intraday_data(
-                symbol, cfg.interval, cfg.period, tz=cfg.market_timezone)
+                symbol,
+                cfg.interval,
+                cfg.period,
+                tz=cfg.market_timezone,
+                **fetch_kwargs,
+            )
             feature_map[symbol] = _prepare_market_features(market_df, cfg)
         except Exception:
             continue
@@ -383,7 +396,7 @@ def enrich_trade_features(trades: pd.DataFrame, cfg: TradingConfig) -> pd.DataFr
         "feature_maps_ready",
         {
             "market_timezone": str(cfg.market_timezone),
-            "index_bench": "^NSEI",
+            "index_bench": index_symbol,
             "index_loaded": index_features is not None,
             "index_rows": int(len(index_features)) if index_features is not None else 0,
             "symbol_maps": int(len(feature_map)),
