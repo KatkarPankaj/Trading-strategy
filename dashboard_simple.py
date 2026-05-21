@@ -4492,9 +4492,23 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         )
 
     
-    if auto_refresh_on:
-        st.caption(f"Auto refresh active: every {refresh_seconds}s")
-        _auto_refresh(refresh_seconds)
+    if _view_flag_enabled("AUTO_REFRESH"):
+        from stockmarket.views.simple_auto_refresh import render_auto_refresh_footer
+
+        if auto_refresh_on and refresh_seconds > 0:
+            # TODO(phase-8b): _quick_portfolio_metrics already calls
+            # _refresh_holding_prices at the top of the render; this second
+            # call may be redundant. Left in place to preserve legacy
+            # behaviour exactly until dedup parity can be confirmed.
+            _refresh_holding_prices()
+        render_auto_refresh_footer(
+            enabled=auto_refresh_on,
+            refresh_seconds=int(refresh_seconds),
+        )
+    else:
+        if auto_refresh_on:
+            st.caption(f"Auto refresh active: every {refresh_seconds}s")
+            _auto_refresh(refresh_seconds)
 
 
 if __name__ == "__main__":
