@@ -20,7 +20,7 @@ if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from typing import Any
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 
 import pandas as pd
 import pytz
@@ -1382,7 +1382,13 @@ def _max_feasible_order_value(
     return float(max(100.0, min(symbol_cap, deploy_cap, qty_cap_value, cash_cap)))
 
 
-def _hhmm_to_time(hhmm: int) -> time:
+def _hhmm_int_to_time(hhmm: int) -> time:
+    """Convert a packed HHMM int (e.g. 915 -> 09:15) to a ``time`` object.
+
+    Separate from the string-form ``_hhmm_to_time`` (top of module) which
+    parses ``"HH:MM"`` profile strings; renamed in phase 8b to stop the int
+    form from shadowing the string form at module-load time.
+    """
     val = int(max(0, min(2359, hhmm)))
     h = max(0, min(23, val // 100))
     m = max(0, min(59, val % 100))
@@ -3521,7 +3527,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
             min_short_score=effective_min_short_score,
             enable_profit_guard=enable_profit_guard,
             profit_guard_drawdown_pct=profit_guard_drawdown_pct,
-            profit_guard_after=_hhmm_to_time(profit_guard_after_hhmm),
+            profit_guard_after=_hhmm_int_to_time(profit_guard_after_hhmm),
             block_new_entries_on_guard=block_new_entries_on_guard,
             daily_profit_target=daily_profit_target,
             reentry_cooldown_minutes=reentry_cooldown_minutes,
@@ -3636,20 +3642,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
     
     # Get holdings dataframe for the Open Positions section below
     holdings_df, _, _ = _portfolio_view()
-    
-    # Yesterday's PnL from history CSV (for sidebar display if needed)
-    _yesterday = (market_now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    _daily_hist_file = Path("outputs") / "daily_pnl_history.csv"
-    yesterday_net = None
-    if _daily_hist_file.exists():
-        try:
-            _hist = pd.read_csv(_daily_hist_file)
-            _row = _hist[_hist["trade_date"] == _yesterday]
-            if not _row.empty:
-                yesterday_net = float(_row.iloc[-1]["net_pnl"])
-        except Exception:
-            pass
-    
+
     from stockmarket.views.simple_tomorrow_plan import render_tomorrow_plan
 
     render_tomorrow_plan(
