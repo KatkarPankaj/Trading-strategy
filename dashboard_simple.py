@@ -37,6 +37,7 @@ try:
 except Exception:
     _finnhub_fetch_quote = None  # type: ignore
 
+from stockmarket.domain import PortfolioSnapshot
 from stockmarket.persistence.paper_repo import get_paper_repo
 from stockmarket.state import (
     counters_to_session_state,
@@ -670,9 +671,50 @@ def _auto_refresh(seconds: int) -> None:
     )
 
 
+def _build_portfolio_snapshot() -> PortfolioSnapshot:
+    """Read session state, return a frozen snapshot for the metrics view."""
+    _, unrealized, positions_mtm = _portfolio_view()
+    realized = float(st.session_state.s_realized)
+    charges = float(st.session_state.s_charges)
+    cash = float(st.session_state.s_cash)
+    start = float(st.session_state.s_start)
+    equity = cash + positions_mtm
+
+    today = market_now().strftime("%Y-%m-%d")
+    today_realized = sum(
+        float(row.get("realized_delta", 0.0))
+        for row in st.session_state.s_log
+        if str(row.get("ts", "")).startswith(today)
+    )
+    daily_pnl = today_realized + unrealized
+    daily_profit_target = float(
+        st.session_state.get("s_ui_config", {}).get("daily_profit_target", 4000.0)
+    )
+
+    return PortfolioSnapshot(
+        start_capital=start,
+        cash=cash,
+        equity=equity,
+        equity_delta=equity - start,
+        unrealized=float(unrealized),
+        realized=realized,
+        charges=charges,
+        net_realized=realized - charges,
+        today_pnl=daily_pnl,
+        daily_profit_target=daily_profit_target,
+        currency_symbol=_currency_symbol(),
+    )
+
+
 def _quick_portfolio_metrics() -> None:
     """Render portfolio metrics with live price updates. Called on every refresh."""
     _refresh_holding_prices()
+
+    if _view_flag_enabled("PORTFOLIO_METRICS"):
+        from stockmarket.views.simple_portfolio_metrics import render_portfolio_metrics
+
+        render_portfolio_metrics(_build_portfolio_snapshot())
+        return
 
     holdings_df, unrealized, positions_mtm = _portfolio_view()
     realized = float(st.session_state.s_realized)

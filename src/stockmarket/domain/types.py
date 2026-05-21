@@ -105,3 +105,26 @@ class CycleSettings:
     guards: GuardSettings
     symbols: tuple[str, ...]
 
+
+@dataclass(frozen=True)
+class PortfolioSnapshot:
+    """Immutable view model for the portfolio metrics block.
+
+    Captures everything the metrics view needs in one place so the view can
+    stay free of ``st.session_state`` access. ``equity_delta`` is
+    ``equity - start_capital`` and ``net_realized`` is ``realized - charges``;
+    both are pre-computed in the caller to keep the view formatting-only.
+    """
+
+    start_capital: float
+    cash: float
+    equity: float
+    equity_delta: float
+    unrealized: float
+    realized: float
+    charges: float
+    net_realized: float
+    today_pnl: float
+    daily_profit_target: float
+    currency_symbol: str
+
