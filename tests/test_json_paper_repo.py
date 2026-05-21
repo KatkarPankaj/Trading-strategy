@@ -85,6 +85,43 @@ def test_json_paper_repo_matches_legacy_save_payload(tmp_path):
     assert repo_payload == legacy_payload
 
 
+def test_json_paper_repo_round_trips_tradebookid(tmp_path):
+    from dataclasses import replace
+
+    from stockmarket.domain import TradeLogEntry
+
+    payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    source = tmp_path / "in.json"
+    target = tmp_path / "out.json"
+    source.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    loaded = JsonPaperRepo(source, market="NSE").load()
+    assert loaded is not None
+    state, counters = loaded
+    state = replace(
+        state,
+        log=[
+            TradeLogEntry(
+                ts="2026-01-01 09:30:00",
+                symbol="ABC",
+                side="BUY",
+                qty=1,
+                price=100.0,
+                charges=1.0,
+                realized_delta=0.0,
+                reason="entry",
+                cash_after=99900.0,
+                tradebookid=4321,
+            )
+        ],
+    )
+    JsonPaperRepo(target, market="NSE").save(state, counters)
+
+    reloaded = JsonPaperRepo(target, market="NSE").load()
+    assert reloaded is not None
+    assert reloaded[0].log[0].tradebookid == 4321
+
+
 def test_dashboard_uses_json_paper_repo_when_flag_enabled(tmp_path, monkeypatch):
     import dashboard_simple
 

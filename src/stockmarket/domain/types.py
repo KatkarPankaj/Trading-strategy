@@ -28,6 +28,7 @@ class TradeLogEntry:
     realized_delta: float
     reason: str
     cash_after: float
+    tradebookid: int = 0
 
 
 @dataclass

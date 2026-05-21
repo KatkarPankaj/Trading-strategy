@@ -158,6 +158,7 @@ def _trade_log_entry(row: Any) -> TradeLogEntry:
         realized_delta=float(data.get("realized_delta", 0.0) or 0.0),
         reason=str(data.get("reason", "")),
         cash_after=float(data.get("cash_after", 0.0) or 0.0),
+        tradebookid=int(data.get("tradebookid", 0) or 0),
     )
 
 

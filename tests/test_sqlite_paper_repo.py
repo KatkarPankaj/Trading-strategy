@@ -213,3 +213,77 @@ def test_rich_state_parity_json_vs_sqlite(tmp_path: Path) -> None:
 
     assert json_loaded is not None and sqlite_loaded is not None
     assert json_loaded == sqlite_loaded
+
+
+def test_tradebookid_defaults_to_zero_round_trip(tmp_path: Path) -> None:
+    state, counters = _rich_state()
+    repo = SqlitePaperRepo(tmp_path / "p.db", market="NSE")
+    repo.save(state, counters)
+    loaded = repo.load()
+    assert loaded is not None
+    for entry in loaded[0].log:
+        assert entry.tradebookid == 0
+
+
+def test_tradebookid_explicit_value_round_trips(tmp_path: Path) -> None:
+    state, counters = _rich_state()
+    state = replace(
+        state,
+        log=[
+            replace(state.log[0], tradebookid=42),
+            replace(state.log[1], tradebookid=7),
+            replace(state.log[2], tradebookid=0),
+        ],
+    )
+    repo = SqlitePaperRepo(tmp_path / "p.db", market="NSE")
+    repo.save(state, counters)
+    loaded = repo.load()
+    assert loaded is not None
+    assert [e.tradebookid for e in loaded[0].log] == [42, 7, 0]
+
+
+def test_trade_log_schema_has_tradebookid_column(tmp_path: Path) -> None:
+    db = tmp_path / "p.db"
+    SqlitePaperRepo(db, market="NSE")  # ensures schema
+    with sqlite3.connect(db) as conn:
+        cols = {row[1]: row for row in conn.execute("PRAGMA table_info(trade_log)")}
+    assert "tradebookid" in cols
+    # PRAGMA columns: cid, name, type, notnull, dflt_value, pk
+    assert cols["tradebookid"][2].upper() == "INTEGER"
+    assert int(cols["tradebookid"][4]) == 0
+
+
+def test_alter_table_adds_tradebookid_to_pre_existing_db(tmp_path: Path) -> None:
+    db = tmp_path / "p.db"
+    legacy_ddl = """
+        CREATE TABLE trade_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            qty INTEGER NOT NULL,
+            price REAL NOT NULL,
+            charges REAL NOT NULL,
+            realized_delta REAL NOT NULL,
+            reason TEXT NOT NULL,
+            cash_after REAL NOT NULL
+        )
+    """
+    with sqlite3.connect(db) as conn:
+        conn.execute(legacy_ddl)
+        conn.commit()
+        cols_before = {row[1] for row in conn.execute("PRAGMA table_info(trade_log)")}
+    assert "tradebookid" not in cols_before
+
+    state, counters = _rich_state()
+    state = replace(state, log=[replace(state.log[0], tradebookid=99)])
+    repo = SqlitePaperRepo(db, market="NSE")
+    with sqlite3.connect(db) as conn:
+        cols_after = {row[1] for row in conn.execute("PRAGMA table_info(trade_log)")}
+    assert "tradebookid" in cols_after
+
+    repo.save(state, counters)
+    loaded = repo.load()
+    assert loaded is not None
+    assert loaded[0].log[0].tradebookid == 99

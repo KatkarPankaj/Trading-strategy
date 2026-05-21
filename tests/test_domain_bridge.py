@@ -121,8 +121,33 @@ def test_paper_state_writes_dict_compatible_log_rows():
             "realized_delta": 0.0,
             "reason": "test",
             "cash_after": 99900.0,
+            "tradebookid": 0,
         }
     ]
+
+
+def test_session_log_without_tradebookid_defaults_to_zero():
+    session = {
+        "s_start": 100000.0,
+        "s_cash": 99900.0,
+        "s_log": [
+            {
+                "ts": "2026-01-01 09:30:00",
+                "symbol": "ABC",
+                "side": "BUY",
+                "qty": 1,
+                "price": 100.0,
+                "charges": 1.0,
+                "realized_delta": 0.0,
+                "reason": "legacy row",
+                "cash_after": 99900.0,
+            }
+        ],
+    }
+
+    state = session_state_to_paper_state(session)
+
+    assert state.log[0].tradebookid == 0
 
 
 def test_counters_write_day_when_peak_day_is_empty():

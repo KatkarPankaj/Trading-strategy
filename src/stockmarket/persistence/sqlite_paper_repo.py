@@ -69,7 +69,8 @@ _SCHEMA = [
         charges REAL NOT NULL,
         realized_delta REAL NOT NULL,
         reason TEXT NOT NULL,
-        cash_after REAL NOT NULL
+        cash_after REAL NOT NULL,
+        tradebookid INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -127,7 +128,8 @@ class SqlitePaperRepo:
                 _row_to_trade_log_entry(row)
                 for row in conn.execute(
                     "SELECT ts, symbol, side, qty, price, charges, realized_delta,"
-                    " reason, cash_after FROM trade_log WHERE market = ? ORDER BY id ASC",
+                    " reason, cash_after, tradebookid FROM trade_log WHERE market = ?"
+                    " ORDER BY id ASC",
                     (self._market,),
                 )
             ]
@@ -203,8 +205,8 @@ class SqlitePaperRepo:
                 conn.execute("DELETE FROM trade_log WHERE market = ?", (market,))
                 conn.executemany(
                     "INSERT INTO trade_log (market, ts, symbol, side, qty, price,"
-                    " charges, realized_delta, reason, cash_after)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " charges, realized_delta, reason, cash_after, tradebookid)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [_trade_log_row(market, row) for row in state.log],
                 )
 
@@ -250,6 +252,17 @@ class SqlitePaperRepo:
             with conn:
                 for stmt in _SCHEMA:
                     conn.execute(stmt)
+                self._add_column_if_missing(
+                    conn, "trade_log", "tradebookid", "INTEGER NOT NULL DEFAULT 0"
+                )
+
+    @staticmethod
+    def _add_column_if_missing(
+        conn: sqlite3.Connection, table: str, column: str, decl: str
+    ) -> None:
+        cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def _load_positions(self, conn: sqlite3.Connection, side: str) -> dict[str, Position]:
         rows = conn.execute(
@@ -302,6 +315,7 @@ def _trade_log_row(market: str, entry: TradeLogEntry | Mapping[str, Any]) -> tup
         float(data.get("realized_delta", 0.0) or 0.0),
         str(data.get("reason", "")),
         float(data.get("cash_after", 0.0) or 0.0),
+        int(data.get("tradebookid", 0) or 0),
     )
 
 
@@ -317,6 +331,7 @@ def _row_to_trade_log_entry(row: sqlite3.Row) -> TradeLogEntry:
         realized_delta=float(row["realized_delta"]),
         reason=str(row["reason"]),
         cash_after=float(row["cash_after"]),
+        tradebookid=int(row["tradebookid"] or 0),
     )
 
 

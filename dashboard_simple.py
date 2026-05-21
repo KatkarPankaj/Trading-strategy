@@ -1504,6 +1504,7 @@ def _record_trade(
             "realized_delta": float(realized_delta),
             "reason": reason,
             "cash_after": float(st.session_state.s_cash),
+            "tradebookid": 0,
         }
     )
     _save_state()
