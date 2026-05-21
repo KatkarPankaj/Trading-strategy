@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
+from stockmarket.domain.scorer import SymbolScorer
+from stockmarket.ml.null_scorer import NullSymbolScorer
 from stockmarket.persistence.paper_repo import PaperRepo
 
 from .entry.cooldown import DefaultCooldownPolicy
@@ -34,4 +36,4 @@ class Services:
     cooldown: CooldownPolicy = field(default_factory=DefaultCooldownPolicy)
     sizer: PositionSizer = field(default_factory=DefaultPositionSizer)
     idle_fallback: IdleFallbackPolicy = field(default_factory=DefaultIdleFallbackPolicy)
-    scorer: Any = None
+    scorer: SymbolScorer = field(default_factory=NullSymbolScorer)

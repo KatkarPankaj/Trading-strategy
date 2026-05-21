@@ -362,29 +362,13 @@ def _optimizer_imports() -> tuple[Any, Any, Any, Any]:
     return _optimizer_mod
 
 
-_market_learning_mod: tuple[Any, Any, Any, Any] | None = None
+def _dashboard_scorer(bias_map: dict[str, float] | None = None):
+    from stockmarket.ml import build_scorer, with_bias_map
 
-
-def _market_learning_imports() -> tuple[Any, Any, Any, Any]:
-    global _market_learning_mod
-    if _market_learning_mod is None:
-        try:
-            from stockmarket.market_learning import (
-                MarketLearningModel,
-                get_symbol_quality_score,
-                resolve_learning_model_path,
-                train_market_learning_model,
-            )
-
-            _market_learning_mod = (
-                train_market_learning_model,
-                get_symbol_quality_score,
-                MarketLearningModel,
-                resolve_learning_model_path,
-            )
-        except Exception:
-            _market_learning_mod = (None, None, None, None)
-    return _market_learning_mod
+    base = build_scorer(_state_file())
+    if bias_map:
+        return with_bias_map(base, bias_map)
+    return base
 
 
 def _quote_service():
@@ -2052,17 +2036,7 @@ def _batch_ml_scores_cached(
     state_mtime: float,
     model_mtime: float,
 ) -> dict[str, float]:
-    _, get_symbol_quality_score, _, _ = _market_learning_imports()
-    scores: dict[str, float] = {}
-    if get_symbol_quality_score is None:
-        return scores
-    state_file = _state_file()
-    for sym in symbols:
-        try:
-            scores[sym] = float(get_symbol_quality_score(sym, state_file))
-        except Exception:
-            continue
-    return scores
+    return _dashboard_scorer().batch_scores(symbols)
 
 
 def _apply_effective_scores(
@@ -2071,87 +2045,31 @@ def _apply_effective_scores(
     sell_exit_df: pd.DataFrame,
     bias_map: dict[str, float],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    from stockmarket.cycle.scoring import apply_effective_scores
+
     ml_enabled = bool(
         st.session_state.get("s_ui_config", {}).get("enable_ml_scoring", False)
     )
-
-    buy_out = buy_df.copy() if not buy_df.empty else buy_df
-    sell_out = sell_df.copy() if not sell_df.empty else sell_df
-    sell_exit_out = sell_exit_df.copy() if not sell_exit_df.empty else sell_exit_df
-
-    if not buy_out.empty:
-        buy_out["symbol_bias"] = buy_out["symbol"].map(
-            lambda s: float(bias_map.get(str(s), 0.0))
-        )
-    if not sell_out.empty:
-        sell_out["symbol_bias"] = sell_out["symbol"].map(
-            lambda s: float(bias_map.get(str(s), 0.0))
-        )
-    if not sell_exit_out.empty:
-        sell_exit_out["symbol_bias"] = sell_exit_out["symbol"].map(
-            lambda s: float(bias_map.get(str(s), 0.0))
-        )
-
-    if not buy_out.empty:
-        rule_buy_score = pd.to_numeric(
-            buy_out["buy_score"], errors="coerce").fillna(0.0)
-        buy_bias = pd.to_numeric(
-            buy_out["symbol_bias"], errors="coerce").fillna(0.0)
-
-        _, get_symbol_quality_score, _, resolve_learning_model_path = _market_learning_imports()
-
-        if ml_enabled and get_symbol_quality_score is not None:
-            state_file = _state_file()
-            model_file = resolve_learning_model_path(
-                state_file) if resolve_learning_model_path is not None else Path("outputs") / "market_learning_model.pkl"
-            state_mtime = float(
-                state_file.stat().st_mtime) if state_file.exists() else 0.0
-            model_mtime = float(
-                model_file.stat().st_mtime) if model_file.exists() else 0.0
-
-            buy_symbols = tuple(
-                sorted({str(s) for s in buy_out["symbol"].astype(str).tolist()}))
-            ml_scores = _batch_ml_scores_cached(
-                buy_symbols, state_mtime, model_mtime)
-            buy_out["ml_quality_score"] = buy_out["symbol"].map(
-                lambda s: float(ml_scores.get(str(s), 0.5)))
-            ml_score = pd.to_numeric(
-                buy_out["ml_quality_score"], errors="coerce").fillna(0.5)
-
-            # Blend heuristic intraday signal with learned quality to keep scores data-driven.
-            blended_buy_score = (0.65 * rule_buy_score) + \
-                (0.35 * (ml_score * 100.0))
-            cap_series = pd.Series(92.0, index=blended_buy_score.index)
-            cap_series = cap_series.where(
-                ~((rule_buy_score >= 90.0) & (ml_score >= 0.80)),
-                97.0,
-            )
-            effective_buy_score = (blended_buy_score +
-                                   (0.8 * buy_bias)).clip(lower=0.0)
-            effective_buy_score = effective_buy_score.where(
-                effective_buy_score <= cap_series, cap_series)
-            buy_out["effective_buy_score"] = effective_buy_score.round(2)
-        else:
-            buy_out["effective_buy_score"] = (
-                rule_buy_score + buy_bias
-            ).clip(lower=0.0, upper=95.0).round(2)
-
-    if not sell_out.empty:
-        sell_out["effective_sell_score"] = (
-            pd.to_numeric(sell_out["sell_score"], errors="coerce").fillna(0.0)
-            + pd.to_numeric(sell_out["symbol_bias"],
-                            errors="coerce").fillna(0.0)
-        ).clip(lower=0.0, upper=95.0).round(2)
-
-    if not sell_exit_out.empty:
-        sell_exit_out["effective_sell_score"] = (
-            pd.to_numeric(sell_exit_out["sell_score"],
-                          errors="coerce").fillna(0.0)
-            + pd.to_numeric(sell_exit_out["symbol_bias"],
-                            errors="coerce").fillna(0.0)
-        ).clip(lower=0.0, upper=95.0).round(2)
-
-    return buy_out, sell_out, sell_exit_out
+    scorer = _dashboard_scorer(bias_map)
+    state_file = _state_file()
+    model_path = scorer.model_path() if hasattr(scorer, "model_path") else None
+    model_file = (
+        model_path
+        if isinstance(model_path, Path)
+        else Path("outputs") / "market_learning_model.pkl"
+    )
+    state_mtime = float(state_file.stat().st_mtime) if state_file.exists() else 0.0
+    model_mtime = float(model_file.stat().st_mtime) if model_file.exists() else 0.0
+    return apply_effective_scores(
+        buy_df,
+        sell_df,
+        sell_exit_df,
+        scorer,
+        ml_enabled=ml_enabled,
+        batch_ml_scores=_batch_ml_scores_cached,
+        state_mtime=state_mtime,
+        model_mtime=model_mtime,
+    )
 
 
 def _rank_signals(
@@ -2565,6 +2483,7 @@ def _build_cycle_services():
         repo=repo,
         prices=SessionPriceRefresh(st.session_state, _refresh_holding_prices),
         charges_fn=_intraday_charges,
+        scorer=_dashboard_scorer(_symbol_bias_map()),
     )
 
 
@@ -4295,16 +4214,16 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Train ML Model", key="btn_train_ml", help="Fetch 2 months historical data + train on personal trades"):
-                train_market_learning_model, _, _, _ = _market_learning_imports()
-                if train_market_learning_model is None:
+                ml_scorer = _dashboard_scorer()
+                if not ml_scorer.can_train():
                     st.error(
                         "ML module not available; install: pip install scikit-learn"
                     )
                 else:
                     with st.spinner("🔄 Fetching 60 days historical data + training model..."):
                         try:
-                            result = train_market_learning_model(
-                                _state_file(), active_watchlist, use_historical_data=True, historical_days=60)
+                            result = ml_scorer.train(
+                                active_watchlist, use_historical_data=True, historical_days=60)
                             status = str(result.get("status", "unknown"))
                             reason = str(result.get("reason", "")).strip()
                             if status == "trained":
@@ -4370,10 +4289,10 @@ def render_simple_dashboard(standalone: bool = True) -> None:
                 help="Computes per-symbol ML scores and may slow page load on large scan sizes.",
             )
     
-        _, get_symbol_quality_score, _, resolve_learning_model_path = _market_learning_imports()
+        ml_scorer = _dashboard_scorer()
 
         if (
-            get_symbol_quality_score is not None
+            ml_scorer.supports_ml_scoring()
             and st.session_state.s_ui_config.get("enable_ml_scoring", False)
             and show_ml_scores_table
         ):
@@ -4381,8 +4300,12 @@ def render_simple_dashboard(standalone: bool = True) -> None:
             state_file = _state_file()
             state_mtime = float(
                 state_file.stat().st_mtime) if state_file.exists() else 0.0
-            model_file = resolve_learning_model_path(
-                state_file) if resolve_learning_model_path is not None else Path("outputs") / "market_learning_model.pkl"
+            model_path = ml_scorer.model_path()
+            model_file = (
+                model_path
+                if isinstance(model_path, Path)
+                else Path("outputs") / "market_learning_model.pkl"
+            )
             model_mtime = float(
                 model_file.stat().st_mtime) if model_file.exists() else 0.0
             scores = _batch_ml_scores_cached(
