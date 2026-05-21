@@ -4,7 +4,11 @@ Last reviewed: 2026-05-21 (post-architecture-migration).
 
 These Mermaid diagrams describe the runtime after the phase 1–9 migration on `arch-migration-plan`. The legacy MVC stack is gone; the supported runtime is `app.py` → `dashboard_simple.render_simple_dashboard()` over the `domain` / `state` / `cycle` / `persistence` / `views` packages.
 
+Companion docs: `CODEBASE_STRUCTURE.md` (what exists and where), `MIGRATION.md` (phase ledger), `README.md` (install + CLI reference), `ML_MARKET_LEARNING.md` (scorer subsystem deep dive).
+
 ## Runtime entrypoints
+
+`streamlit run app.py` is the supported launcher; `streamlit run dashboard_simple.py` is the dev-time alternative (same code, runs `render_simple_dashboard(standalone=True)`). `dashboard.py` is a 31-line deprecation stub.
 
 ```mermaid
 flowchart TD
@@ -26,6 +30,7 @@ flowchart TD
   App --> Theme["src/stockmarket/views/theme.py"]
   App --> Simple
 
+  User -. "streamlit run dashboard_simple.py (dev)" .-> Simple
   User -. "shows banner & stops" .-> Legacy
   User -.-> WebApp
 
@@ -83,7 +88,7 @@ flowchart TD
   end
 
   subgraph Domain["domain/"]
-    Types["types.py: PaperState,\nTradeLogEntry (tradebookid),\nPosition, DailyCounters,\nAppSettings dataclasses,\nPortfolioSnapshot"]
+    Types["types.py: PaperState,\nTradeLogEntry (tradebookid),\nPosition, DailyCounters,\nRiskSettings/SignalSettings/GuardSettings/\nCycleSettings, PortfolioSnapshot"]
     Scorer["scorer.py: SymbolScorer protocol"]
   end
 
@@ -138,12 +143,62 @@ flowchart TD
   SqliteRepo <--> Sqlite
 ```
 
+### One auto-paper cycle, in order
+
+Whether driven by the legacy `_auto_paper_cycle()` body or by `cycle.runner.run_cycle()` (when `USE_TRADING_CYCLE=1`), each polling tick executes the same ordered pipeline. The cycle package makes the order explicit; the legacy path inlines it.
+
+```mermaid
+flowchart LR
+  Tick["dashboard tick"] --> S1["1. refresh holding prices\n(cycle/steps/prices.py)"]
+  S1 --> S2["2. market-open / weekend gate"]
+  S2 --> S3["3. roll daily counters\n(cycle/steps/counters.py)"]
+  S3 --> S4["4. profit ladder state machine"]
+  S4 --> S5["5. profit guard state machine"]
+  S5 --> S6["6. forced exits: SL / TP / time /\nladder / guard / square-off\n(cycle/steps/exits.py)"]
+  S6 --> S7["7. signal-based exits"]
+  S7 --> S8["8. re-entry cooldown + regime gate\n(cycle/entry/cooldown.py)"]
+  S8 --> S9["9. rank, score, size\n(_rank_signals_for_cycle,\ncycle/scoring.py, cycle/entry/sizing.py)"]
+  S9 --> S10["10. place entries (long/short)\n(cycle/steps/entries.py +\nstreamlit_broker adapter)"]
+  S10 --> S11["11. record trades, mutate state,\nPaperRepo.save()"]
+```
+
+### View layer boundary
+
+Views are pure-input modules. They take dataclasses or simple primitives, render Streamlit widgets, and must not import `dashboard_simple` or touch `st.session_state`. Violations are caught by AST walkers in `tests/test_phase8b_top_panels.py`.
+
+```mermaid
+flowchart LR
+  Simple["dashboard_simple.py\n(collects state, computes derived values)"]
+  Domain["domain/types.py\n(PortfolioSnapshot etc.)"]
+  Views["views/simple_*.py\n(pure input, formatting only)"]
+  StreamlitOut["Streamlit widgets"]
+
+  Simple --> Domain
+  Domain --> Views
+  Simple --> Views
+  Views --> StreamlitOut
+
+  Guard["tests/test_phase8b_top_panels.py\n(AST guard)"] -. "blocks st.session_state\nor dashboard_simple imports\ninside views/*.py" .-> Views
+```
+
+| Module | Inputs | Outputs |
+|---|---|---|
+| `views/simple_top_panels.py` | auto-trade flags, clean-trades stats, AI best-action payload, optimizer summary | top control + status row |
+| `views/simple_activity_and_logs.py` | activity feed list, log buffer | activity / log panel |
+| `views/simple_signals_tables.py` | top-5 buy / sell candidate rows, error banners | live tables fragment |
+| `views/simple_tomorrow_plan.py` | next-session plan rows | Tomorrow Plan expander |
+| `views/simple_portfolio_metrics.py` | `PortfolioSnapshot` (with pre-computed `equity_delta` + `net_realized`) | portfolio metrics block |
+| `views/simple_auto_refresh.py` | refresh-interval seconds, current tick state | footer auto-refresh widget |
+| `views/theme.py` | (none) | injected CSS / Streamlit theme |
+
 ## Persistence factory branching
+
+`get_paper_repo(path, market)` is the single composition site for paper-state storage. Defaults to JSON; SQLite is opt-in via env or `config/database_config.json`; the dual-write wrapper is an opt-in migration aid that the eventual default-flip retires.
 
 ```mermaid
 flowchart LR
   Caller["dashboard / cycle adapter"] --> Factory["get_paper_repo(path, market)"]
-  Factory --> Resolve["_resolve_backend()"]
+  Factory --> Resolve["_resolve_backend()\n(env > config/database_config.json > 'json')"]
   Resolve -->|"PAPER_REPO_BACKEND=json\n(or unset → default)"| JsonRepo["JsonPaperRepo\noutputs/simple_paper_state*.json"]
   Resolve -->|"PAPER_REPO_BACKEND=sqlite"| SqliteCheck{"DUAL_WRITE\nor\nFALLBACK_JSON ?"}
   SqliteCheck -- "neither" --> SqliteRepo["SqlitePaperRepo\n.database/paper_state.db"]
@@ -154,6 +209,8 @@ flowchart LR
 ```
 
 ## Backtest dataflow
+
+CLI is the entry; `BACKTEST_USE_CYCLE=1` routes through the new cycle adapters, otherwise the legacy `backtest.py` callable runs unchanged.
 
 ```mermaid
 flowchart LR
@@ -208,6 +265,61 @@ flowchart LR
   OptimizeCmd --> OptReports
 ```
 
+## Optimizer dataflow
+
+Two entry points share the same engine: the dashboard's "Run Optimizer Now" button and the CLI `optimize` command. Both land in `stockmarket.optimization`. The `stockmarket.optimizer` shim is a transitional re-export that emits `DeprecationWarning`.
+
+```mermaid
+flowchart LR
+  DashBtn["dashboard 'Run Optimizer Now'"] --> DashHandler["_run_optimizer_from_dashboard"]
+  CliOpt["python -m stockmarket optimize"] --> CliOptHandler["cli.optimize subcommand"]
+
+  DashHandler --> OptPkg["stockmarket.optimization"]
+  CliOptHandler --> OptPkg
+
+  Shim["stockmarket.optimizer\n(DeprecationWarning shim)"] -. "re-exports" .-> OptPkg
+
+  subgraph OptPkg["stockmarket.optimization"]
+    TH["trade_history.py\n(CSV normalization)"]
+    FE["features.py\n(walk-forward feature engineering)"]
+    RP["reports.py\n(export)"]
+  end
+
+  TH --> FE --> RP
+  RP --> OutOpt["outputs/optimize_*_recommendations.json\noutputs/optimize_*_symbol_scores.csv\noutputs/optimize_*_feature_scores.csv\noutputs/optimize_*_model_feature_importance.csv\noutputs/optimize_*_enriched_trades.csv"]
+```
+
+## ML scoring dataflow
+
+`SymbolScorer` is the Protocol the cycle consumes. Three implementations live under `ml/`; the historical-bootstrap pipeline that feeds the sklearn scorer lives in the legacy `market_learning.py` module plus `cycle/scoring.py`. A deeper subsystem walkthrough (training data, accuracy expectations, retrain cadence) is in `ML_MARKET_LEARNING.md`.
+
+```mermaid
+flowchart LR
+  Cycle["cycle/scoring.py"] --> Protocol["domain/scorer.py::SymbolScorer"]
+  Protocol --> Null["ml/null_scorer.py\n(DISABLE_ML_SCORER=1)"]
+  Protocol --> Sklearn["ml/sklearn_scorer.py"]
+  Protocol --> BiasS["ml/bias.py\n(BiasOverlayScorer)"]
+
+  subgraph Training["Training / data sources"]
+    HistOHLCV["market_learning.MarketDataFetcher\n(60d daily OHLCV)"]
+    PersTrades["personal trade history\n(simple_paper_state.json)"]
+    LiveTrend["live quote → trend metrics"]
+  end
+
+  HistOHLCV --> Sklearn
+  PersTrades --> Sklearn
+  PersTrades --> BiasS
+  LiveTrend --> Sklearn
+
+  subgraph Artifacts["outputs/"]
+    Cache["market_data_cache/*.csv"]
+    Model["market_learning_model.pkl"]
+  end
+
+  HistOHLCV <--> Cache
+  Sklearn <--> Model
+```
+
 ## Migration script (one-shot, retained as future-proofing)
 
 ```mermaid
@@ -225,5 +337,6 @@ The script is not on the active runtime path — it exists for the eventual SQLi
 ## Source-of-truth pointers
 
 - `MIGRATION.md` — phase-by-phase record of what shipped and why.
-- `CODEBASE_STRUCTURE.md` — package layout, feature flags, runtime flow narrative.
-- `README.md` — how to run the app and CLI.
+- `CODEBASE_STRUCTURE.md` — package layout, design patterns, feature flags, common commands.
+- `README.md` — how to install, run, and drive the CLI.
+- `ML_MARKET_LEARNING.md` — ML scorer subsystem deep dive.

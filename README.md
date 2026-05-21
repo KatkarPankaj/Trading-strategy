@@ -105,7 +105,13 @@ Optional `dashboard_simple_data_config.json` field `us_market_data_batch_size` c
 Set `USE_PAPER_REPO=1` to exercise the flagged JSON repository path for simple paper state persistence.
 Set `USE_APP_SETTINGS=1` to resolve NSE/US market watchlists and session times from `config/market_config.json` (default uses inline dashboard constants).
 Set `DISABLE_ML_SCORER=1` to skip sklearn market-learning scoring in `dashboard_simple.py` (effective scores use rule scores + trade-history bias only).
-Set `USE_SIMPLE_VIEWS=1` to render extracted simple dashboard view modules while keeping legacy inline render blocks available for parity checks.
+Set `PAPER_REPO_BACKEND=sqlite` to use the SQLite paper-state backend (`.database/paper_state.db`) instead of the JSON file; see `CODEBASE_STRUCTURE.md` for the full env-var matrix (`PAPER_REPO_DUAL_WRITE`, `PAPER_REPO_FALLBACK_JSON`, etc.).
+
+For a tour of the codebase (packages, design patterns, feature flags) see
+[`CODEBASE_STRUCTURE.md`](CODEBASE_STRUCTURE.md); for runtime sequencing diagrams
+see [`CODEBASE_DATAFLOW.md`](CODEBASE_DATAFLOW.md); for the architecture
+migration record see [`MIGRATION.md`](MIGRATION.md); for the ML scorer subsystem
+see [`ML_MARKET_LEARNING.md`](ML_MARKET_LEARNING.md).
 
 ## Dashboard Strategy (Complete)
 
