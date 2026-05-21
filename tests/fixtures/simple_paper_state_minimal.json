@@ -1,0 +1,20 @@
+{
+  "cash": 100000.0,
+  "start": 100000.0,
+  "realized": 0.0,
+  "charges": 0.0,
+  "holdings": {},
+  "shorts": {},
+  "ui_config": {},
+  "log": [],
+  "prices": {},
+  "agent_memory": {},
+  "peak_open_pnl": 0.0,
+  "peak_open_pnl_day": "",
+  "profit_guard_triggered_day": "",
+  "profit_ladder_day": "",
+  "profit_ladder_armed": false,
+  "profit_ladder_pullback_started": false,
+  "profit_ladder_exited_day": "",
+  "market": "NSE"
+}

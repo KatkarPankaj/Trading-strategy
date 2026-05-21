@@ -6,7 +6,10 @@ Run with: python -m pytest tests/test_dashboard_simple.py -v
 import sys
 import json
 import pandas as pd
+from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 # Add src to path
@@ -25,6 +28,35 @@ TEST_CONFIG_NSE = {
     "state_file": "test_state_nse.json",
     "currency": "Rs",
 }
+
+
+class SessionState(dict):
+    """Small Streamlit session_state stand-in for helper tests."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+
+def _paper_session(cash=100000.0, start=100000.0):
+    return SessionState(
+        s_cash=float(cash),
+        s_start=float(start),
+        s_realized=0.0,
+        s_charges=0.0,
+        s_holdings={},
+        s_shorts={},
+        s_ui_config={},
+        s_log=[],
+        s_prices={},
+        s_agent_memory={},
+        selected_market="NSE",
+    )
 
 
 class TestDashboardImports:
@@ -119,6 +151,55 @@ class TestHelperFunctions:
         assert charges_sell > 0, "SELL charges should be positive"
         assert charges_sell < 500, "SELL charges should be reasonable"
 
+    def test_record_trade_sides(self):
+        """Pin BUY/SELL/SHORT/COVER accounting and partial exits."""
+        import dashboard_simple
+
+        session = _paper_session()
+        fake_st = SimpleNamespace(session_state=session)
+
+        with (
+            patch.object(dashboard_simple, "st", fake_st),
+            patch.object(dashboard_simple, "_save_state"),
+            patch.object(dashboard_simple, "market_now", return_value=datetime(2026, 1, 1, 9, 30, 0)),
+        ):
+            buy_charges = dashboard_simple._intraday_charges("BUY", 1000.0)
+            dashboard_simple._record_trade("ABC", "BUY", 10, 100.0, "entry", sl_pct=0.01, tp_pct=0.02)
+
+            assert session.s_cash == pytest.approx(100000.0 - 1000.0 - buy_charges)
+            assert session.s_holdings["ABC"] == {
+                "qty": 10,
+                "avg": 100.0,
+                "stop": 99.0,
+                "target": 102.0,
+            }
+
+            sell_charges = dashboard_simple._intraday_charges("SELL", 440.0)
+            dashboard_simple._record_trade("ABC", "SELL", 4, 110.0, "partial exit")
+
+            assert session.s_holdings["ABC"]["qty"] == 6
+            assert session.s_realized == pytest.approx(40.0)
+            assert session.s_cash == pytest.approx(100000.0 - 1000.0 - buy_charges + 440.0 - sell_charges)
+            assert session.s_log[-1]["realized_delta"] == pytest.approx(40.0)
+
+            short_charges = dashboard_simple._intraday_charges("SHORT", 1000.0)
+            dashboard_simple._record_trade("XYZ", "SHORT", 5, 200.0, "short entry", sl_pct=0.01, tp_pct=0.02)
+
+            assert session.s_shorts["XYZ"] == {
+                "qty": 5,
+                "avg": 200.0,
+                "stop": 202.0,
+                "target": 196.0,
+            }
+
+            cover_charges = dashboard_simple._intraday_charges("COVER", 380.0)
+            dashboard_simple._record_trade("XYZ", "COVER", 2, 190.0, "partial cover")
+
+            assert session.s_shorts["XYZ"]["qty"] == 3
+            assert session.s_realized == pytest.approx(60.0)
+            assert session.s_charges == pytest.approx(buy_charges + sell_charges + short_charges + cover_charges)
+            assert [row["side"] for row in session.s_log] == ["BUY", "SELL", "SHORT", "COVER"]
+
     def test_completed_trade_pairs_buy_sell(self):
         """Test completed trade pairing and computed P&L columns."""
         import dashboard_simple
@@ -207,11 +288,93 @@ class TestHelperFunctions:
         first, second = ordered.iloc[0], ordered.iloc[1]
         assert first["realized_pnl"] == (130.0 - 100.0) * 5 - 5.0 - 5.0
         assert first["total_invested"] == (5 * 100.0) + 5.0
-        assert first["total_collected"] == (5 * 130.0) - 2.5
+        assert first["total_collected"] == (5 * 130.0) - 5.0
         assert first["reason"] == "partial target"
-        assert second["realized_pnl"] == (140.0 - 100.0) * 5 - 5.0 - 6.0
-        assert second["total_invested"] == (5 * 100.0) + 5.0
+        assert second["realized_pnl"] == (140.0 - 100.0) * 5 - 10.0 - 6.0
+        assert second["total_invested"] == (5 * 100.0) + 10.0
         assert second["total_collected"] == (5 * 140.0) - 6.0
+
+    def test_completed_trades_fifo(self):
+        """Interleaved symbols are matched by symbol using FIFO lots."""
+        import dashboard_simple
+
+        sample_log = [
+            {"ts": "2026-01-01 09:00:00", "symbol": "AAA", "side": "BUY", "qty": 10, "price": 100.0, "charges": 10.0},
+            {"ts": "2026-01-01 09:05:00", "symbol": "BBB", "side": "BUY", "qty": 3, "price": 50.0, "charges": 3.0},
+            {"ts": "2026-01-01 09:10:00", "symbol": "AAA", "side": "BUY", "qty": 5, "price": 110.0, "charges": 5.0},
+            {
+                "ts": "2026-01-01 09:15:00",
+                "symbol": "AAA",
+                "side": "SELL",
+                "qty": 12,
+                "price": 120.0,
+                "charges": 12.0,
+                "reason": "aaa exit",
+                "cash_after": 101400.0,
+            },
+            {
+                "ts": "2026-01-01 09:20:00",
+                "symbol": "BBB",
+                "side": "SELL",
+                "qty": 3,
+                "price": 60.0,
+                "charges": 3.0,
+                "reason": "bbb exit",
+                "cash_after": 101580.0,
+            },
+        ]
+
+        df = dashboard_simple._completed_trades_from_log(sample_log)
+
+        assert list(df["symbol"]) == ["AAA", "AAA", "BBB"]
+        assert list(df["quantity"]) == [10, 2, 3]
+        assert list(df["buying_price"]) == [100.0, 110.0, 50.0]
+        assert list(df["selling_price"]) == [120.0, 120.0, 60.0]
+        assert list(df["realized_pnl"]) == pytest.approx([180.0, 16.0, 24.0])
+
+    def test_rank_signals_caps(self):
+        """Ranking quantity respects max trade quantity and available cash."""
+        import dashboard_simple
+
+        quote_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "AAA",
+                    "price": 100.0,
+                    "buy_score": 80.0,
+                    "sell_score": 20.0,
+                    "pchange": 1.0,
+                    "range_pct": 1.0,
+                    "vwap_gap_pct": 0.5,
+                    "updated": "09:30:00",
+                }
+            ]
+        )
+
+        def run_with(session, max_qty_per_trade):
+            fake_st = SimpleNamespace(session_state=session, spinner=lambda *_args, **_kwargs: nullcontext())
+            with (
+                patch.object(dashboard_simple, "st", fake_st),
+                patch.object(dashboard_simple, "_scan_watchlist", return_value=(quote_rows, [])),
+            ):
+                buy_df, _, _, _ = dashboard_simple._rank_signals(
+                    ["AAA"],
+                    min_price=1.0,
+                    max_price=1000.0,
+                    risk_pct=10.0,
+                    sl_pct=0.01,
+                    tp_pct=0.02,
+                    max_symbol_allocation_pct=100.0,
+                    max_total_deployment_pct=100.0,
+                    max_qty_per_trade=max_qty_per_trade,
+                    max_open_positions=1,
+                    min_order_value=1.0,
+                    max_trade_invest_pct=100.0,
+                )
+            return int(buy_df.iloc[0]["rank_qty"])
+
+        assert run_with(_paper_session(cash=10000.0, start=10000.0), 3) == 3
+        assert run_with(_paper_session(cash=250.0, start=10000.0), 10) == 2
 
 
 class TestAPIConnections:
@@ -255,6 +418,64 @@ class TestStateManagement:
         
         for key in required_state_keys:
             assert key is not None, f"State key {key} cannot be None"
+
+    def test_save_payload_keys(self, tmp_path):
+        """Saved JSON keeps the current simple paper payload shape."""
+        import dashboard_simple
+
+        fixture_path = Path(__file__).parent / "fixtures" / "simple_paper_state_minimal.json"
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+        session = SessionState(
+            s_cash=payload["cash"],
+            s_start=payload["start"],
+            s_realized=payload["realized"],
+            s_charges=payload["charges"],
+            s_holdings=payload["holdings"],
+            s_shorts=payload["shorts"],
+            s_ui_config=payload["ui_config"],
+            s_log=payload["log"],
+            s_prices=payload["prices"],
+            s_agent_memory=payload["agent_memory"],
+            s_peak_open_pnl=payload["peak_open_pnl"],
+            s_peak_open_pnl_day=payload["peak_open_pnl_day"],
+            s_profit_guard_triggered_day=payload["profit_guard_triggered_day"],
+            s_profit_ladder_day=payload["profit_ladder_day"],
+            s_profit_ladder_armed=payload["profit_ladder_armed"],
+            s_profit_ladder_pullback_started=payload["profit_ladder_pullback_started"],
+            s_profit_ladder_exited_day=payload["profit_ladder_exited_day"],
+            selected_market=payload["market"],
+        )
+        state_file = tmp_path / "simple_paper_state.json"
+        fake_st = SimpleNamespace(session_state=session)
+
+        with (
+            patch.object(dashboard_simple, "st", fake_st),
+            patch.object(dashboard_simple, "_state_file", return_value=state_file),
+        ):
+            dashboard_simple._save_state()
+
+        saved = json.loads(state_file.read_text(encoding="utf-8"))
+        assert list(saved.keys()) == [
+            "cash",
+            "start",
+            "realized",
+            "charges",
+            "holdings",
+            "shorts",
+            "ui_config",
+            "log",
+            "prices",
+            "agent_memory",
+            "peak_open_pnl",
+            "peak_open_pnl_day",
+            "profit_guard_triggered_day",
+            "profit_ladder_day",
+            "profit_ladder_armed",
+            "profit_ladder_pullback_started",
+            "profit_ladder_exited_day",
+            "market",
+        ]
+        assert saved == payload
 
 
 class TestLoggingSystem:

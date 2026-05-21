@@ -11,6 +11,7 @@ import random as _rng_mod
 import json
 import logging
 import math
+import os
 import html
 import sys
 from pathlib import Path
@@ -35,6 +36,14 @@ try:
     from stockmarket.finnhub_client import fetch_quote as _finnhub_fetch_quote
 except Exception:
     _finnhub_fetch_quote = None  # type: ignore
+
+from stockmarket.persistence.paper_repo import get_paper_repo
+from stockmarket.state import (
+    counters_to_session_state,
+    paper_state_to_session_state,
+    session_state_to_counters,
+    session_state_to_paper_state,
+)
 
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -464,6 +473,18 @@ def _read_saved_state() -> dict[str, Any]:
         return {}
 
 
+def _use_paper_repo() -> bool:
+    return os.environ.get("USE_PAPER_REPO") == "1"
+
+
+def _use_trading_cycle() -> bool:
+    return os.environ.get("USE_TRADING_CYCLE") == "1"
+
+
+def _paper_repo():
+    return get_paper_repo(_state_file(), market=_selected_market())
+
+
 def _auto_export_clean_closed_trades() -> tuple[int, str | None]:
     _, collect_clean_closed_trades, _, _ = _optimizer_imports()
     if collect_clean_closed_trades is None:
@@ -493,6 +514,20 @@ def _auto_export_clean_closed_trades() -> tuple[int, str | None]:
         return 0, f"Clean closed-trade export failed: {exc}"
 
 
+def _optimizer_last_run_key() -> str:
+    return f"s_optimizer_last_run_ts_{_selected_market()}"
+
+
+def _optimizer_cfg_for_dashboard(TradingConfig: Any) -> Any:
+    cfg_path = Path("config.json")
+    cfg = TradingConfig.from_json(cfg_path) if cfg_path.exists() else TradingConfig()
+    if _selected_market() == "US":
+        cfg.market_timezone = "America/New_York"
+    else:
+        cfg.market_timezone = "Asia/Kolkata"
+    return cfg
+
+
 def _run_optimizer_from_dashboard(
     lookback_trades: int,
     min_train_trades: int,
@@ -512,9 +547,7 @@ def _run_optimizer_from_dashboard(
         return None, None, "Optimizer module unavailable in dashboard runtime."
 
     try:
-        cfg_path = Path("config.json")
-        cfg = TradingConfig.from_json(
-            cfg_path) if cfg_path.exists() else TradingConfig()
+        cfg = _optimizer_cfg_for_dashboard(TradingConfig)
         report = run_intelligent_optimization(
             trade_file=_state_file(),
             cfg=cfg,
@@ -879,7 +912,19 @@ def _init_state(starting_capital: float) -> None:
     ]:
         st.session_state.pop(key, None)
 
-    if state_file.exists():
+    if _use_paper_repo():
+        try:
+            loaded = _paper_repo().load()
+            if loaded:
+                state, counters = loaded
+                paper_state_to_session_state(st.session_state, state)
+                counters_to_session_state(st.session_state, counters)
+                st.session_state.s_state_file = state_key
+                _app_log("info", f"Loaded state for {_selected_market()} market")
+                return
+        except Exception as e:
+            _app_log("error", f"Failed to load saved state: {e}")
+    elif state_file.exists():
         try:
             data = _read_saved_state()
             st.session_state.s_cash = float(data.get("cash", starting_capital))
@@ -945,6 +990,12 @@ def _init_state(starting_capital: float) -> None:
 
 
 def _save_state() -> None:
+    if _use_paper_repo():
+        state = session_state_to_paper_state(st.session_state)
+        counters = session_state_to_counters(st.session_state)
+        _paper_repo().save(state, counters)
+        return
+
     state_file = _state_file()
     state_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -2317,6 +2368,157 @@ def _refresh_holding_prices() -> None:
             continue
 
 
+def _build_cycle_settings(
+    *,
+    risk_pct: float,
+    max_trades_day: int,
+    max_positions: int,
+    sl_pct: float,
+    tp_pct: float,
+    min_buy_score: float,
+    enable_signal_sell: bool,
+    min_sell_score: float,
+    max_signal_exits_per_cycle: int,
+    enable_short_selling: bool,
+    min_short_score: float,
+    enable_profit_guard: bool,
+    profit_guard_drawdown_pct: float,
+    profit_guard_after: time,
+    block_new_entries_on_guard: bool,
+    daily_profit_target: float,
+    reentry_cooldown_minutes: int,
+    reentry_min_move_pct: float,
+    enable_regime_entry_gate: bool,
+    market_regime: str,
+    sl_cooldown_after_stop_minutes: int,
+    max_qty_per_trade: int,
+    symbols: list[str],
+    min_price: float,
+    max_price: float,
+    max_symbol_allocation_pct: float,
+    max_total_deployment_pct: float,
+    min_order_value: float,
+    idle_buy_fallback_minutes: int,
+    max_trade_invest_pct: float,
+):
+    from stockmarket.domain import (
+        CycleSettings,
+        GuardSettings,
+        RiskSettings,
+        SignalSettings,
+    )
+
+    return CycleSettings(
+        risk=RiskSettings(
+            risk_pct=float(risk_pct),
+            sl_pct=float(sl_pct),
+            tp_pct=float(tp_pct),
+            max_trades_day=int(max_trades_day),
+            max_positions=int(max_positions),
+            max_qty_per_trade=int(max_qty_per_trade),
+            max_symbol_allocation_pct=float(max_symbol_allocation_pct),
+            max_total_deployment_pct=float(max_total_deployment_pct),
+            max_trade_invest_pct=float(max_trade_invest_pct),
+            min_order_value=float(min_order_value),
+            min_price=float(min_price),
+            max_price=float(max_price),
+        ),
+        signals=SignalSettings(
+            min_buy_score=float(min_buy_score),
+            min_sell_score=float(min_sell_score),
+            min_short_score=float(min_short_score),
+            enable_signal_sell=bool(enable_signal_sell),
+            enable_short_selling=bool(enable_short_selling),
+            max_signal_exits_per_cycle=int(max_signal_exits_per_cycle),
+            idle_buy_fallback_minutes=int(idle_buy_fallback_minutes),
+        ),
+        guards=GuardSettings(
+            enable_profit_guard=bool(enable_profit_guard),
+            profit_guard_drawdown_pct=float(profit_guard_drawdown_pct),
+            profit_guard_after=profit_guard_after,
+            block_new_entries_on_guard=bool(block_new_entries_on_guard),
+            daily_profit_target=float(daily_profit_target),
+            reentry_cooldown_minutes=int(reentry_cooldown_minutes),
+            reentry_min_move_pct=float(reentry_min_move_pct),
+            sl_cooldown_after_stop_minutes=int(sl_cooldown_after_stop_minutes),
+            enable_regime_entry_gate=bool(enable_regime_entry_gate),
+            market_regime=str(market_regime or "unknown"),
+        ),
+        symbols=tuple(symbols),
+    )
+
+
+def _rank_signals_for_cycle(**kwargs):
+    buy_df, sell_df, sell_exit_df, errors = _rank_signals(**kwargs)
+    buy_df, sell_df, _ = _apply_effective_scores(
+        buy_df,
+        sell_df,
+        pd.DataFrame(),
+        _symbol_bias_map(),
+    )
+    return buy_df, sell_df, sell_exit_df, errors
+
+
+def _build_cycle_services():
+    from stockmarket.cycle.adapters.dashboard_signals import DashboardSignalSource
+    from stockmarket.cycle.adapters.live_clock import LiveClock
+    from stockmarket.cycle.adapters.log_history import LogHistoryQuery
+    from stockmarket.cycle.adapters.session_prices import SessionPriceRefresh
+    from stockmarket.cycle.adapters.session_repo import SessionPaperRepo
+    from stockmarket.cycle.adapters.streamlit_broker import StreamlitBroker
+    from stockmarket.cycle.services import Services
+
+    if _use_paper_repo():
+        repo = get_paper_repo(_state_file(), _selected_market())
+    else:
+        repo = SessionPaperRepo(st.session_state, persist_fn=_save_state)
+
+    return Services(
+        clock=LiveClock(
+            market_now,
+            market_open=_market_open_time(),
+            entry_cutoff=_entry_cutoff_time(),
+            square_off=_square_off_time(),
+        ),
+        broker=StreamlitBroker(_intraday_charges),
+        signals=DashboardSignalSource(_rank_signals_for_cycle),
+        history=LogHistoryQuery(_market_open_time()),
+        repo=repo,
+        prices=SessionPriceRefresh(st.session_state, _refresh_holding_prices),
+        charges_fn=_intraday_charges,
+    )
+
+
+def _run_trading_cycle(
+    buy_df: pd.DataFrame,
+    sell_df: pd.DataFrame,
+    sell_exit_df: pd.DataFrame,
+    settings,
+) -> list[str]:
+    from stockmarket.cycle import CycleContext, run_cycle
+    from stockmarket.cycle.ports import RankedSignals
+
+    now = market_now()
+    state = session_state_to_paper_state(st.session_state)
+    counters = session_state_to_counters(st.session_state)
+    ctx = CycleContext(
+        now=now,
+        today=now.strftime("%Y-%m-%d"),
+        settings=settings,
+        state=state,
+        counters=counters,
+        signals=RankedSignals(
+            buy_df=buy_df,
+            sell_df=sell_df,
+            sell_exit_df=sell_exit_df,
+        ),
+    )
+    ctx = run_cycle(ctx, _build_cycle_services())
+    paper_state_to_session_state(st.session_state, ctx.state)
+    counters_to_session_state(st.session_state, ctx.counters)
+    return list(ctx.actions)
+
+
 def _auto_paper_cycle(
     buy_df: pd.DataFrame,
     sell_df: pd.DataFrame,
@@ -2352,6 +2554,41 @@ def _auto_paper_cycle(
     idle_buy_fallback_minutes: int,
     max_trade_invest_pct: float = 10.0,
 ) -> list[str]:
+    if _use_trading_cycle():
+        settings = _build_cycle_settings(
+            risk_pct=risk_pct,
+            max_trades_day=max_trades_day,
+            max_positions=max_positions,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            min_buy_score=min_buy_score,
+            enable_signal_sell=enable_signal_sell,
+            min_sell_score=min_sell_score,
+            max_signal_exits_per_cycle=max_signal_exits_per_cycle,
+            enable_short_selling=enable_short_selling,
+            min_short_score=min_short_score,
+            enable_profit_guard=enable_profit_guard,
+            profit_guard_drawdown_pct=profit_guard_drawdown_pct,
+            profit_guard_after=profit_guard_after,
+            block_new_entries_on_guard=block_new_entries_on_guard,
+            daily_profit_target=daily_profit_target,
+            reentry_cooldown_minutes=reentry_cooldown_minutes,
+            reentry_min_move_pct=reentry_min_move_pct,
+            enable_regime_entry_gate=enable_regime_entry_gate,
+            market_regime=market_regime,
+            sl_cooldown_after_stop_minutes=sl_cooldown_after_stop_minutes,
+            max_qty_per_trade=max_qty_per_trade,
+            symbols=symbols,
+            min_price=min_price,
+            max_price=max_price,
+            max_symbol_allocation_pct=max_symbol_allocation_pct,
+            max_total_deployment_pct=max_total_deployment_pct,
+            min_order_value=min_order_value,
+            idle_buy_fallback_minutes=idle_buy_fallback_minutes,
+            max_trade_invest_pct=max_trade_invest_pct,
+        )
+        return _run_trading_cycle(buy_df, sell_df, sell_exit_df, settings)
+
     actions: list[str] = []
 
     # Keep portfolio LTP moving every cycle, even when there are no fresh signals.
@@ -3307,6 +3544,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         )
         if selected != st.session_state.get("_last_market"):
             st.session_state._last_market = selected
+            st.session_state.s_skip_optimizer_after_market_switch = True
             _app_log("info", f"Switched to {MARKET_CONFIG[selected]['label']} market")
     
     saved_state = _read_saved_state()
@@ -3856,9 +4094,12 @@ def render_simple_dashboard(standalone: bool = True) -> None:
     optimizer_summary = st.session_state.get("s_optimizer_summary")
     optimizer_artifacts = st.session_state.get("s_optimizer_artifacts")
     optimizer_last_run_ts = float(
-        st.session_state.get("s_optimizer_last_run_ts", 0.0))
+        st.session_state.get(_optimizer_last_run_key(), 0.0))
     _now_ts = ist_now().timestamp()
-    _should_auto_run_optimizer = bool(optimizer_auto_run) and (
+    _skip_after_market_switch = bool(
+        st.session_state.pop("s_skip_optimizer_after_market_switch", False)
+    )
+    _should_auto_run_optimizer = bool(optimizer_auto_run) and not _skip_after_market_switch and (
         optimizer_last_run_ts <= 0.0
         or (_now_ts - optimizer_last_run_ts) >= (float(optimizer_interval_minutes) * 60.0)
     )
@@ -3875,7 +4116,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         if _optimizer_err is None:
             st.session_state.s_optimizer_summary = _summary
             st.session_state.s_optimizer_artifacts = _artifacts
-            st.session_state.s_optimizer_last_run_ts = _now_ts
+            st.session_state[_optimizer_last_run_key()] = _now_ts
             optimizer_summary = _summary
             optimizer_artifacts = _artifacts
         else:
