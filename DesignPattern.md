@@ -1,5 +1,23 @@
 # Trading Strategy Simulator - Architecture & Design Pattern
 
+> **STALE — DO NOT FOLLOW AS A GUIDE.**
+>
+> This document describes an abandoned MVC layer (`stockmarket.models`,
+> `stockmarket.controllers`, `stockmarket.views.components`,
+> `stockmarket.persistence.factory`, `stockmarket.persistence.file_storage`)
+> that has been **removed** from the codebase. The live runtime never imported
+> it.
+>
+> The supported architecture is documented in `arch migration plan.md` and the
+> phase plan files (`01-…md` … `09-…md`). The current entry point is
+> `streamlit run app.py` (loads `dashboard_simple.py`), with domain types in
+> `src/stockmarket/domain/`, persistence via `JsonPaperRepo` /
+> `SessionPaperRepo` in `src/stockmarket/persistence/`, and the trading cycle
+> in `src/stockmarket/cycle/`.
+>
+> The sections below are kept only as historical context for the deleted
+> design and should not be cited as current behaviour.
+
 ## Overview
 
 This document describes the refactored architecture of the Trading Strategy Simulator following the **MVC (Model-View-Controller)** pattern with clear separation of concerns, database abstraction, and comprehensive configuration management.

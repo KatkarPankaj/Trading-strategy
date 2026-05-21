@@ -45,8 +45,9 @@ StockMarket/
 │   ├── sweep.py                 # Parameter sweep for tuning
 │   ├── webapp.py                # Flask dashboard (legacy)
 │   └── __main__.py              # Entry point
+├── app.py                       # Streamlit launcher (loads dashboard_simple)
 ├── dashboard_simple.py          # Streamlit real-time paper simulator (PRIMARY)
-├── dashboard.py                 # Streamlit advanced dashboard (legacy)
+├── dashboard.py                 # Deprecation stub (legacy complex scanner removed)
 ├── config.json                  # Runtime parameters (user-editable)
 ├── config.example.json          # Template config
 ├── requirements.txt             # Python dependencies
@@ -508,11 +509,9 @@ Copy-Item config.example.json config.json
 # Activate venv if not active
 .\.venv\Scripts\Activate.ps1
 
-# Run dashboard
-streamlit run dashboard_simple.py --server.port 8507
-
-# Open browser
-Start-Process "http://localhost:8507"
+# Run unified launcher (loads dashboard_simple via app.py)
+$env:PYTHONPATH = "src"
+streamlit run app.py
 ```
 
 **Make sure "Enable Auto Paper Trading" is checked to start auto trades**.

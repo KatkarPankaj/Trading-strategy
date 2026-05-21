@@ -64,19 +64,10 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m stockmarket.cli backtest --config config.json
 ```
 
-## Launch browser app (legacy research UI)
-
-```powershell
-$env:PYTHONPATH = "src"
-.\.venv\Scripts\python.exe -m streamlit run src/stockmarket/webapp.py
-```
-
-Then open the local URL shown in terminal (usually [http://localhost:8501](http://localhost:8501)).
-This entrypoint is legacy and overlaps CLI research flows.
-
 ## Launch unified dashboard (recommended)
 
-Starts in **Simple** mode; switch to **Complex scanner** from the sidebar.
+Loads the Simple paper-trading dashboard via `app.py`. The legacy complex
+scanner has been removed; there is no sidebar toggle to switch into it.
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -85,21 +76,15 @@ $env:PYTHONPATH = "src"
 
 Run the command from the repo root so `.streamlit/config.toml` applies: saving Python files triggers an automatic app rerun (“hot reload”) without restarting the server.
 
-## Launch advanced scanner + dummy trading app (legacy)
+## Launch research/backtest UI (optional)
 
-This app includes:
-
-- Top 5 intraday candidates scanner
-- Buy strategy guidance with signal/risk levels
-- Dummy buy/sell orders, holdings, cash, and PnL tracking
+`webapp.py` is a small research/backtest Streamlit page that overlaps the CLI
+flows. It is optional and kept while CLI parity is being signed off.
 
 ```powershell
 $env:PYTHONPATH = "src"
-.\.venv\Scripts\python.exe -m streamlit run dashboard.py
+.\.venv\Scripts\python.exe -m streamlit run src/stockmarket/webapp.py
 ```
-
-This scanner is deprecated and kept for backward compatibility only.
-Use `streamlit run app.py` for the supported dashboard. See [arch migration plan.md](arch migration plan.md).
 
 ## Launch simple lightweight simulator (fast page)
 
@@ -124,7 +109,7 @@ Set `USE_SIMPLE_VIEWS=1` to render extracted simple dashboard view modules while
 
 ## Dashboard Strategy (Complete)
 
-The advanced dashboard in [dashboard.py](dashboard.py) is built for paper trading only and applies these rules:
+The Simple dashboard (`app.py` → `dashboard_simple.py`) is built for paper trading only and applies these rules:
 
 1. Market window logic
 
@@ -172,7 +157,7 @@ The advanced dashboard in [dashboard.py](dashboard.py) is built for paper tradin
 
 ```powershell
 $env:PYTHONPATH = "src"
-.\.venv\Scripts\python.exe -m streamlit run dashboard.py --server.port 8505
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
 1. Choose data source and strategy mode in sidebar.
@@ -183,7 +168,7 @@ $env:PYTHONPATH = "src"
 
 ## AI Implementation Requirements (Current)
 
-Use this section as the source-of-truth requirements for any AI assistant modifying `dashboard.py`.
+Use this section as the source-of-truth requirements for any AI assistant modifying `dashboard_simple.py`.
 
 1. Data and refresh behavior
 
