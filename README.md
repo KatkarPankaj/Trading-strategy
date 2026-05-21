@@ -114,6 +114,7 @@ $env:PYTHONPATH = "src"
 US quotes for `dashboard_simple.py` use Finnhub; set `FINNHUB_API_KEY` in your environment.
 Optional `dashboard_simple_data_config.json` field `us_market_data_batch_size` controls parallel US quote requests in the scanner.
 Set `USE_PAPER_REPO=1` to exercise the flagged JSON repository path for simple paper state persistence.
+Set `USE_APP_SETTINGS=1` to resolve NSE/US market watchlists and session times from `config/market_config.json` (default uses inline dashboard constants).
 
 ## Dashboard Strategy (Complete)
 

@@ -1,8 +1,6 @@
 """Market controller for managing market data and API calls."""
 
 from typing import Dict, Optional, List
-import pandas as pd
-import streamlit as st
 
 from ..models import MarketData, MarketQuote
 from ..utils.logger import AppLogger
@@ -11,17 +9,17 @@ from ..utils.config_loader import ConfigLoader
 
 class MarketController:
     """Controls market data operations and API interactions.
-    
+
     Handles:
     - Fetching market quotes
-    - Caching prices
+    - Caching prices in memory
     - Managing watchlists
     - Market configuration
     """
-    
+
     def __init__(self, logger: AppLogger = None, config_dir: str = None):
         """Initialize market controller.
-        
+
         Args:
             logger: AppLogger instance
             config_dir: Path to config directory
@@ -29,37 +27,36 @@ class MarketController:
         self.market_data = MarketData()
         self.logger = logger or AppLogger(__name__)
         self.config = ConfigLoader(config_dir).get_market_config()
-        self.cache_ttl = 15  # seconds
-    
+
     def get_market_config(self, market: str) -> Dict:
         """Get configuration for a market.
-        
+
         Args:
             market: Market name ('NSE' or 'US')
-            
+
         Returns:
             Market configuration dictionary
         """
         return self.config.get(market, {})
-    
+
     def get_watchlist(self, market: str) -> List[str]:
         """Get watchlist for a market.
-        
+
         Args:
             market: Market name
-            
+
         Returns:
             List of symbols
         """
         market_cfg = self.get_market_config(market)
         return market_cfg.get('watchlist', [])
-    
+
     def get_market_hours(self, market: str) -> dict:
         """Get market hours for a market.
-        
+
         Args:
             market: Market name
-            
+
         Returns:
             Dictionary with open/close times and timezone
         """
@@ -71,23 +68,22 @@ class MarketController:
             'entry_cutoff': market_cfg.get('entry_cutoff_time'),
             'square_off': market_cfg.get('square_off_time'),
         }
-    
+
     def get_intraday_charges(self, market: str, side: str = None) -> dict:
         """Get intraday trading charges for a market.
-        
+
         Args:
             market: Market name
             side: Trade side ('BUY', 'SELL', etc.) - optional
-            
+
         Returns:
             Dictionary with charge details
         """
         market_cfg = self.get_market_config(market)
         return market_cfg.get('intraday_charges', {})
-    
-    @st.cache_data(ttl=15, show_spinner=False)
-    def _cached_fetch_nse_quote(self, symbol: str) -> Optional[Dict]:
-        """Cached NSE quote fetch (streamlit cache)."""
+
+    def _fetch_nse_quote(self, symbol: str) -> Optional[Dict]:
+        """Fetch NSE quote (no UI-layer caching)."""
         try:
             from ..quotes import get_default_quote_service
 
@@ -120,10 +116,9 @@ class MarketController:
             else:
                 self.logger.error(f"NSE API error for {symbol}: {e}")
             return None
-    
-    @st.cache_data(ttl=15, show_spinner=False)
-    def _cached_fetch_us_quote(self, symbol: str) -> Optional[Dict]:
-        """Cached US quote fetch (streamlit cache)."""
+
+    def _fetch_us_quote(self, symbol: str) -> Optional[Dict]:
+        """Fetch US quote (no UI-layer caching)."""
         try:
             from ..quotes import get_default_quote_service
 
@@ -156,33 +151,36 @@ class MarketController:
             else:
                 self.logger.error(f"US quote provider error for {symbol}: {e}")
             return None
-    
+
+    def get_quote(self, symbol: str, market: str) -> Optional[Dict]:
+        """Fetch quote for a symbol from specified market."""
+        return self.fetch_quote(symbol, market)
+
     def fetch_quote(self, symbol: str, market: str) -> Optional[Dict]:
         """Fetch quote for a symbol from specified market.
-        
+
         Args:
             symbol: Stock symbol
             market: Market name ('NSE' or 'US')
-            
+
         Returns:
             Quote dictionary or None
         """
         try:
             if market == "NSE":
-                return self._cached_fetch_nse_quote(symbol)
-            elif market == "US":
-                return self._cached_fetch_us_quote(symbol)
-            else:
-                self.logger.error(f"Unknown market: {market}")
-                return None
-        
+                return self._fetch_nse_quote(symbol)
+            if market == "US":
+                return self._fetch_us_quote(symbol)
+            self.logger.error(f"Unknown market: {market}")
+            return None
+
         except Exception as e:
             self.logger.error(f"Error fetching quote for {symbol}: {e}")
             return None
-    
+
     def get_all_prices(self) -> Dict[str, float]:
         """Get all cached prices.
-        
+
         Returns:
             Dictionary mapping symbols to prices
         """

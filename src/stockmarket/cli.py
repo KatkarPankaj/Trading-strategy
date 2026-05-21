@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
@@ -142,7 +143,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _load_config(config_path: str, symbol_override: str | None) -> TradingConfig:
-    cfg = TradingConfig.from_json(config_path)
+    if os.environ.get("USE_APP_SETTINGS") == "1":
+        from stockmarket.settings import load_app_settings, to_trading_config
+
+        cfg = to_trading_config(load_app_settings(trading_path=Path(config_path)))
+    else:
+        cfg = TradingConfig.from_json(config_path)
     if symbol_override:
         cfg.symbol = symbol_override
     return cfg

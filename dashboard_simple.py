@@ -155,6 +155,33 @@ MARKET_CONFIG = {
     },
 }
 
+_DASHBOARD_MARKET_EXTRAS: dict[str, dict[str, Any]] = {
+    "NSE": {
+        "label": "India NSE",
+        "state_file": Path("outputs") / "simple_paper_state.json",
+        "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light.csv",
+        "currency": "Rs",
+        "score_change_weight": 6.0,
+        "score_vwap_weight": 20.0,
+        "score_range_weight": 2.0,
+        "ready_pchange_threshold": 0.25,
+        "ready_range_threshold": 0.5,
+    },
+    "US": {
+        "label": "US",
+        "state_file": Path("outputs") / "simple_paper_state_us.json",
+        "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light_us.csv",
+        "currency": "$",
+        "score_change_weight": 8.0,
+        "score_vwap_weight": 28.0,
+        "score_range_weight": 3.5,
+        "ready_pchange_threshold": 0.12,
+        "ready_range_threshold": 0.3,
+    },
+}
+
+_app_settings_cache = None
+
 # Setup logging for server-side console output
 logging.basicConfig(
     level=logging.INFO,
@@ -411,13 +438,65 @@ def _to_simple_quote(qobj: Any) -> dict[str, float]:
     raise ValueError("invalid quote payload")
 
 
+def _use_app_settings() -> bool:
+    return os.environ.get("USE_APP_SETTINGS") == "1"
+
+
+def _get_app_settings():
+    global _app_settings_cache
+    if _app_settings_cache is None:
+        from stockmarket.settings import load_app_settings
+
+        _app_settings_cache = load_app_settings()
+    return _app_settings_cache
+
+
+def _hhmm_to_time(value: str) -> time:
+    hour, minute = value.split(":")
+    return time(int(hour), int(minute))
+
+
+def _profile_to_market_cfg(profile, extras: dict[str, Any]) -> dict[str, Any]:
+    tz = IST if profile.timezone == "Asia/Kolkata" else US_EASTERN
+    return {
+        "label": extras["label"],
+        "timezone": tz,
+        "market_open": _hhmm_to_time(profile.market_open),
+        "entry_cutoff": _hhmm_to_time(profile.entry_cutoff_time),
+        "square_off": _hhmm_to_time(profile.square_off_time),
+        "watchlist": list(profile.watchlist),
+        "state_file": extras["state_file"],
+        "clean_closed_trades_file": extras["clean_closed_trades_file"],
+        "currency": extras["currency"],
+        "score_change_weight": extras["score_change_weight"],
+        "score_vwap_weight": extras["score_vwap_weight"],
+        "score_range_weight": extras["score_range_weight"],
+        "ready_pchange_threshold": extras["ready_pchange_threshold"],
+        "ready_range_threshold": extras["ready_range_threshold"],
+    }
+
+
+def _market_keys() -> tuple[str, ...]:
+    return ("NSE", "US")
+
+
+def _market_label(market: str) -> str:
+    if _use_app_settings():
+        return str(_DASHBOARD_MARKET_EXTRAS[market]["label"])
+    return str(MARKET_CONFIG[market]["label"])
+
+
 def _selected_market() -> str:
     market = str(st.session_state.get("selected_market", "NSE")).upper()
-    return market if market in MARKET_CONFIG else "NSE"
+    return market if market in _market_keys() else "NSE"
 
 
 def _market_cfg() -> dict[str, Any]:
-    return MARKET_CONFIG[_selected_market()]
+    market = _selected_market()
+    if _use_app_settings():
+        profile = _get_app_settings().market[market]
+        return _profile_to_market_cfg(profile, _DASHBOARD_MARKET_EXTRAS[market])
+    return MARKET_CONFIG[market]
 
 
 def _state_file() -> Path:
@@ -3538,14 +3617,14 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         selected = st.radio(
             "Trading Market",
             options=["NSE", "US"],
-            format_func=lambda key: str(MARKET_CONFIG[key]["label"]),
+            format_func=lambda key: _market_label(key),
             key="selected_market",
             help="Each market keeps its own paper-trade state and ML model.",
         )
         if selected != st.session_state.get("_last_market"):
             st.session_state._last_market = selected
             st.session_state.s_skip_optimizer_after_market_switch = True
-            _app_log("info", f"Switched to {MARKET_CONFIG[selected]['label']} market")
+            _app_log("info", f"Switched to {_market_label(selected)} market")
     
     saved_state = _read_saved_state()
     saved_ui = saved_state.get("ui_config", {}) if isinstance(

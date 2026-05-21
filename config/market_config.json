@@ -34,7 +34,7 @@
       "timezone": "America/New_York",
       "market_open": "09:30",
       "market_close": "16:00",
-      "entry_cutoff_time": "15:00",
+      "entry_cutoff_time": "13:30",
       "square_off_time": "15:45",
       "watchlist": [
         "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
