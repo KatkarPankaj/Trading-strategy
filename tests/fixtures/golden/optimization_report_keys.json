@@ -1,0 +1,26 @@
+{
+  "summary_keys": [
+    "avg_net_pnl",
+    "base_config",
+    "clean_closed_trades",
+    "lookback_trades",
+    "losses",
+    "model_feature_count",
+    "model_status",
+    "model_training_trades",
+    "net_pnl",
+    "quality_threshold",
+    "symbols_analyzed",
+    "trade_count",
+    "trades_to_200_goal",
+    "trades_to_300_goal",
+    "walkforward_min_train_trades",
+    "walkforward_scored_trades",
+    "walkforward_status",
+    "win_rate",
+    "wins"
+  ],
+  "recommendation_count": 0,
+  "symbol_score_rows": 0,
+  "feature_score_rows": 28
+}
