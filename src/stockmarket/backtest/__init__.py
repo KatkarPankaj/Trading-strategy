@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import time, timedelta
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .config import TradingConfig
-from .strategy import add_strategy_columns
+from stockmarket.config import TradingConfig
+from stockmarket.strategy import add_strategy_columns
+
+
+def _backtest_use_cycle() -> bool:
+    return os.environ.get("BACKTEST_USE_CYCLE") == "1"
 
 
 @dataclass
@@ -35,6 +40,16 @@ def _position_size(entry_price: float, capital: float, cfg: TradingConfig) -> in
 
 
 def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
+    if _backtest_use_cycle():
+        from .cycle import run_backtest_via_cycle
+
+        trades_df, summary = run_backtest_via_cycle(df, cfg)
+        return BacktestResult(trades=trades_df, summary=summary)
+
+    return _run_backtest_legacy(df, cfg)
+
+
+def _run_backtest_legacy(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
     data = add_strategy_columns(df, cfg)
 
     square_off_t = time.fromisoformat(cfg.square_off_time)
@@ -56,9 +71,9 @@ def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
                 if go_long or go_short:
                     side = "long" if go_long else "short"
                     raw_entry = float(row["close"])
-                    entry = raw_entry * \
-                        (1 + cfg.slippage_pct if side ==
-                         "long" else 1 - cfg.slippage_pct)
+                    entry = raw_entry * (
+                        1 + cfg.slippage_pct if side == "long" else 1 - cfg.slippage_pct
+                    )
                     qty = _position_size(entry, capital, cfg)
 
                     if qty > 0:
@@ -67,9 +82,12 @@ def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
                             "entry_ts": ts,
                             "entry_price": entry,
                             "qty": qty,
-                            "stop_price": entry * (1 - cfg.stop_loss_pct if side == "long" else 1 + cfg.stop_loss_pct),
-                            "target_price": entry * (1 + cfg.take_profit_pct if side == "long" else 1 - cfg.take_profit_pct),
-                            "time_exit_ts": ts + timedelta(minutes=cfg.time_exit_minutes),
+                            "stop_price": entry
+                            * (1 - cfg.stop_loss_pct if side == "long" else 1 + cfg.stop_loss_pct),
+                            "target_price": entry
+                            * (1 + cfg.take_profit_pct if side == "long" else 1 - cfg.take_profit_pct),
+                            "time_exit_ts": ts
+                            + timedelta(minutes=cfg.time_exit_minutes),
                         }
                         trades_today += 1
 
@@ -105,15 +123,15 @@ def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
 
             if exit_reason is None and ts >= position["time_exit_ts"]:
                 exit_reason = "time"
-                exit_price = raw_close * \
-                    (1 - cfg.slippage_pct if side ==
-                     "long" else 1 + cfg.slippage_pct)
+                exit_price = raw_close * (
+                    1 - cfg.slippage_pct if side == "long" else 1 + cfg.slippage_pct
+                )
 
             if exit_reason is None and ts.time() >= square_off_t:
                 exit_reason = "square_off"
-                exit_price = raw_close * \
-                    (1 - cfg.slippage_pct if side ==
-                     "long" else 1 + cfg.slippage_pct)
+                exit_price = raw_close * (
+                    1 - cfg.slippage_pct if side == "long" else 1 + cfg.slippage_pct
+                )
 
             if exit_reason is None:
                 continue
@@ -122,8 +140,11 @@ def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
             turnover = (entry_price * qty) + (exit_price * qty)
             commission = turnover * cfg.commission_pct
 
-            gross_pnl = (exit_price - entry_price) * \
-                qty if side == "long" else (entry_price - exit_price) * qty
+            gross_pnl = (
+                (exit_price - entry_price) * qty
+                if side == "long"
+                else (entry_price - exit_price) * qty
+            )
             net_pnl = gross_pnl - commission
             capital += net_pnl
 
@@ -146,20 +167,23 @@ def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
             equity_points.append(capital)
             position = None
 
-        # Force close remaining position at day end if still open.
         if position is not None:
             last_ts = day_df.index[-1]
             last_close = float(day_df.iloc[-1]["close"])
             side = position["side"]
             qty = int(position["qty"])
-            exit_price = last_close * \
-                (1 - cfg.slippage_pct if side == "long" else 1 + cfg.slippage_pct)
+            exit_price = last_close * (
+                1 - cfg.slippage_pct if side == "long" else 1 + cfg.slippage_pct
+            )
             entry_price = float(position["entry_price"])
 
             turnover = (entry_price * qty) + (exit_price * qty)
             commission = turnover * cfg.commission_pct
-            gross_pnl = (exit_price - entry_price) * \
-                qty if side == "long" else (entry_price - exit_price) * qty
+            gross_pnl = (
+                (exit_price - entry_price) * qty
+                if side == "long"
+                else (entry_price - exit_price) * qty
+            )
             net_pnl = gross_pnl - commission
             capital += net_pnl
 

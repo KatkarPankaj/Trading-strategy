@@ -1,0 +1,2 @@
+date,side,entry_ts,exit_ts,entry_price,exit_price,qty,gross_pnl,commission,net_pnl,exit_reason,capital_after_trade
+2026-05-12,long,2026-05-12 09:35:00,2026-05-12 09:35:00,103.55175,103.08597422849999,2414,-1124.3827124010143,149.64703988627966,-1274.0297522872938,stop,198725.9702477127
