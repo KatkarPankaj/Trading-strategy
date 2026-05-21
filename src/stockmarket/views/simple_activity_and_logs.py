@@ -23,8 +23,8 @@ def render_activity_and_logs(
 ) -> None:
     """Render the Activity expander with Processing/Idle title and refresh button.
 
-    Parameters mirror what ``dashboard_simple._render_activity_and_logs`` used to
-    compute internally:
+    Parameters mirror what ``dashboard_simple`` used to compute inline before
+    phase 8b:
 
     - ``steps``: normalized activity rows (``{"ts": str, "msg": str}``).
     - ``auto_refresh_on`` / ``auto_trade_on``: drive the "Processing" vs "Idle"

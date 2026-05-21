@@ -70,25 +70,6 @@ def test_simple_activity_and_logs_does_not_import_dashboard_simple():
             assert node.module != "dashboard_simple"
 
 
-def test_view_flag_enabled_helper_falls_back_to_master_for_activity_logs(monkeypatch):
-    sys.modules.pop("dashboard_simple", None)
-    import dashboard_simple
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.delenv("USE_SIMPLE_VIEWS_ACTIVITY_LOGS", raising=False)
-    assert dashboard_simple._view_flag_enabled("ACTIVITY_LOGS") is False
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS", "1")
-    assert dashboard_simple._view_flag_enabled("ACTIVITY_LOGS") is True
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_ACTIVITY_LOGS", "0")
-    assert dashboard_simple._view_flag_enabled("ACTIVITY_LOGS") is False
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_ACTIVITY_LOGS", "1")
-    assert dashboard_simple._view_flag_enabled("ACTIVITY_LOGS") is True
-
-
 def test_render_activity_and_logs_idle_title_when_live_off():
     from stockmarket.views import simple_activity_and_logs
 

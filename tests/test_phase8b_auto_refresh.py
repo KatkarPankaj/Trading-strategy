@@ -67,25 +67,6 @@ def test_simple_auto_refresh_does_not_import_refresh_holding_prices():
     assert "_refresh_holding_prices" not in source
 
 
-def test_view_flag_enabled_helper_falls_back_to_master_for_auto_refresh(monkeypatch):
-    sys.modules.pop("dashboard_simple", None)
-    import dashboard_simple
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.delenv("USE_SIMPLE_VIEWS_AUTO_REFRESH", raising=False)
-    assert dashboard_simple._view_flag_enabled("AUTO_REFRESH") is False
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS", "1")
-    assert dashboard_simple._view_flag_enabled("AUTO_REFRESH") is True
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_AUTO_REFRESH", "0")
-    assert dashboard_simple._view_flag_enabled("AUTO_REFRESH") is False
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_AUTO_REFRESH", "1")
-    assert dashboard_simple._view_flag_enabled("AUTO_REFRESH") is True
-
-
 def test_render_auto_refresh_footer_noop_when_disabled():
     from stockmarket.views import simple_auto_refresh
 

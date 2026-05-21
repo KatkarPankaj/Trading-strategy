@@ -87,25 +87,6 @@ def test_simple_portfolio_metrics_does_not_import_dashboard_simple():
             assert node.module != "dashboard_simple"
 
 
-def test_view_flag_enabled_helper_falls_back_to_master_for_portfolio_metrics(monkeypatch):
-    sys.modules.pop("dashboard_simple", None)
-    import dashboard_simple
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.delenv("USE_SIMPLE_VIEWS_PORTFOLIO_METRICS", raising=False)
-    assert dashboard_simple._view_flag_enabled("PORTFOLIO_METRICS") is False
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS", "1")
-    assert dashboard_simple._view_flag_enabled("PORTFOLIO_METRICS") is True
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_PORTFOLIO_METRICS", "0")
-    assert dashboard_simple._view_flag_enabled("PORTFOLIO_METRICS") is False
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_PORTFOLIO_METRICS", "1")
-    assert dashboard_simple._view_flag_enabled("PORTFOLIO_METRICS") is True
-
-
 def test_portfolio_snapshot_is_frozen_dataclass():
     snap = _snapshot()
     try:

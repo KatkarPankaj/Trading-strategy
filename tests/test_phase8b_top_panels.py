@@ -232,20 +232,3 @@ def test_view_module_does_not_import_dashboard_simple(view_path: Path):
             )
 
 
-def test_view_flag_enabled_helper_falls_back_to_master(monkeypatch):
-    sys.modules.pop("dashboard_simple", None)
-    import dashboard_simple
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.delenv("USE_SIMPLE_VIEWS_TOP_PANELS", raising=False)
-    assert dashboard_simple._view_flag_enabled("TOP_PANELS") is False
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS", "1")
-    assert dashboard_simple._view_flag_enabled("TOP_PANELS") is True
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_TOP_PANELS", "0")
-    assert dashboard_simple._view_flag_enabled("TOP_PANELS") is False
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_TOP_PANELS", "1")
-    assert dashboard_simple._view_flag_enabled("TOP_PANELS") is True

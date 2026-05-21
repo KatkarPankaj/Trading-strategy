@@ -12,7 +12,6 @@ import json
 import logging
 import math
 import os
-import html
 import sys
 from pathlib import Path
 
@@ -257,81 +256,6 @@ def _activity_finish_summary(
     _activity_step(f"Run summary: {mode}{err}")
 
 
-def _render_activity_and_logs(
-    *,
-    auto_refresh_on: bool,
-    refresh_seconds: int,
-    auto_trade_on: bool,
-) -> None:
-    """Processing/idle header, resizable scrollable activity list, refresh."""
-    steps = _normalize_activity_steps()
-    live = bool(auto_refresh_on or auto_trade_on)
-    title = "Processing" if live else "Idle"
-    dot = "#198754" if live else "#dc3545"
-    latest_preview = ""
-    if steps:
-        last = steps[-1]
-        latest_preview = f"{last['ts']} — {last['msg']}"
-
-    preview_html = ""
-    if latest_preview:
-        preview_html = (
-            '<br/><span style="color:#495057;font-size:13px;">'
-            + html.escape(latest_preview)
-            + "</span>"
-        )
-
-    if steps:
-        parts: list[str] = []
-        for entry in steps:
-            ts_e = html.escape(entry["ts"])
-            msg_e = html.escape(entry["msg"])
-            parts.append(
-                f'<div style="line-height:1.35;"><strong>{ts_e}</strong> — {msg_e}</div>'
-            )
-        lines_html = "".join(parts)
-    else:
-        lines_html = (
-            '<div style="line-height:1.35;color:#6c757d;">'
-            "No activity steps recorded yet.</div>"
-        )
-
-    # ~15 lines tall by default; scrollbar inside; vertical resize; content does not stretch page.
-    scroll_box = (
-        '<div style="line-height:1.35;font-size:14px;color:#212529;margin-top:6px;">'
-        '<div style="color:#6c757d;font-size:12px;margin-bottom:4px;">'
-        "Activity (newest last)</div>"
-        '<div style="'
-        "overflow-y:auto;overflow-x:auto;resize:vertical;"
-        "height:15lh;min-height:8rem;max-height:40rem;"
-        "box-sizing:border-box;border:1px solid #dee2e6;border-radius:6px;"
-        "padding:8px 10px;background:#fafafa;"
-        '">'
-        f"{lines_html}</div></div>"
-    )
-
-    with st.expander("Activity", expanded=False):
-        hdr_l, hdr_r = st.columns([4, 1])
-        with hdr_l:
-            st.markdown(
-                f'<p style="font-size:14px;line-height:1.35;margin:0;">'
-                f'<span style="color:{dot};font-weight:700;">●</span>'
-                f'<span style="font-weight:600;"> {title}</span>'
-                f"{preview_html}"
-                f"</p>",
-                unsafe_allow_html=True,
-            )
-        with hdr_r:
-            if st.button(
-                "Refresh now",
-                key="simple_manual_refresh",
-                help="Full dashboard rerun (quotes, ranking, auto-trade).",
-            ):
-                st.rerun()
-
-        st.html(scroll_box)
-
-
 try:
     from stockmarket.quotes import get_default_quote_service
 except Exception:
@@ -545,18 +469,6 @@ def _use_trading_cycle() -> bool:
     return os.environ.get("USE_TRADING_CYCLE") == "1"
 
 
-def _use_simple_views() -> bool:
-    return os.environ.get("USE_SIMPLE_VIEWS") == "1"
-
-
-def _view_flag_enabled(name: str) -> bool:
-    """Per-slice phase-8b flag with fallback to the master USE_SIMPLE_VIEWS flag."""
-    explicit = os.environ.get(f"USE_SIMPLE_VIEWS_{name}")
-    if explicit is not None:
-        return explicit == "1"
-    return _use_simple_views()
-
-
 def _paper_repo():
     return get_paper_repo(_state_file(), market=_selected_market())
 
@@ -647,30 +559,6 @@ def ist_now() -> datetime:
     return datetime.now(pytz.utc).astimezone(IST)
 
 
-def _auto_refresh(seconds: int) -> None:
-    if seconds <= 0:
-        return
-    # Speed up portfolio price updates independent of full-page refresh
-    _refresh_holding_prices()
-
-    st.html(
-        f"""
-        <script>
-            (function() {{
-                const delayMs = {int(seconds) * 1000};
-                setTimeout(function() {{
-                    try {{
-                        window.parent.postMessage({{isStreamlitMessage: true, type: 'streamlit:rerunScript'}}, '*');
-                    }} catch (e) {{
-                        try {{ window.location.reload(); }} catch (ee) {{}}
-                    }}
-                }}, delayMs);
-            }})();
-        </script>
-        """
-    )
-
-
 def _build_portfolio_snapshot() -> PortfolioSnapshot:
     """Read session state, return a frozen snapshot for the metrics view."""
     _, unrealized, positions_mtm = _portfolio_view()
@@ -708,148 +596,10 @@ def _build_portfolio_snapshot() -> PortfolioSnapshot:
 
 def _quick_portfolio_metrics() -> None:
     """Render portfolio metrics with live price updates. Called on every refresh."""
+    from stockmarket.views.simple_portfolio_metrics import render_portfolio_metrics
+
     _refresh_holding_prices()
-
-    if _view_flag_enabled("PORTFOLIO_METRICS"):
-        from stockmarket.views.simple_portfolio_metrics import render_portfolio_metrics
-
-        render_portfolio_metrics(_build_portfolio_snapshot())
-        return
-
-    holdings_df, unrealized, positions_mtm = _portfolio_view()
-    realized = float(st.session_state.s_realized)
-    charges = float(st.session_state.s_charges)
-    cash = float(st.session_state.s_cash)
-    equity = cash + positions_mtm
-
-    today = market_now().strftime("%Y-%m-%d")
-    today_realized = sum(
-        float(row.get("realized_delta", 0.0))
-        for row in st.session_state.s_log
-        if str(row.get("ts", "")).startswith(today)
-    )
-    daily_pnl = today_realized + unrealized
-    daily_profit_target = float(st.session_state.get(
-        "s_ui_config", {}).get("daily_profit_target", 4000.0))
-    currency_symbol = _currency_symbol()
-
-    hdr, opt = st.columns([5, 1])
-    with hdr:
-        st.caption("Portfolio summary")
-    with opt:
-        table_view = st.checkbox(
-            "Table view",
-            value=bool(st.session_state.get("portfolio_metrics_tabular", False)),
-            key="portfolio_metrics_tabular",
-            help="Show the summary row as a compact table (full numbers, no truncation).",
-        )
-
-    equity_delta = equity - float(st.session_state.s_start)
-    net_realized = realized - charges
-
-    if table_view:
-        summary_tbl = pd.DataFrame(
-            [
-                {
-                    "Metric": "Start Capital",
-                    "Amount": f"{currency_symbol} {float(st.session_state.s_start):,.2f}",
-                    "Detail": "",
-                },
-                {
-                    "Metric": "Current Equity",
-                    "Amount": f"{currency_symbol} {equity:,.2f}",
-                    "Detail": f"Δ {currency_symbol} {equity_delta:,.2f}",
-                },
-                {
-                    "Metric": "Cash",
-                    "Amount": f"{currency_symbol} {cash:,.2f}",
-                    "Detail": "",
-                },
-                {
-                    "Metric": "Open PnL",
-                    "Amount": f"{currency_symbol} {unrealized:,.2f}",
-                    "Detail": "",
-                },
-                {
-                    "Metric": "Realized PnL",
-                    "Amount": f"{currency_symbol} {realized:,.2f}",
-                    "Detail": "",
-                },
-                {
-                    "Metric": "Total Charges",
-                    "Amount": f"{currency_symbol} {charges:,.2f}",
-                    "Detail": f"Net {currency_symbol} {net_realized:,.2f}",
-                },
-            ]
-        )
-        st.dataframe(
-            summary_tbl,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Metric": st.column_config.TextColumn("Metric", width="small"),
-                "Amount": st.column_config.TextColumn("Amount", width="medium"),
-                "Detail": st.column_config.TextColumn("Detail", width="medium"),
-            },
-        )
-    else:
-        # ~14–15px text so 6-up layout does not truncate like default st.metric
-        lab = "font-size:13px;color:#6c757d;margin:0;line-height:1.2;"
-        val = "font-size:15px;font-weight:600;margin:0;line-height:1.25;white-space:normal;word-break:break-word;"
-        sub = "font-size:12px;margin:0;line-height:1.2;color:#198754;"
-        sub_inv = "font-size:12px;margin:0;line-height:1.2;color:#dc3545;"
-        a, b, c, d, e, f = st.columns(6)
-        with a:
-            st.markdown(
-                f'<p style="{lab}">Start Capital</p>'
-                f'<p style="{val}">{currency_symbol} {float(st.session_state.s_start):,.2f}</p>',
-                unsafe_allow_html=True,
-            )
-        with b:
-            ed_col = sub if equity_delta >= 0 else sub_inv
-            st.markdown(
-                f'<p style="{lab}">Current Equity</p>'
-                f'<p style="{val}">{currency_symbol} {equity:,.2f}</p>'
-                f'<p style="{ed_col}">Δ {currency_symbol} {equity_delta:,.2f}</p>',
-                unsafe_allow_html=True,
-            )
-        with c:
-            st.markdown(
-                f'<p style="{lab}">Cash</p>'
-                f'<p style="{val}">{currency_symbol} {cash:,.2f}</p>',
-                unsafe_allow_html=True,
-            )
-        with d:
-            st.markdown(
-                f'<p style="{lab}">Open PnL</p>'
-                f'<p style="{val}">{currency_symbol} {unrealized:,.2f}</p>',
-                unsafe_allow_html=True,
-            )
-        with e:
-            st.markdown(
-                f'<p style="{lab}">Realized PnL</p>'
-                f'<p style="{val}">{currency_symbol} {realized:,.2f}</p>',
-                unsafe_allow_html=True,
-            )
-        with f:
-            net_style = sub if net_realized >= 0 else sub_inv
-            st.markdown(
-                f'<p style="{lab}">Total Charges</p>'
-                f'<p style="{val}">{currency_symbol} {charges:,.2f}</p>'
-                f'<p style="{net_style}">Net {currency_symbol} {net_realized:,.2f}</p>',
-                unsafe_allow_html=True,
-            )
-
-    progress = (daily_pnl / daily_profit_target) * \
-        100.0 if daily_profit_target > 0 else 0.0
-    st.progress(min(1.0, max(0.0, progress / 100.0)),
-                text=f"Today: {currency_symbol} {daily_pnl:,.2f} / {currency_symbol} {daily_profit_target:,.2f} ({progress:.1f}%)")
-    st.caption(
-        "Equity = Cash + Σ(long: last price × qty) + short unrealized PnL. "
-        "Short-sale proceeds are already in Cash. "
-        "Δ vs start is not equal to Open PnL + net realized unless you have no open longs and no capital adjustments. "
-        f"Net (under Total Charges) = Realized PnL − charges ({currency_symbol} {net_realized:,.2f})."
-    )
+    render_portfolio_metrics(_build_portfolio_snapshot())
 
 
 def _to_nse_symbol(symbol: str) -> str:
@@ -3870,23 +3620,16 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         auto_trade_on=auto_trade_on,
         scan_errors=len(scan_errors),
     )
-    if _view_flag_enabled("ACTIVITY_LOGS"):
-        from stockmarket.views.simple_activity_and_logs import (
-            render_activity_and_logs,
-        )
+    from stockmarket.views.simple_activity_and_logs import (
+        render_activity_and_logs,
+    )
 
-        render_activity_and_logs(
-            steps=_normalize_activity_steps(),
-            auto_refresh_on=auto_refresh_on,
-            auto_trade_on=auto_trade_on,
-            on_manual_refresh=st.rerun,
-        )
-    else:
-        _render_activity_and_logs(
-            auto_refresh_on=auto_refresh_on,
-            refresh_seconds=refresh_seconds,
-            auto_trade_on=auto_trade_on,
-        )
+    render_activity_and_logs(
+        steps=_normalize_activity_steps(),
+        auto_refresh_on=auto_refresh_on,
+        auto_trade_on=auto_trade_on,
+        on_manual_refresh=st.rerun,
+    )
 
     # Display portfolio metrics with auto price refresh every page load/refresh
     _quick_portfolio_metrics()
@@ -3907,75 +3650,18 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         except Exception:
             pass
     
-    if _view_flag_enabled("TOMORROW_PLAN"):
-        from stockmarket.views.simple_tomorrow_plan import render_tomorrow_plan
+    from stockmarket.views.simple_tomorrow_plan import render_tomorrow_plan
 
-        render_tomorrow_plan(
-            agent_plan=agent_plan if isinstance(agent_plan, dict) else {},
-            market_research=market_research if isinstance(market_research, dict) else {},
-            learning_memory=learning_memory if isinstance(learning_memory, dict) else {},
-            effective_min_buy_score=float(effective_min_buy_score),
-            effective_min_short_score=float(effective_min_short_score),
-            effective_tp_pct=float(effective_tp_pct),
-            learning_apply_messages=list(learning_apply_messages or []),
-            config_guard_messages=list(config_guard_messages or []),
-        )
-    else:
-        with st.expander("\U0001f916 Learning Agent: Tomorrow Plan", expanded=True):
-            latest_learning = agent_plan.get(
-                "latest_learning") if isinstance(agent_plan, dict) else None
-            if isinstance(latest_learning, dict):
-                st.write(
-                    f"Latest learned day: {latest_learning.get('date', '-')} | "
-                    f"Closed trades: {int(latest_learning.get('closed_trades', 0))} | "
-                    f"Win rate: {float(latest_learning.get('win_rate', 0.0)):.1f}% | "
-                    f"Net: Rs {float(latest_learning.get('net', 0.0)):,.2f}"
-                )
-            else:
-                st.write(
-                    "Not enough closed-trade history yet. Agent will learn as trade history grows.")
-
-            st.write(
-                f"Market regime: {market_research.get('regime', 'unknown')} | "
-                f"Avg pchange: {float(market_research.get('avg_pchange', 0.0)):.2f}% | "
-                f"Volatility proxy: {float(market_research.get('volatility', 0.0)):.2f}"
-            )
-
-            st.write(
-                f"Effective thresholds now -> Buy score: {effective_min_buy_score:.1f}, "
-                f"Short score: {effective_min_short_score:.1f}, TP: {effective_tp_pct * 100.0:.2f}%"
-            )
-
-            notes = agent_plan.get("notes", []) if isinstance(agent_plan, dict) else []
-            if notes:
-                for note in notes:
-                    st.caption(f"- {note}")
-            if learning_apply_messages:
-                for msg in learning_apply_messages:
-                    st.caption(f"- {msg}")
-            if config_guard_messages:
-                for msg in config_guard_messages:
-                    st.caption(f"- {msg}")
-
-            symbol_rows = learning_memory.get(
-                "symbols", []) if isinstance(learning_memory, dict) else []
-            if symbol_rows:
-                sorted_rows = sorted(
-                    symbol_rows,
-                    key=lambda r: float(r.get("bias", 0.0) or 0.0),
-                    reverse=True,
-                )
-                top_syms = [str(r.get("symbol", ""))
-                            for r in sorted_rows[:3] if str(r.get("symbol", ""))]
-                avoid_syms = [
-                    str(r.get("symbol", ""))
-                    for r in sorted_rows[-3:]
-                    if str(r.get("symbol", "")) and float(r.get("bias", 0.0) or 0.0) < 0
-                ]
-                if top_syms:
-                    st.write(f"Preferred symbols: {', '.join(top_syms)}")
-                if avoid_syms:
-                    st.write(f"Avoid/low-priority symbols: {', '.join(avoid_syms)}")
+    render_tomorrow_plan(
+        agent_plan=agent_plan if isinstance(agent_plan, dict) else {},
+        market_research=market_research if isinstance(market_research, dict) else {},
+        learning_memory=learning_memory if isinstance(learning_memory, dict) else {},
+        effective_min_buy_score=float(effective_min_buy_score),
+        effective_min_short_score=float(effective_min_short_score),
+        effective_tp_pct=float(effective_tp_pct),
+        learning_apply_messages=list(learning_apply_messages or []),
+        config_guard_messages=list(config_guard_messages or []),
+    )
     
     with st.expander("🤖 ML Market Learning", expanded=False):
         st.write("Train ensemble ML model on **2 months historical market data** + personal trade history to improve symbol scoring.")
@@ -4105,66 +3791,25 @@ def render_simple_dashboard(standalone: bool = True) -> None:
     optimizer_error = st.session_state.get("s_optimizer_error")
     market_regime = str(market_research.get("regime", "unknown"))
 
-    if _view_flag_enabled("TOP_PANELS"):
-        from stockmarket.views.simple_top_panels import (
-            render_ai_best_action,
-            render_auto_trade_actions,
-            render_clean_closed_trades_status,
-            render_optimizer_summary,
-        )
+    from stockmarket.views.simple_top_panels import (
+        render_ai_best_action,
+        render_auto_trade_actions,
+        render_clean_closed_trades_status,
+        render_optimizer_summary,
+    )
 
-        render_auto_trade_actions(actions)
-        render_clean_closed_trades_status(
-            count=int(clean_closed_trade_count),
-            error=clean_export_err,
-            path=str(_clean_closed_trades_file()),
-        )
-        render_ai_best_action(best_action, regime=market_regime)
-        render_optimizer_summary(
-            summary=optimizer_summary,
-            artifacts=optimizer_artifacts,
-            error=optimizer_error,
-        )
-    else:
-        if actions:
-            with st.expander("\U0001f916 Auto-Trade Actions", expanded=True):
-                for act in actions:
-                    st.write(f"- {act}")
-
-        if clean_export_err:
-            st.warning(clean_export_err)
-        else:
-            st.caption(
-                f"Clean closed trades exported: {clean_closed_trade_count} -> {_clean_closed_trades_file()}")
-
-        with st.expander("AI Best Next Action", expanded=True):
-            st.write(
-                f"Recommendation: {best_action.get('action', 'HOLD')} {best_action.get('symbol', '-')}")
-            st.write(
-                f"Confidence: {float(best_action.get('confidence', 0.0)):.1f}% | Regime: {market_regime}")
-            st.caption(str(best_action.get("reason", "")))
-
-        if optimizer_error:
-            st.warning(optimizer_error)
-        if optimizer_summary:
-            with st.expander("\U0001f9ea Optimizer Summary", expanded=False):
-                st.write(
-                    f"Status: {optimizer_summary.get('walkforward_status', optimizer_summary.get('model_status', 'unknown'))} | "
-                    f"Clean closed trades: {optimizer_summary.get('clean_closed_trades', 0)} | "
-                    f"To 200: {optimizer_summary.get('trades_to_200_goal', 0)} | "
-                    f"To 300: {optimizer_summary.get('trades_to_300_goal', 0)}"
-                )
-                st.write(
-                    f"Baseline net: Rs {float(optimizer_summary.get('baseline_net_pnl', 0.0)):,.2f} | "
-                    f"Filtered net: Rs {float(optimizer_summary.get('filtered_net_pnl', 0.0)):,.2f}"
-                )
-                st.write(
-                    f"Baseline win rate: {float(optimizer_summary.get('baseline_win_rate', 0.0)) * 100.0:.1f}% | "
-                    f"Filtered win rate: {float(optimizer_summary.get('filtered_win_rate', 0.0)) * 100.0:.1f}%"
-                )
-                if optimizer_artifacts:
-                    for k, v in optimizer_artifacts.items():
-                        st.caption(f"- {k}: {v}")
+    render_auto_trade_actions(actions)
+    render_clean_closed_trades_status(
+        count=int(clean_closed_trade_count),
+        error=clean_export_err,
+        path=str(_clean_closed_trades_file()),
+    )
+    render_ai_best_action(best_action, regime=market_regime)
+    render_optimizer_summary(
+        summary=optimizer_summary,
+        artifacts=optimizer_artifacts,
+        error=optimizer_error,
+    )
     
     from stockmarket.views.simple_signals_tables import (
         render_live_tables_and_errors_fragment,
@@ -4185,23 +3830,18 @@ def render_simple_dashboard(standalone: bool = True) -> None:
     )
 
     
-    if _view_flag_enabled("AUTO_REFRESH"):
-        from stockmarket.views.simple_auto_refresh import render_auto_refresh_footer
+    from stockmarket.views.simple_auto_refresh import render_auto_refresh_footer
 
-        if auto_refresh_on and refresh_seconds > 0:
-            # TODO(phase-8b): _quick_portfolio_metrics already calls
-            # _refresh_holding_prices at the top of the render; this second
-            # call may be redundant. Left in place to preserve legacy
-            # behaviour exactly until dedup parity can be confirmed.
-            _refresh_holding_prices()
-        render_auto_refresh_footer(
-            enabled=auto_refresh_on,
-            refresh_seconds=int(refresh_seconds),
-        )
-    else:
-        if auto_refresh_on:
-            st.caption(f"Auto refresh active: every {refresh_seconds}s")
-            _auto_refresh(refresh_seconds)
+    if auto_refresh_on and refresh_seconds > 0:
+        # TODO(phase-8b): _quick_portfolio_metrics already calls
+        # _refresh_holding_prices at the top of the render; this second
+        # call may be redundant. Left in place to preserve legacy
+        # behaviour exactly until dedup parity can be confirmed.
+        _refresh_holding_prices()
+    render_auto_refresh_footer(
+        enabled=auto_refresh_on,
+        refresh_seconds=int(refresh_seconds),
+    )
 
 
 if __name__ == "__main__":

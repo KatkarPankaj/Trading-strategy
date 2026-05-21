@@ -62,25 +62,6 @@ def test_simple_tomorrow_plan_does_not_import_dashboard_simple():
             assert node.module != "dashboard_simple"
 
 
-def test_view_flag_enabled_helper_falls_back_to_master_for_tomorrow_plan(monkeypatch):
-    sys.modules.pop("dashboard_simple", None)
-    import dashboard_simple
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.delenv("USE_SIMPLE_VIEWS_TOMORROW_PLAN", raising=False)
-    assert dashboard_simple._view_flag_enabled("TOMORROW_PLAN") is False
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS", "1")
-    assert dashboard_simple._view_flag_enabled("TOMORROW_PLAN") is True
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_TOMORROW_PLAN", "0")
-    assert dashboard_simple._view_flag_enabled("TOMORROW_PLAN") is False
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    monkeypatch.setenv("USE_SIMPLE_VIEWS_TOMORROW_PLAN", "1")
-    assert dashboard_simple._view_flag_enabled("TOMORROW_PLAN") is True
-
-
 def _render_with_defaults(**overrides):
     from stockmarket.views import simple_tomorrow_plan
 

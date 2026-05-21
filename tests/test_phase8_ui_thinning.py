@@ -17,16 +17,6 @@ def test_simple_signals_view_import_isolated_from_dashboard_module():
     assert "dashboard_simple" not in sys.modules
 
 
-def test_use_simple_views_env_flag(monkeypatch):
-    import dashboard_simple
-
-    monkeypatch.delenv("USE_SIMPLE_VIEWS", raising=False)
-    assert dashboard_simple._use_simple_views() is False
-
-    monkeypatch.setenv("USE_SIMPLE_VIEWS", "1")
-    assert dashboard_simple._use_simple_views() is True
-
-
 def test_cycle_factory_builds_services_with_session_repo():
     from stockmarket.cycle.factory import build_services
     from stockmarket.ml.null_scorer import NullSymbolScorer
