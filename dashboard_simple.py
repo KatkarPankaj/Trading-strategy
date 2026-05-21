@@ -548,6 +548,14 @@ def _use_simple_views() -> bool:
     return os.environ.get("USE_SIMPLE_VIEWS") == "1"
 
 
+def _view_flag_enabled(name: str) -> bool:
+    """Per-slice phase-8b flag with fallback to the master USE_SIMPLE_VIEWS flag."""
+    explicit = os.environ.get(f"USE_SIMPLE_VIEWS_{name}")
+    if explicit is not None:
+        return explicit == "1"
+    return _use_simple_views()
+
+
 def _paper_repo():
     return get_paper_repo(_state_file(), market=_selected_market())
 
@@ -4314,17 +4322,6 @@ def render_simple_dashboard(standalone: bool = True) -> None:
                 )
                 st.dataframe(score_df, width='stretch', hide_index=True)
     
-    if actions:
-        with st.expander("\U0001f916 Auto-Trade Actions", expanded=True):
-            for act in actions:
-                st.write(f"- {act}")
-    
-    if clean_export_err:
-        st.warning(clean_export_err)
-    else:
-        st.caption(
-            f"Clean closed trades exported: {clean_closed_trade_count} -> {_clean_closed_trades_file()}")
-    
     best_action = _best_ai_action(
         buy_df=buy_df,
         sell_df=sell_df,
@@ -4336,36 +4333,69 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         enable_short_selling=enable_short_selling,
         enable_regime_entry_gate=enable_regime_entry_gate,
     )
-    
-    with st.expander("AI Best Next Action", expanded=True):
-        st.write(
-            f"Recommendation: {best_action.get('action', 'HOLD')} {best_action.get('symbol', '-')}")
-        st.write(
-            f"Confidence: {float(best_action.get('confidence', 0.0)):.1f}% | Regime: {market_research.get('regime', 'unknown')}")
-        st.caption(str(best_action.get("reason", "")))
-    
     optimizer_error = st.session_state.get("s_optimizer_error")
-    if optimizer_error:
-        st.warning(optimizer_error)
-    if optimizer_summary:
-        with st.expander("\U0001f9ea Optimizer Summary", expanded=False):
+    market_regime = str(market_research.get("regime", "unknown"))
+
+    if _view_flag_enabled("TOP_PANELS"):
+        from stockmarket.views.simple_top_panels import (
+            render_ai_best_action,
+            render_auto_trade_actions,
+            render_clean_closed_trades_status,
+            render_optimizer_summary,
+        )
+
+        render_auto_trade_actions(actions)
+        render_clean_closed_trades_status(
+            count=int(clean_closed_trade_count),
+            error=clean_export_err,
+            path=str(_clean_closed_trades_file()),
+        )
+        render_ai_best_action(best_action, regime=market_regime)
+        render_optimizer_summary(
+            summary=optimizer_summary,
+            artifacts=optimizer_artifacts,
+            error=optimizer_error,
+        )
+    else:
+        if actions:
+            with st.expander("\U0001f916 Auto-Trade Actions", expanded=True):
+                for act in actions:
+                    st.write(f"- {act}")
+
+        if clean_export_err:
+            st.warning(clean_export_err)
+        else:
+            st.caption(
+                f"Clean closed trades exported: {clean_closed_trade_count} -> {_clean_closed_trades_file()}")
+
+        with st.expander("AI Best Next Action", expanded=True):
             st.write(
-                f"Status: {optimizer_summary.get('walkforward_status', optimizer_summary.get('model_status', 'unknown'))} | "
-                f"Clean closed trades: {optimizer_summary.get('clean_closed_trades', 0)} | "
-                f"To 200: {optimizer_summary.get('trades_to_200_goal', 0)} | "
-                f"To 300: {optimizer_summary.get('trades_to_300_goal', 0)}"
-            )
+                f"Recommendation: {best_action.get('action', 'HOLD')} {best_action.get('symbol', '-')}")
             st.write(
-                f"Baseline net: Rs {float(optimizer_summary.get('baseline_net_pnl', 0.0)):,.2f} | "
-                f"Filtered net: Rs {float(optimizer_summary.get('filtered_net_pnl', 0.0)):,.2f}"
-            )
-            st.write(
-                f"Baseline win rate: {float(optimizer_summary.get('baseline_win_rate', 0.0)) * 100.0:.1f}% | "
-                f"Filtered win rate: {float(optimizer_summary.get('filtered_win_rate', 0.0)) * 100.0:.1f}%"
-            )
-            if optimizer_artifacts:
-                for k, v in optimizer_artifacts.items():
-                    st.caption(f"- {k}: {v}")
+                f"Confidence: {float(best_action.get('confidence', 0.0)):.1f}% | Regime: {market_regime}")
+            st.caption(str(best_action.get("reason", "")))
+
+        if optimizer_error:
+            st.warning(optimizer_error)
+        if optimizer_summary:
+            with st.expander("\U0001f9ea Optimizer Summary", expanded=False):
+                st.write(
+                    f"Status: {optimizer_summary.get('walkforward_status', optimizer_summary.get('model_status', 'unknown'))} | "
+                    f"Clean closed trades: {optimizer_summary.get('clean_closed_trades', 0)} | "
+                    f"To 200: {optimizer_summary.get('trades_to_200_goal', 0)} | "
+                    f"To 300: {optimizer_summary.get('trades_to_300_goal', 0)}"
+                )
+                st.write(
+                    f"Baseline net: Rs {float(optimizer_summary.get('baseline_net_pnl', 0.0)):,.2f} | "
+                    f"Filtered net: Rs {float(optimizer_summary.get('filtered_net_pnl', 0.0)):,.2f}"
+                )
+                st.write(
+                    f"Baseline win rate: {float(optimizer_summary.get('baseline_win_rate', 0.0)) * 100.0:.1f}% | "
+                    f"Filtered win rate: {float(optimizer_summary.get('filtered_win_rate', 0.0)) * 100.0:.1f}%"
+                )
+                if optimizer_artifacts:
+                    for k, v in optimizer_artifacts.items():
+                        st.caption(f"- {k}: {v}")
     
     if _use_simple_views():
         from stockmarket.views.simple_signals_tables import (
