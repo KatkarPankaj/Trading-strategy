@@ -4127,11 +4127,23 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         auto_trade_on=auto_trade_on,
         scan_errors=len(scan_errors),
     )
-    _render_activity_and_logs(
-        auto_refresh_on=auto_refresh_on,
-        refresh_seconds=refresh_seconds,
-        auto_trade_on=auto_trade_on,
-    )
+    if _view_flag_enabled("ACTIVITY_LOGS"):
+        from stockmarket.views.simple_activity_and_logs import (
+            render_activity_and_logs,
+        )
+
+        render_activity_and_logs(
+            steps=_normalize_activity_steps(),
+            auto_refresh_on=auto_refresh_on,
+            auto_trade_on=auto_trade_on,
+            on_manual_refresh=st.rerun,
+        )
+    else:
+        _render_activity_and_logs(
+            auto_refresh_on=auto_refresh_on,
+            refresh_seconds=refresh_seconds,
+            auto_trade_on=auto_trade_on,
+        )
 
     # Display portfolio metrics with auto price refresh every page load/refresh
     _quick_portfolio_metrics()
