@@ -10,6 +10,22 @@ import uuid
 from . import StorageBackend
 
 
+def open_sqlite_connection(db_path: str | Path, *, timeout: float = 10.0) -> sqlite3.Connection:
+    """Open a SQLite connection with the project-wide pragmas.
+
+    Shared by :class:`DatabaseStorageBackend` and the paper-trading SQLite
+    repository so connection setup (WAL journal, busy timeout, row factory)
+    lives in one place.
+    """
+
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
 class DatabaseStorageBackend(StorageBackend):
     """SQLite database storage backend.
     
@@ -31,10 +47,7 @@ class DatabaseStorageBackend(StorageBackend):
     
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection with proper configuration."""
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        return open_sqlite_connection(self.db_path)
     
     def initialize(self) -> None:
         """Create database schema."""
