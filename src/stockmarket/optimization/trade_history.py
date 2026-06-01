@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -193,6 +194,17 @@ def _normalize_paper_trades(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_closed_trades(path: str | Path) -> pd.DataFrame:
     raw = _load_trade_file(path)
+    return _load_closed_trades_from_frame(raw)
+
+
+def load_closed_trades_from_log(log: list[Any]) -> pd.DataFrame:
+    raw = pd.DataFrame([_trade_entry_to_dict(row) for row in log])
+    if raw.empty:
+        raise ValueError("Trade log is empty.")
+    return _load_closed_trades_from_frame(raw)
+
+
+def _load_closed_trades_from_frame(raw: pd.DataFrame) -> pd.DataFrame:
     if {"entry_ts", "exit_ts", "net_pnl", "entry_price", "exit_price"}.issubset(raw.columns):
         out = _normalize_backtest_trades(raw)
     elif (
@@ -223,11 +235,36 @@ def load_closed_trades(path: str | Path) -> pd.DataFrame:
     return out
 
 
+def _trade_entry_to_dict(entry: Any) -> dict[str, Any]:
+    if isinstance(entry, dict):
+        return dict(entry)
+    if is_dataclass(entry):
+        return asdict(entry)
+    if hasattr(entry, "__dict__"):
+        return dict(vars(entry))
+    return {}
+
+
 def collect_clean_closed_trades(
     trade_file: str | Path,
     lookback_trades: int = 0,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     trades = load_closed_trades(trade_file)
+    return _collect_clean_closed_trades_from_frame(trades, lookback_trades)
+
+
+def collect_clean_closed_trades_from_log(
+    log: list[Any],
+    lookback_trades: int = 0,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    trades = load_closed_trades_from_log(log)
+    return _collect_clean_closed_trades_from_frame(trades, lookback_trades)
+
+
+def _collect_clean_closed_trades_from_frame(
+    trades: pd.DataFrame,
+    lookback_trades: int = 0,
+) -> tuple[pd.DataFrame, dict[str, int]]:
     if lookback_trades > 0:
         trades = trades.tail(int(lookback_trades)).reset_index(drop=True)
 

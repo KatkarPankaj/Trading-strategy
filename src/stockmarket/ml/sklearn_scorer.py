@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 _SKLEARN_MOD: Any | None = None
 
@@ -25,10 +25,12 @@ class SklearnSymbolScorer:
 
     def __init__(
         self,
-        state_file: Path | None = None,
+        market: str = "NSE",
+        trade_log_provider: Callable[[], list[Any]] | None = None,
         model_path: Path | None = None,
     ):
-        self._state_file = Path(state_file or "outputs/simple_paper_state.json")
+        self._market = (market or "NSE").upper()
+        self._trade_log_provider = trade_log_provider
         self._model_path = model_path
         self._get_score = None
         self._resolve_path = None
@@ -49,7 +51,15 @@ class SklearnSymbolScorer:
             return self._model_path
         if not self._ensure():
             return Path("outputs") / "market_learning_model.pkl"
-        return self._resolve_path(self._state_file)
+        return self._resolve_path(self._market)
+
+    def _trade_log(self) -> list[Any]:
+        if self._trade_log_provider is None:
+            return []
+        try:
+            return list(self._trade_log_provider())
+        except Exception:
+            return []
 
     def model_path(self) -> Path | None:
         if not self._ensure():
@@ -71,7 +81,14 @@ class SklearnSymbolScorer:
         if not self._ensure():
             return None
         try:
-            return float(self._get_score(symbol, self._state_file))
+            return float(
+                self._get_score(
+                    symbol,
+                    self._trade_log(),
+                    market=self._market,
+                    model_path=self._resolved_model_path(),
+                )
+            )
         except Exception:
             return None
 
@@ -98,8 +115,10 @@ class SklearnSymbolScorer:
         if not self._ensure():
             return {"status": "skipped", "reason": "market_learning unavailable"}
         return self._train_fn(
-            self._state_file,
+            self._trade_log(),
             watchlist,
             use_historical_data=use_historical_data,
             historical_days=historical_days,
+            market=self._market,
+            model_path=self._resolved_model_path(),
         )

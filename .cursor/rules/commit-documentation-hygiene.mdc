@@ -1,0 +1,14 @@
+---
+description: Keep main Markdown documentation current before commits
+alwaysApply: true
+---
+
+# Commit Documentation Hygiene
+
+When work is ready to commit:
+
+- Update the main documentation Markdown files so they reflect the code changes.
+- Prefer editing existing docs such as `README.md` `CODEBASE_STRUCTURE.md` and `CODEBASE_DATAFLOW.md` ; do not create new documentation files unless the user asks.
+- Remove obsolete documentation files or sections when they are clearly stale.
+- Keep documentation concise. Keep the verbosity to low.
+- Do not add any unnecessary comments or documentation. 

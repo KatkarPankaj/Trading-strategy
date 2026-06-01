@@ -25,7 +25,6 @@ TEST_CONFIG_NSE = {
     "entry_cutoff": "13:30",
     "square_off": "15:15",
     "watchlist": ["RELIANCE.NS", "TCS.NS"],
-    "state_file": "test_state_nse.json",
     "currency": "Rs",
 }
 
@@ -81,8 +80,7 @@ class TestDashboardImports:
             "_app_log",
             "_selected_market",
             "_market_cfg",
-            "_state_file",
-            "_read_saved_state",
+            "_paper_repo",
             "_init_state",
             "_save_state",
             "_portfolio_view",
@@ -108,7 +106,7 @@ class TestDataStructures:
             market_cfg = dashboard_simple.MARKET_CONFIG[market_key]
             required_keys = [
                 "label", "timezone", "market_open", "entry_cutoff",
-                "square_off", "watchlist", "state_file", "currency"
+                "square_off", "watchlist", "currency"
             ]
             for key in required_keys:
                 assert key in market_cfg, f"Missing key '{key}' in {market_key} config"
@@ -417,11 +415,12 @@ class TestStateManagement:
         for key in required_state_keys:
             assert key is not None, f"State key {key} cannot be None"
 
-    def test_save_payload_keys(self, tmp_path):
-        """Saved JSON keeps the current simple paper payload shape."""
+    def test_save_state_round_trips_sqlite(self, tmp_path):
+        """Dashboard save persists paper state through SQLite."""
         import dashboard_simple
+        from stockmarket.persistence.sqlite_paper_repo import SqlitePaperRepo
 
-        fixture_path = Path(__file__).parent / "fixtures" / "simple_paper_state_minimal.json"
+        fixture_path = Path(__file__).parent / "fixtures" / "paper_state_domain_minimal.json"
         payload = json.loads(fixture_path.read_text(encoding="utf-8"))
         session = SessionState(
             s_cash=payload["cash"],
@@ -443,37 +442,23 @@ class TestStateManagement:
             s_profit_ladder_exited_day=payload["profit_ladder_exited_day"],
             selected_market=payload["market"],
         )
-        state_file = tmp_path / "simple_paper_state.json"
+        repo = SqlitePaperRepo(tmp_path / "paper.db", market=payload["market"])
         fake_st = SimpleNamespace(session_state=session)
 
         with (
             patch.object(dashboard_simple, "st", fake_st),
-            patch.object(dashboard_simple, "_state_file", return_value=state_file),
+            patch.object(dashboard_simple, "_paper_repo", return_value=repo),
         ):
             dashboard_simple._save_state()
 
-        saved = json.loads(state_file.read_text(encoding="utf-8"))
-        assert list(saved.keys()) == [
-            "cash",
-            "start",
-            "realized",
-            "charges",
-            "holdings",
-            "shorts",
-            "ui_config",
-            "log",
-            "prices",
-            "agent_memory",
-            "peak_open_pnl",
-            "peak_open_pnl_day",
-            "profit_guard_triggered_day",
-            "profit_ladder_day",
-            "profit_ladder_armed",
-            "profit_ladder_pullback_started",
-            "profit_ladder_exited_day",
-            "market",
-        ]
-        assert saved == payload
+        loaded = repo.load()
+        assert loaded is not None
+        state, counters = loaded
+        assert state.cash == payload["cash"]
+        assert state.start_capital == payload["start"]
+        assert state.ui_config == payload["ui_config"]
+        assert [row.symbol for row in state.log] == [row["symbol"] for row in payload["log"]]
+        assert counters.profit_ladder_armed == payload["profit_ladder_armed"]
 
 
 class TestLoggingSystem:

@@ -54,6 +54,9 @@ def paper_state_to_session_state(session, state: PaperState) -> None:
     _set(session, "s_log", [_trade_to_session(row) for row in state.log])
     _set(session, "s_prices", dict(state.prices))
     _set(session, "s_agent_memory", dict(state.agent_memory))
+    current_market = _get(session, "selected_market", None)
+    if current_market is not None and str(current_market).upper() == str(state.market).upper():
+        return
     _set(session, "selected_market", state.market)
 
 

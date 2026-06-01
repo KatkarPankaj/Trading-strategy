@@ -65,11 +65,6 @@ def main() -> None:
         page_icon="📊",
     )
     inject_theme()
-    st.sidebar.info(
-        "**Complex scanner** is deprecated for this unified app. "
-        "Only the Simple dashboard runs here. "
-        "Legacy UI: `streamlit run dashboard.py` (unsupported)."
-    )
     _aglog(
         "H1",
         "app.py:import_simple",

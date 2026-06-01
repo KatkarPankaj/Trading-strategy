@@ -3,7 +3,19 @@
 from __future__ import annotations
 
 from ..context import CycleContext
+from ..scoring import apply_scorer_to_ranked_signals
 from ..services import Services
+
+
+def _score_ranked(svc: Services, ranked):
+    return apply_scorer_to_ranked_signals(
+        ranked,
+        svc.scorer,
+        ml_enabled=svc.ml_enabled,
+        batch_ml_scores=svc.batch_ml_scores,
+        state_mtime=svc.state_mtime,
+        model_mtime=svc.model_mtime,
+    )
 
 
 def _regime_flags(settings) -> tuple[str, bool, bool]:
@@ -33,7 +45,7 @@ def place_long_entries(ctx: CycleContext, svc: Services) -> CycleContext:
         and ctx.open_positions < max_positions
         and (not guards.enable_regime_entry_gate or allow_buy)
     ):
-        ranked = svc.signals.rank(ctx.state, settings)
+        ranked = _score_ranked(svc, svc.signals.rank(ctx.state, settings))
         live_buy_df = ranked.buy_df
         if live_buy_df.empty:
             break
@@ -151,7 +163,7 @@ def place_short_entries(ctx: CycleContext, svc: Services) -> CycleContext:
     max_positions = int(risk.max_positions)
 
     while ctx.entries_today < max_trades and ctx.open_positions < max_positions:
-        ranked = svc.signals.rank(ctx.state, settings)
+        ranked = _score_ranked(svc, svc.signals.rank(ctx.state, settings))
         live_sell_df = ranked.sell_df
         if live_sell_df.empty:
             break

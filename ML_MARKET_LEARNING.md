@@ -28,7 +28,7 @@ Your personal trade history alone (5-10 trades) isn't statistically significant.
 - Returns trend metrics: volatility, momentum, trend direction, strength
 
 #### 2. **PersonalTradeAnalyzer**
-- Extracts symbol-level statistics from your trade log (`simple_paper_state.json`)
+- Extracts symbol-level statistics from `PaperState.log` loaded from SQLite
 - Metrics per symbol: total trades, win rate, average win/loss, total PnL
 - Used to identify profitable vs. risky symbols
 
@@ -54,7 +54,7 @@ PHASE 1: Historical Bootstrap (60 days OHLCV)
 ├─ Samples: ~12 (one per symbol or more if variability captured)
 │
 PHASE 2: Personal Trade Refinement
-├─ Analyze your trading log (simple_paper_state.json)
+├─ Analyze your SQLite-backed PaperState.log
 ├─ Extract: win_rate, avg_profit, trade frequency per symbol
 ├─ Label: 1 if win_rate ≥ 55%, else 0
 ├─ Samples: Number of symbols with closed trades
@@ -69,7 +69,7 @@ COMBINE & TRAIN
 
 ### Prediction & Scoring
 
-**`get_symbol_quality_score(symbol, state_file) → float (0-1)`**
+**`get_symbol_quality_score(symbol, trade_log, market="NSE") → float (0-1)`**
 
 For any symbol:
 1. Fetch live market trend
@@ -93,7 +93,7 @@ For any symbol:
 - Caches locally to `outputs/market_data_cache/` for future runs
 - Combines historical patterns + your personal trade history
 - Trains Logistic Regression + Random Forest ensemble
-- Saves model to `outputs/market_learning_model.pkl`
+- Saves model to `outputs/market_learning_model*.pkl` (`NSE` uses the unsuffixed file)
 
 **Subsequent Runs (takes ~2-5 seconds):**
 - Uses cached historical data (instant load)
@@ -177,9 +177,9 @@ If not installed:
 
 ## Data Files
 
-- **Input**: `outputs/simple_paper_state.json` (trade log + ui_config + agent_memory)
+- **Input**: `.database/paper_state.db` via `PaperState.log`
 - **Cache**: `outputs/market_data_cache/*.csv` (60 days OHLCV per symbol)
-- **Model**: `outputs/market_learning_model.pkl` (trained ensemble artifact)
+- **Model**: `outputs/market_learning_model*.pkl` (trained ensemble artifact; market keyed)
 
 ## Improvement Path
 

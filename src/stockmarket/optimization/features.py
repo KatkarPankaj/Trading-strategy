@@ -12,8 +12,7 @@ from stockmarket.config import TradingConfig
 from stockmarket.data import fetch_intraday_data
 from stockmarket.strategy import add_strategy_columns
 
-from ._debug import agent_dbg_log
-from .trade_history import collect_clean_closed_trades
+from .trade_history import collect_clean_closed_trades, collect_clean_closed_trades_from_log
 
 def _nearest_feature_row(feature_df: pd.DataFrame, ts: pd.Timestamp) -> pd.Series | None:
     if feature_df.empty:
@@ -120,22 +119,6 @@ def enrich_trade_features(trades: pd.DataFrame, cfg: TradingConfig) -> pd.DataFr
             feature_map[symbol] = _prepare_market_features(market_df, cfg)
         except Exception:
             continue
-
-    # #region agent log
-    agent_dbg_log(
-        "H5",
-        "optimizer.py:enrich_trade_features",
-        "feature_maps_ready",
-        {
-            "market_timezone": str(cfg.market_timezone),
-            "index_bench": index_symbol,
-            "index_loaded": index_features is not None,
-            "index_rows": int(len(index_features)) if index_features is not None else 0,
-            "symbol_maps": int(len(feature_map)),
-            "trade_rows": int(len(trades)),
-        },
-    )
-    # #endregion
 
     enriched_rows: list[dict[str, Any]] = []
     for _, trade in trades.iterrows():
@@ -275,37 +258,7 @@ def _ridge_fit(X: np.ndarray, y: np.ndarray, alpha: float = 1.0) -> np.ndarray:
     reg = np.eye(X.shape[1]) * alpha
     reg[0, 0] = 0.0
     gram = X.T @ X + reg
-    # #region agent log
-    agent_dbg_log(
-        "H1",
-        "optimizer.py:_ridge_fit",
-        "pre_pinv",
-        {
-            "n": int(X.shape[0]),
-            "p": int(X.shape[1]),
-            "alpha": float(alpha),
-            "gram_max": float(np.nanmax(np.abs(gram))),
-            "gram_has_nan": bool(np.isnan(gram).any()),
-            "gram_has_inf": bool(np.isinf(gram).any()),
-            "x_max": float(np.nanmax(np.abs(X))),
-            "x_has_nan": bool(np.isnan(X).any()),
-            "x_has_inf": bool(np.isinf(X).any()),
-        },
-    )
-    # #endregion
     beta = np.linalg.pinv(gram) @ X.T @ y
-    # #region agent log
-    agent_dbg_log(
-        "H2",
-        "optimizer.py:_ridge_fit",
-        "post_pinv",
-        {
-            "beta_max": float(np.nanmax(np.abs(beta))),
-            "beta_has_nan": bool(np.isnan(beta).any()),
-            "beta_has_inf": bool(np.isinf(beta).any()),
-        },
-    )
-    # #endregion
     return beta
 
 
@@ -743,22 +696,51 @@ def run_intelligent_optimization(
     min_train_trades: int = MIN_TRAIN_TRADES_DEFAULT,
     quality_threshold: float = QUALITY_THRESHOLD_DEFAULT,
 ):
-    from .reports import OptimizationReport
-
-    agent_dbg_log(
-        "H4",
-        "optimization.features:run_intelligent_optimization",
-        "entry",
-        {
-            "market_timezone": str(cfg.market_timezone),
-            "lookback_trades": int(lookback_trades),
-            "min_train_trades": int(min_train_trades),
-        },
-    )
     trades, collection_summary = collect_clean_closed_trades(
         trade_file,
         lookback_trades=lookback_trades,
     )
+    return _run_intelligent_optimization_from_trades(
+        trades,
+        collection_summary,
+        cfg,
+        lookback_trades=lookback_trades,
+        min_train_trades=min_train_trades,
+        quality_threshold=quality_threshold,
+    )
+
+
+def run_intelligent_optimization_from_log(
+    log: list[Any],
+    cfg: TradingConfig,
+    lookback_trades: int = 200,
+    min_train_trades: int = MIN_TRAIN_TRADES_DEFAULT,
+    quality_threshold: float = QUALITY_THRESHOLD_DEFAULT,
+):
+    trades, collection_summary = collect_clean_closed_trades_from_log(
+        log,
+        lookback_trades=lookback_trades,
+    )
+    return _run_intelligent_optimization_from_trades(
+        trades,
+        collection_summary,
+        cfg,
+        lookback_trades=lookback_trades,
+        min_train_trades=min_train_trades,
+        quality_threshold=quality_threshold,
+    )
+
+
+def _run_intelligent_optimization_from_trades(
+    trades: pd.DataFrame,
+    collection_summary: dict[str, int],
+    cfg: TradingConfig,
+    *,
+    lookback_trades: int,
+    min_train_trades: int,
+    quality_threshold: float,
+):
+    from .reports import OptimizationReport
 
     enriched = enrich_trade_features(trades, cfg)
     enriched, model_feature_importance, model_summary = _fit_trade_quality_model(

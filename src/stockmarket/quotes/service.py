@@ -2,23 +2,38 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Callable
 
-from .nse import (
-    fetch_nse_quote_equity_raw,
-    quote_from_price_info,
-    to_nse_symbol,
+from .nse import fetch_nse_quote_equity_raw, quote_from_price_info, to_nse_symbol
+from .nse_client import (
+    NseFetchError,
+    create_hardened_nse_fetch,
+    hardened_nsefetch,
+    is_valid_quote_equity_payload,
 )
 from .ttl_cache import TtlCache
 from .types import Quote
 from . import finnhub_quotes
 
+logger = logging.getLogger("stockmarket.quotes.service")
+
 try:
-    from nsepython import nsefetch as _default_nsefetch
+    from nsepython import nsefetch as _legacy_nsefetch
 except Exception:  # pragma: no cover
-    _default_nsefetch = None  # type: ignore
+    _legacy_nsefetch = None  # type: ignore
+
+
+@dataclass(frozen=True)
+class NseBatchDiagnostic:
+    requested: int
+    with_price: int
+    nse_ok: int
+    failed: int
+    message: str
 
 
 class QuoteService:
@@ -32,17 +47,50 @@ class QuoteService:
         nsefetch: Callable[..., Any] | None = None,
         nse_max_workers: int = 6,
     ) -> None:
-        self._nse_fetch = nsefetch or _default_nsefetch
+        self._nse_fetch = nsefetch or create_hardened_nse_fetch()
+        self._legacy_nse_fetch = _legacy_nsefetch
         self._nse_max_workers = max(1, int(nse_max_workers))
         self._nse_cache: TtlCache[str, Quote] = TtlCache(nse_ttl_sec)
         self._us_cache: TtlCache[str, Quote] = TtlCache(us_ttl_sec)
+        self._last_nse_batch_diag: NseBatchDiagnostic | None = None
+
+    @property
+    def last_nse_batch_diag(self) -> NseBatchDiagnostic | None:
+        return self._last_nse_batch_diag
+
+    def _fetch_nse_payload(self, nse_sym: str) -> tuple[dict[str, Any], str]:
+        """Return (payload, source) where source is 'nse' or 'legacy_nse'."""
+        try:
+            data = fetch_nse_quote_equity_raw(nse_sym, self._nse_fetch)
+            if is_valid_quote_equity_payload(data):
+                return data, "nse"
+        except NseFetchError as exc:
+            logger.warning("NSE quote API failed for %s: %s", nse_sym, exc)
+        except Exception as exc:
+            logger.warning("NSE quote fetch error for %s: %s", nse_sym, exc)
+
+        if self._legacy_nse_fetch is not None and self._legacy_nse_fetch is not self._nse_fetch:
+            try:
+                data = fetch_nse_quote_equity_raw(nse_sym, self._legacy_nse_fetch)
+                if is_valid_quote_equity_payload(data):
+                    logger.info("NSE quote for %s loaded via legacy nsepython fetch", nse_sym)
+                    return data, "legacy_nse"
+            except Exception as exc:
+                logger.debug("Legacy nsepython fetch failed for %s: %s", nse_sym, exc)
+
+        return {}, "none"
 
     def _load_nse_quote_from_network(self, symbol: str) -> Quote:
-        if self._nse_fetch is None:
-            raise ValueError("nsepython is not installed. Run: pip install nsepython")
         nse_sym = to_nse_symbol(symbol)
-        data = fetch_nse_quote_equity_raw(nse_sym, self._nse_fetch)
-        return quote_from_price_info(symbol, data, provider="nse")
+        data, _source = self._fetch_nse_payload(nse_sym)
+        if is_valid_quote_equity_payload(data):
+            return quote_from_price_info(symbol, data, provider="nse")
+
+        raise NseFetchError(
+            0,
+            f"no valid quote for {nse_sym} (NSE API blocked or unavailable)",
+            url=f"quote-equity?symbol={nse_sym}",
+        )
 
     def get_nse_quote(self, symbol: str) -> Quote:
         key = f"nse:{symbol.upper()}"
@@ -54,32 +102,52 @@ class QuoteService:
 
     def get_nse_quotes(self, symbols: list[str]) -> dict[str, Quote]:
         if not symbols:
+            self._last_nse_batch_diag = None
             return {}
         out: dict[str, Quote] = {}
         need: list[str] = []
         for s in symbols:
             k = f"nse:{s.upper()}"
             q = self._nse_cache.get(k)
-            if q is not None:
+            if q is not None and q.price > 0:
                 out[s] = q
             else:
                 need.append(s)
         if not need:
+            self._last_nse_batch_diag = NseBatchDiagnostic(
+                requested=len(symbols),
+                with_price=len(out),
+                nse_ok=len(out),
+                failed=0,
+                message="served from cache",
+            )
             return out
         if self._nse_fetch is None:
+            self._last_nse_batch_diag = NseBatchDiagnostic(
+                requested=len(symbols),
+                with_price=len(out),
+                nse_ok=0,
+                failed=len(need),
+                message="nsepython is not installed",
+            )
             return out
+
+        nse_ok = 0
+        failed_syms: list[str] = []
 
         def fetch_one(sym: str) -> tuple[str, Quote | None]:
             for attempt in range(3):
                 try:
                     q = self._load_nse_quote_from_network(sym)
-                    return sym, q
-                except Exception as e:
-                    err_text = str(e)
-                    low = err_text.lower()
-                    if "429" in err_text or "rate limit" in low:
+                    if q.price > 0:
+                        return sym, q
+                except NseFetchError as exc:
+                    err_text = str(exc)
+                    if exc.status_code == 429 or "429" in err_text or "rate limit" in err_text.lower():
                         time.sleep(0.25 * (2**attempt))
                         continue
+                    return sym, None
+                except Exception:
                     return sym, None
             return sym, None
 
@@ -88,9 +156,36 @@ class QuoteService:
             futures = [pool.submit(fetch_one, s) for s in need]
             for fut in as_completed(futures):
                 sym, q = fut.result()
-                if q is not None:
+                if q is not None and q.price > 0:
                     self._nse_cache.set(f"nse:{sym.upper()}", q)
                     out[sym] = q
+                    nse_ok += 1
+                else:
+                    failed_syms.append(sym)
+
+        failed = len([s for s in symbols if s not in out or out[s].price <= 0])
+        with_price = len([s for s in symbols if s in out and out[s].price > 0])
+        if with_price == 0 and len(symbols) > 0:
+            msg = (
+                "NSE quote feed unavailable — all symbols returned price 0 "
+                "(API blocked or unavailable). "
+                f"Failed sample: {', '.join(failed_syms[:5])}"
+            )
+            logger.error(msg)
+        elif failed > 0:
+            msg = f"{failed} symbol(s) missing quotes; {with_price}/{len(symbols)} usable"
+            logger.warning(msg)
+        else:
+            msg = f"{with_price}/{len(symbols)} quotes loaded"
+            logger.info(msg)
+
+        self._last_nse_batch_diag = NseBatchDiagnostic(
+            requested=len(symbols),
+            with_price=with_price,
+            nse_ok=nse_ok,
+            failed=failed,
+            message=msg,
+        )
         return out
 
     def get_us_quote(self, symbol: str) -> Quote:
@@ -124,7 +219,6 @@ class QuoteService:
         return out
 
 
-# Shared instance for apps that want process-wide cache (optional)
 _default_service: QuoteService | None = None
 
 
@@ -133,3 +227,12 @@ def get_default_quote_service() -> QuoteService:
     if _default_service is None:
         _default_service = QuoteService()
     return _default_service
+
+
+__all__ = [
+    "QuoteService",
+    "NseBatchDiagnostic",
+    "get_default_quote_service",
+    "hardened_nsefetch",
+    "create_hardened_nse_fetch",
+]

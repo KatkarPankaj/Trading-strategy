@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-FIXTURE = Path(__file__).parent / "fixtures" / "simple_paper_state_minimal.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "paper_state_domain_minimal.json"
 
 
 class SessionState(dict):

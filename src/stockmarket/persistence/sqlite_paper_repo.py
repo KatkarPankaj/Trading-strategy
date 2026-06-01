@@ -105,6 +105,14 @@ class SqlitePaperRepo:
     def path(self) -> Path:
         return self._db_path
 
+    def updated_at(self) -> str:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT updated_at FROM paper_state WHERE market = ?",
+                (self._market,),
+            ).fetchone()
+        return str(row["updated_at"]) if row is not None else ""
+
     def load(self) -> tuple[PaperState, DailyCounters] | None:
         with self._connect() as conn:
             head = conn.execute(
@@ -241,6 +249,19 @@ class SqlitePaperRepo:
                         counters.profit_ladder_exited_day or "",
                     ),
                 )
+
+    def clear_market(self) -> None:
+        """Delete all persisted paper state for this repo's market."""
+        with self._connect() as conn:
+            with conn:
+                for table in (
+                    "positions",
+                    "prices",
+                    "trade_log",
+                    "daily_counters",
+                    "paper_state",
+                ):
+                    conn.execute(f"DELETE FROM {table} WHERE market = ?", (self._market,))
 
     # internals --------------------------------------------------------------
 

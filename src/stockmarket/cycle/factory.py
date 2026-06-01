@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, time
-from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -15,7 +14,6 @@ from .adapters.dashboard_signals import DashboardSignalSource
 from .adapters.live_clock import LiveClock
 from .adapters.log_history import LogHistoryQuery
 from .adapters.session_prices import SessionPriceRefresh
-from .adapters.session_repo import SessionPaperRepo
 from .adapters.streamlit_broker import StreamlitBroker
 from .services import Services
 
@@ -33,16 +31,16 @@ def build_services(
     ],
     refresh_prices_fn: Callable[[], None],
     persist_state_fn: Callable[[], None],
-    use_paper_repo: bool,
-    state_file: Path,
     market: str,
     scorer: SymbolScorer,
+    ml_enabled: bool = False,
+    batch_ml_scores: Callable[[tuple[str, ...], float | str, float], dict[str, float]]
+    | None = None,
+    state_mtime: float | str = 0.0,
+    model_mtime: float = 0.0,
 ) -> Services:
     """Build concrete Services for the dashboard cycle pipeline."""
-    if use_paper_repo:
-        repo = get_paper_repo(state_file, market)
-    else:
-        repo = SessionPaperRepo(session, persist_fn=persist_state_fn)
+    repo = get_paper_repo(market=market)
 
     return Services(
         clock=LiveClock(
@@ -58,4 +56,8 @@ def build_services(
         prices=SessionPriceRefresh(session, refresh_prices_fn),
         charges_fn=charges_fn,
         scorer=scorer,
+        ml_enabled=ml_enabled,
+        batch_ml_scores=batch_ml_scores,
+        state_mtime=state_mtime,
+        model_mtime=model_mtime,
     )

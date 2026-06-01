@@ -13,12 +13,12 @@ The goal: re-anchor the codebase on **hexagonal / ports-and-adapters** at the bo
 | Phase | What shipped | Commit(s) | Flag introduced |
 |-------|--------------|-----------|-----------------|
 | 01 — Foundation: domain types + session bridge | Frozen dataclasses (`Position`, `TradeLogEntry`, `PaperState`, `DailyCounters`); `state/session_bridge.py` mappers; fixtures + regression tests pinning the JSON state shape. | `60bf751` (rolled into 1–3) | — |
-| 02 — Persistence repository | `PaperRepo` Protocol; `JsonPaperRepo` reading/writing `outputs/simple_paper_state*.json`; dashboard `_save_state` / `_init_state` routed through the repo when enabled. | `60bf751` | `USE_PAPER_REPO=1` |
+| 02 — Persistence repository | `PaperRepo` Protocol and dashboard `_save_state` / `_init_state` routed through a repo boundary. The initial JSON backend has since been retired. | `60bf751` | retired |
 | 03 — Cycle pipeline extraction | `cycle/` package: ports, `Services`, `runner.run_cycle`, ordered steps (`prices`, `gates`, `entries`, `exits`, `counters`), entry sub-rules (`cooldown`, `idle_fallback`, `sizing`), Streamlit-backed adapters (`streamlit_broker`, `session_repo`, `session_prices`, `dashboard_signals`, `live_clock`, `log_history`). Strangler swap of `_auto_paper_cycle()`. | `60bf751` | `USE_TRADING_CYCLE=1` |
 | 04 — Config reconciliation | `AppSettings` dataclass + `load_app_settings()`; Streamlit-free `market_controller`; JSON US entry cutoff fixed at 13:30. | `13bcf1f` | `USE_APP_SETTINGS=1` |
 | (intermezzo) US optimizer hang fix | Market-aware benchmark (SPY for US, ^NSEI for NSE), tighter retries, per-market last-run timer, skip auto-run on market switch. | `5d95af4` | — |
 | 05 — Backtest convergence | `stockmarket.backtest/` package: historical adapters (`clock`, `broker`, `signals`), `run_backtest_via_cycle()`, golden parity tests. | `1517c28` | `BACKTEST_USE_CYCLE=1` |
-| 06 — Optimizer split | `stockmarket/optimization/` subpackage (`trade_history`, `features`, `reports`); `stockmarket/optimizer.py` retained as a `DeprecationWarning` shim. | `cc65e41` | — |
+| 06 — Optimizer split | `stockmarket/optimization/` subpackage (`trade_history`, `features`, `reports`); legacy `stockmarket.optimizer` shim removed. | `cc65e41` | — |
 | 07 — Market learning port | `SymbolScorer` Protocol; `NullSymbolScorer`, `SklearnSymbolScorer`, `BiasOverlayScorer`; scoring extracted to `cycle/scoring.py`; injection via `Services`. | `92a2d14` | `DISABLE_ML_SCORER=1` |
 | 08 — UI thinning (scoped) | Live tables fragment → `views/simple_signals_tables.py`; cycle composition → `cycle/factory.py`; legacy banners on `dashboard.py` and `webapp.py`; AST guards (no `st.session_state`, no `dashboard_simple` imports inside `views/*.py`). | `9c3fc24` | `USE_SIMPLE_VIEWS=1` (master) |
 | 08b s1 — Top read-only panels | `views/simple_top_panels.py` (auto-trade actions, clean-trades caption, AI best action, optimizer summary). | `7e18b9d` | `USE_SIMPLE_VIEWS_TOP_PANELS=1` |
@@ -30,9 +30,9 @@ The goal: re-anchor the codebase on **hexagonal / ports-and-adapters** at the bo
 | 08b s6 — Final cleanup | Flipped views to be the only path; removed every inline legacy branch and the entire `USE_SIMPLE_VIEWS*` flag family. | `100b5c2` | — (flag family deleted) |
 | 08b — Docs + legacy entrypoints | Replaced legacy `dashboard.py` with a 31-line deprecation stub; dropped legacy MVC docs/instructions; pointed users at `app.py`. | `9abd860`, `faae202` | — |
 | 08b — Orphan deletions | Deleted `controllers/`, `models/`, `persistence/file_storage.py`, `persistence/factory.py`; deleted `views/components.py`; dropped dead `yesterday_net` + disambiguated `_hhmm_to_time`. | `62f0979`, `1d15e0f`, `c39ec91` | — |
-| 09 a — `SqlitePaperRepo` | `persistence/sqlite_paper_repo.py` alongside `JsonPaperRepo`; schema for `paper_state`, `positions`, `prices`, `trade_log`, `daily_counters`; `ui_config` / `agent_memory` as JSON `TEXT`. | `cbcf4c8` | — |
-| 09 b — Migration script | `scripts/migrate_paper_state_json_to_sqlite.py` — one-shot JSON → SQLite migration retained as future-proofing for the eventual SQLite default flip. | `c94eace` | — |
-| 09 c — Backend selection factory | `persistence/paper_repo.py::get_paper_repo()` reads `PAPER_REPO_BACKEND` (env, then `config/database_config.json`, default `json`); `_DualWriteSqlitePaperRepo` wraps SQLite when migration aids are set. | `3a2bc51` | `PAPER_REPO_BACKEND`, `PAPER_REPO_DUAL_WRITE`, `PAPER_REPO_FALLBACK_JSON` |
+| 09 a — `SqlitePaperRepo` | `persistence/sqlite_paper_repo.py`; schema for `paper_state`, `positions`, `prices`, `trade_log`, `daily_counters`; `ui_config` / `agent_memory` as JSON `TEXT`. | `cbcf4c8` | — |
+| 09 b — JSON migration script | A one-shot JSON → SQLite migration existed briefly, then was removed when the project chose a fresh SQLite start. | `c94eace` | retired |
+| 09 c — SQLite-only factory | `persistence/paper_repo.py::get_paper_repo()` always returns `SqlitePaperRepo`; optional DB path comes from `storage.paper_state_database_path`. | `3a2bc51` | — |
 | Post-09 — `tradebookid` field | `tradebookid: int = 0` on `TradeLogEntry`; column added to `trade_log` DDL with idempotent `ALTER TABLE ADD COLUMN` shim; INSERT/SELECT/marshalling helpers updated; defensive read in session bridge; field appended to the dashboard's plain-dict log row. | `87757c6` | — |
 
 ## Deferred (not picked up; revisit only with a new plan)
@@ -46,7 +46,7 @@ The goal: re-anchor the codebase on **hexagonal / ports-and-adapters** at the bo
 - **Legacy `dashboard.py`.** Replaced with a 31-line deprecation stub (`9abd860`). `streamlit run dashboard.py` shows a banner; old `from dashboard import render_complex_dashboard` callers won't `ImportError`.
 - **MVC stack.** `src/stockmarket/controllers/`, `src/stockmarket/models/`, and `src/stockmarket/views/components.py` are gone. The persistence-side casualties (`persistence/file_storage.py`, `persistence/factory.py`) went with them; `db_storage.py` survived as a SQLite connection helper.
 - **`USE_SIMPLE_VIEWS*` flag family.** Master `USE_SIMPLE_VIEWS` plus the per-slice overrides (`USE_SIMPLE_VIEWS_TOP_PANELS`, `_ACTIVITY`, `_TOMORROW_PLAN`, `_PORTFOLIO`, `_AUTO_REFRESH`) were all deleted in phase-8b slice 6; views are the only render path now.
-- **`stockmarket.optimizer` module.** Retained as a `DeprecationWarning` shim re-exporting `stockmarket.optimization`. New code must import from the subpackage; the shim retires once callers are clean.
+- **JSON paper-state storage.** `JsonPaperRepo`, `PAPER_REPO_BACKEND`, `USE_PAPER_REPO`, and the JSON migration script are gone. SQLite is the only runtime paper-state store.
 - **`yesterday_net` helper** and the duplicate `_hhmm_to_time` overload — dead code dropped during phase-9 housekeeping (`c39ec91`).
 
 ## Final state
@@ -57,7 +57,7 @@ The goal: re-anchor the codebase on **hexagonal / ports-and-adapters** at the bo
 src/stockmarket/
 ├─ domain/             # frozen dataclasses + SymbolScorer protocol
 ├─ state/              # session_bridge.py (dict ↔ domain)
-├─ persistence/        # PaperRepo + JsonPaperRepo + SqlitePaperRepo + db_storage
+├─ persistence/        # PaperRepo + SqlitePaperRepo + db_storage
 ├─ cycle/              # ports, services, runner, factory, scoring, steps/, entry/, adapters/
 ├─ backtest/           # cycle.py, settings.py, sizer.py, steps.py, adapters/
 ├─ optimization/       # trade_history.py, features.py, reports.py
@@ -73,12 +73,12 @@ src/stockmarket/
 ├─ strategy.py / simple_signals.py / ranking.py / charges.py
 ├─ backtest.py / sweep.py
 ├─ market_learning.py
-├─ optimizer.py        # deprecation shim
+├─ optimization/       # trade_history, features, reports, run_intelligent_optimization
 ├─ config.py           # TradingConfig
 └─ settings.py         # AppSettings + loader
 ```
 
-Workspace root keeps `app.py`, `dashboard_simple.py`, the deprecation-stub `dashboard.py`, `config.json` / `config.example.json`, `dashboard_simple_data_config.json`, `config/`, `tests/`, `scripts/migrate_paper_state_json_to_sqlite.py`, `MIGRATION.md`, `CODEBASE_STRUCTURE.md`, `CODEBASE_DATAFLOW.md`, `README.md`.
+Workspace root keeps `app.py`, `dashboard_simple.py`, the deprecation-stub `dashboard.py`, `config.json` / `config.example.json`, `dashboard_simple_data_config.json`, `config/`, `tests/`, `MIGRATION.md`, `CODEBASE_STRUCTURE.md`, `CODEBASE_DATAFLOW.md`, `README.md`.
 
 ### Feature flags still in play
 
@@ -86,33 +86,18 @@ All default OFF; production behavior is preserved when unset.
 
 | Flag | Effect |
 |------|--------|
-| `USE_PAPER_REPO=1` | Route dashboard load/save through the `PaperRepo` factory. |
 | `USE_TRADING_CYCLE=1` | Route auto-trading through `cycle.runner.run_cycle`. |
 | `USE_APP_SETTINGS=1` | Read `AppSettings` instead of the inline JSON config block. |
-| `BACKTEST_USE_CYCLE=1` | Drive legacy backtest via `run_backtest_via_cycle()`. |
 | `DISABLE_ML_SCORER=1` | Force `NullSymbolScorer` (skip sklearn + bias overlay). |
-
-### Active env vars (phase-9 storage)
-
-| Env | Effect |
-|-----|--------|
-| `PAPER_REPO_BACKEND=json\|sqlite` | Pick the backend. Defaults to `json` (also reads `paper_repo_backend` from `config/database_config.json` if env is unset). |
-| `PAPER_REPO_DUAL_WRITE=1` | While on SQLite, also write the JSON file each save. Migration aid. |
-| `PAPER_REPO_FALLBACK_JSON=1` | While on SQLite, fall back to JSON on a load miss. Migration aid. |
 
 ### Public packages
 
-`stockmarket.domain`, `stockmarket.state`, `stockmarket.persistence`, `stockmarket.cycle` (+ `cycle.adapters`, `cycle.steps`, `cycle.entry`, `cycle.scoring`, `cycle.factory`), `stockmarket.backtest` (+ `backtest.adapters`), `stockmarket.optimization`, `stockmarket.ml`, `stockmarket.views`, `stockmarket.quotes`. Legacy modules still imported by callers: `stockmarket.config`, `stockmarket.settings`, `stockmarket.data`, `stockmarket.strategy`, `stockmarket.simple_signals`, `stockmarket.ranking`, `stockmarket.charges`, `stockmarket.backtest` (legacy callable), `stockmarket.sweep`, `stockmarket.market_learning`, `stockmarket.cli`, `stockmarket.webapp`. The `stockmarket.optimizer` shim is still importable but emits `DeprecationWarning`.
+`stockmarket.domain`, `stockmarket.state`, `stockmarket.persistence`, `stockmarket.cycle` (+ `cycle.adapters`, `cycle.steps`, `cycle.entry`, `cycle.scoring`, `cycle.factory`), `stockmarket.backtest` (+ `backtest.adapters`), `stockmarket.optimization`, `stockmarket.ml`, `stockmarket.views`, `stockmarket.quotes`. Legacy modules still imported by callers: `stockmarket.config`, `stockmarket.settings`, `stockmarket.data`, `stockmarket.strategy`, `stockmarket.simple_signals`, `stockmarket.ranking`, `stockmarket.charges`, `stockmarket.backtest` (legacy callable), `stockmarket.sweep`, `stockmarket.market_learning`, `stockmarket.cli`, `stockmarket.webapp`.
 
 ## Known follow-ups
 
 These were deliberately left for after the migration. Each points back at the code, since the per-phase plan markdowns are now gone.
 
-- **Auto-refresh price-refresh dedup.** The footer view `views/simple_auto_refresh.py` triggers a price refresh on rerun; the dedup logic against the cycle adapter's price step is still TODO (search `dashboard_simple.py` for `_refresh_holding_prices`). Not user-visible today; only matters once SQLite is the default and quote service traffic gets monitored.
-- **`BACKTEST_USE_CYCLE` live-data parity flip.** Synthetic golden is in place; live-data parity (`RELIANCE.NS`) was not run in CI before the branch closed. Flip the default only after a live golden run lands.
-- **`stockmarket.optimizer` shim retirement.** Each import emits `DeprecationWarning`. Migrate every caller to `stockmarket.optimization` (start with `tests/test_optimization_split.py` — currently importing the shim on purpose to keep coverage on the legacy surface). Delete the shim once callers are clean.
-- **`Services.scorer` consumption + `BiasOverlayScorer` ordering audit.** `Services.scorer` is plumbed but cycle steps still rely on dashboard-side `_rank_signals_for_cycle` for scoring. If you push scoring into steps, audit `BiasOverlayScorer` ordering vs current `_apply_effective_scores` to avoid silent rank drift.
-- **SQLite default flip.** Per the blank-slate rollout: (1) update README to document `PAPER_REPO_BACKEND` and the `.database/paper_state.db` location; (2) flip the default from `json` to `sqlite` in `persistence/paper_repo.py::_resolve_backend`; (3) drop the `_DualWriteSqlitePaperRepo` wrapper plus the `PAPER_REPO_DUAL_WRITE` / `PAPER_REPO_FALLBACK_JSON` flags once one release has shipped on the new default. Do not delete `JsonPaperRepo` after the flip — keep it as a supported alternative for development setups.
 - **`tradebookid` population.** The field is wired end-to-end with default `0`. Plug in a real broker tradebook source as a follow-up; consider an index or unique constraint only once non-zero values are flowing.
 
 ## Where to look for more detail

@@ -27,9 +27,14 @@ import pytz
 import streamlit as st
 
 try:
-    from nsepython import nsefetch
+    from stockmarket.quotes.nse_client import create_hardened_nse_fetch
+
+    nsefetch = create_hardened_nse_fetch()
 except Exception:
-    nsefetch = None
+    try:
+        from nsepython import nsefetch  # type: ignore[no-redef]
+    except Exception:
+        nsefetch = None
 
 try:
     from stockmarket.finnhub_client import fetch_quote as _finnhub_fetch_quote
@@ -128,7 +133,6 @@ MARKET_CONFIG = {
         "entry_cutoff": time(13, 30),
         "square_off": time(15, 15),
         "watchlist": WATCHLIST_NSE,
-        "state_file": Path("outputs") / "simple_paper_state.json",
         "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light.csv",
         "currency": "Rs",
         "score_change_weight": 6.0,
@@ -144,7 +148,6 @@ MARKET_CONFIG = {
         "entry_cutoff": time(13, 30),
         "square_off": time(15, 45),
         "watchlist": WATCHLIST_US,
-        "state_file": Path("outputs") / "simple_paper_state_us.json",
         "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light_us.csv",
         "currency": "$",
         "score_change_weight": 8.0,
@@ -158,7 +161,6 @@ MARKET_CONFIG = {
 _DASHBOARD_MARKET_EXTRAS: dict[str, dict[str, Any]] = {
     "NSE": {
         "label": "India NSE",
-        "state_file": Path("outputs") / "simple_paper_state.json",
         "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light.csv",
         "currency": "Rs",
         "score_change_weight": 6.0,
@@ -169,7 +171,6 @@ _DASHBOARD_MARKET_EXTRAS: dict[str, dict[str, Any]] = {
     },
     "US": {
         "label": "US",
-        "state_file": Path("outputs") / "simple_paper_state_us.json",
         "clean_closed_trades_file": Path("outputs") / "clean_closed_trades_light_us.csv",
         "currency": "$",
         "score_change_weight": 8.0,
@@ -200,7 +201,6 @@ def _app_log(level: str, message: str) -> None:
         logger.error(message)
     else:
         logger.debug(message)
-
 
 _ACTIVITY_STEPS_MAX = 15
 
@@ -256,6 +256,27 @@ def _activity_finish_summary(
     _activity_step(f"Run summary: {mode}{err}")
 
 
+_NSE_FEED_ALERT_KEY = "s_nse_feed_alert_ts"
+_NSE_FEED_ERROR_PREFIX = "NSE feed:"
+
+
+def _maybe_alert_nse_feed_failure(scan_errors: list[str]) -> None:
+    """Log NSE quote-feed failures to server log and Activity (throttled)."""
+    msg = next((e for e in scan_errors if str(e).startswith(_NSE_FEED_ERROR_PREFIX)), None)
+    if not msg:
+        return
+    _app_log("error", msg)
+    import time as _time
+
+    now = _time.time()
+    last = float(st.session_state.get(_NSE_FEED_ALERT_KEY, 0.0) or 0.0)
+    if now - last < 60.0:
+        return
+    st.session_state[_NSE_FEED_ALERT_KEY] = now
+    short = msg if len(msg) <= 160 else msg[:157] + "…"
+    _activity_step(short)
+
+
 try:
     from stockmarket.quotes import get_default_quote_service
 except Exception:
@@ -270,17 +291,17 @@ def _optimizer_imports() -> tuple[Any, Any, Any, Any]:
     if _optimizer_mod is None:
         try:
             from stockmarket.config import TradingConfig
-            from stockmarket.optimizer import (
-                collect_clean_closed_trades,
+            from stockmarket.optimization import (
+                collect_clean_closed_trades_from_log,
                 export_optimization_report,
-                run_intelligent_optimization,
+                run_intelligent_optimization_from_log,
             )
 
             _optimizer_mod = (
                 TradingConfig,
-                collect_clean_closed_trades,
+                collect_clean_closed_trades_from_log,
                 export_optimization_report,
-                run_intelligent_optimization,
+                run_intelligent_optimization_from_log,
             )
         except Exception:
             _optimizer_mod = (None, None, None, None)
@@ -290,7 +311,10 @@ def _optimizer_imports() -> tuple[Any, Any, Any, Any]:
 def _dashboard_scorer(bias_map: dict[str, float] | None = None):
     from stockmarket.ml import build_scorer, with_bias_map
 
-    base = build_scorer(_state_file())
+    base = build_scorer(
+        market=_selected_market(),
+        trade_log_provider=_current_trade_log,
+    )
     if bias_map:
         return with_bias_map(base, bias_map)
     return base
@@ -374,7 +398,6 @@ def _profile_to_market_cfg(profile, extras: dict[str, Any]) -> dict[str, Any]:
         "entry_cutoff": _hhmm_to_time(profile.entry_cutoff_time),
         "square_off": _hhmm_to_time(profile.square_off_time),
         "watchlist": list(profile.watchlist),
-        "state_file": extras["state_file"],
         "clean_closed_trades_file": extras["clean_closed_trades_file"],
         "currency": extras["currency"],
         "score_change_weight": extras["score_change_weight"],
@@ -406,10 +429,6 @@ def _market_cfg() -> dict[str, Any]:
         profile = _get_app_settings().market[market]
         return _profile_to_market_cfg(profile, _DASHBOARD_MARKET_EXTRAS[market])
     return MARKET_CONFIG[market]
-
-
-def _state_file() -> Path:
-    return Path(_market_cfg()["state_file"])
 
 
 def _clean_closed_trades_file() -> Path:
@@ -451,41 +470,57 @@ def _square_off_time() -> time:
     return _market_cfg()["square_off"]
 
 
-def _read_saved_state() -> dict[str, Any]:
-    state_file = _state_file()
-    if not state_file.exists():
-        return {}
-    try:
-        return json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _use_paper_repo() -> bool:
-    return os.environ.get("USE_PAPER_REPO") == "1"
-
-
 def _use_trading_cycle() -> bool:
     return os.environ.get("USE_TRADING_CYCLE") == "1"
 
 
 def _paper_repo():
-    return get_paper_repo(_state_file(), market=_selected_market())
+    return get_paper_repo(market=_selected_market())
+
+
+def _paper_state_key() -> str:
+    repo = _paper_repo()
+    return f"{_selected_market()}:{repo.path()}"
+
+
+def _paper_state_version() -> str:
+    repo = _paper_repo()
+    if hasattr(repo, "updated_at"):
+        return str(repo.updated_at())
+    path = repo.path()
+    return str(path.stat().st_mtime) if path.exists() else ""
+
+
+def _current_trade_log() -> list[Any]:
+    return list(st.session_state.get("s_log", []))
+
+
+def _saved_state_defaults() -> dict[str, Any]:
+    try:
+        loaded = _paper_repo().load()
+    except Exception:
+        return {}
+    if not loaded:
+        return {}
+    state, _ = loaded
+    return {
+        "start": float(state.start_capital),
+        "ui_config": dict(state.ui_config or {}),
+    }
 
 
 def _auto_export_clean_closed_trades() -> tuple[int, str | None]:
-    _, collect_clean_closed_trades, _, _ = _optimizer_imports()
-    if collect_clean_closed_trades is None:
+    _, collect_clean_closed_trades_from_log, _, _ = _optimizer_imports()
+    if collect_clean_closed_trades_from_log is None:
         return 0, "Optimizer module unavailable; clean closed-trade export skipped."
 
-    # Fresh reset state can leave an empty file briefly; treat as no trades yet.
-    state_file = _state_file()
-    if not state_file.exists() or state_file.stat().st_size == 0:
+    trade_log = _current_trade_log()
+    if not trade_log:
         return 0, None
 
     try:
-        closed_trades_df, _ = collect_clean_closed_trades(
-            state_file,
+        closed_trades_df, _ = collect_clean_closed_trades_from_log(
+            trade_log,
             lookback_trades=0,
         )
         clean_closed_trades_file = _clean_closed_trades_file()
@@ -525,19 +560,19 @@ def _run_optimizer_from_dashboard(
         TradingConfig,
         _,
         export_optimization_report,
-        run_intelligent_optimization,
+        run_intelligent_optimization_from_log,
     ) = _optimizer_imports()
     if (
         TradingConfig is None
-        or run_intelligent_optimization is None
+        or run_intelligent_optimization_from_log is None
         or export_optimization_report is None
     ):
         return None, None, "Optimizer module unavailable in dashboard runtime."
 
     try:
         cfg = _optimizer_cfg_for_dashboard(TradingConfig)
-        report = run_intelligent_optimization(
-            trade_file=_state_file(),
+        report = run_intelligent_optimization_from_log(
+            log=_current_trade_log(),
             cfg=cfg,
             lookback_trades=int(lookback_trades),
             min_train_trades=int(min_train_trades),
@@ -753,9 +788,8 @@ def _intraday_charges(side: str, turnover: float) -> float:
 
 
 def _init_state(starting_capital: float) -> None:
-    state_file = _state_file()
-    state_key = str(state_file)
-    if st.session_state.get("s_state_file") == state_key and "s_cash" in st.session_state:
+    state_key = _paper_state_key()
+    if st.session_state.get("s_state_key") == state_key and "s_cash" in st.session_state:
         return
 
     for key in [
@@ -779,57 +813,17 @@ def _init_state(starting_capital: float) -> None:
     ]:
         st.session_state.pop(key, None)
 
-    if _use_paper_repo():
-        try:
-            loaded = _paper_repo().load()
-            if loaded:
-                state, counters = loaded
-                paper_state_to_session_state(st.session_state, state)
-                counters_to_session_state(st.session_state, counters)
-                st.session_state.s_state_file = state_key
-                _app_log("info", f"Loaded state for {_selected_market()} market")
-                return
-        except Exception as e:
-            _app_log("error", f"Failed to load saved state: {e}")
-    elif state_file.exists():
-        try:
-            data = _read_saved_state()
-            st.session_state.s_cash = float(data.get("cash", starting_capital))
-            st.session_state.s_start = float(
-                data.get("start", starting_capital))
-            st.session_state.s_realized = float(data.get("realized", 0.0))
-            st.session_state.s_charges = float(data.get("charges", 0.0))
-            st.session_state.s_holdings = data.get("holdings", {})
-            st.session_state.s_shorts = data.get("shorts", {})
-            st.session_state.s_ui_config = data.get("ui_config", {})
-            st.session_state.s_log = data.get("log", [])
-            st.session_state.s_prices = data.get("prices", {})
-            st.session_state.s_agent_memory = data.get("agent_memory", {})
-            st.session_state.s_peak_open_pnl = float(
-                data.get("peak_open_pnl", 0.0))
-            st.session_state.s_peak_open_pnl_day = str(
-                data.get("peak_open_pnl_day", ""))
-            st.session_state.s_profit_guard_triggered_day = str(
-                data.get("profit_guard_triggered_day", "")
-            )
-            st.session_state.s_profit_ladder_day = str(
-                data.get("profit_ladder_day", "")
-            )
-            st.session_state.s_profit_ladder_armed = bool(
-                data.get("profit_ladder_armed", False)
-            )
-            st.session_state.s_profit_ladder_pullback_started = bool(
-                data.get("profit_ladder_pullback_started", False)
-            )
-            st.session_state.s_profit_ladder_exited_day = str(
-                data.get("profit_ladder_exited_day", "")
-            )
-            st.session_state.s_state_file = state_key
+    try:
+        loaded = _paper_repo().load()
+        if loaded:
+            state, counters = loaded
+            paper_state_to_session_state(st.session_state, state)
+            counters_to_session_state(st.session_state, counters)
+            st.session_state.s_state_key = state_key
             _app_log("info", f"Loaded state for {_selected_market()} market")
             return
-        except Exception as e:
-            _app_log("error", f"Failed to load saved state: {e}")
-            pass
+    except Exception as e:
+        _app_log("error", f"Failed to load saved state: {e}")
 
     st.session_state.s_cash = float(starting_capital)
     st.session_state.s_start = float(starting_capital)
@@ -848,7 +842,7 @@ def _init_state(starting_capital: float) -> None:
     st.session_state.s_profit_ladder_armed = False
     st.session_state.s_profit_ladder_pullback_started = False
     st.session_state.s_profit_ladder_exited_day = ""
-    st.session_state.s_state_file = state_key
+    st.session_state.s_state_key = state_key
     _app_log(
         "info",
         f"Initialized fresh state for {_selected_market()} market with {_currency_symbol()} {starting_capital:,.0f}",
@@ -857,35 +851,9 @@ def _init_state(starting_capital: float) -> None:
 
 
 def _save_state() -> None:
-    if _use_paper_repo():
-        state = session_state_to_paper_state(st.session_state)
-        counters = session_state_to_counters(st.session_state)
-        _paper_repo().save(state, counters)
-        return
-
-    state_file = _state_file()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "cash": float(st.session_state.s_cash),
-        "start": float(st.session_state.s_start),
-        "realized": float(st.session_state.s_realized),
-        "charges": float(st.session_state.s_charges),
-        "holdings": st.session_state.s_holdings,
-        "shorts": st.session_state.s_shorts,
-        "ui_config": st.session_state.get("s_ui_config", {}),
-        "log": st.session_state.s_log,
-        "prices": st.session_state.s_prices,
-        "agent_memory": st.session_state.get("s_agent_memory", {}),
-        "peak_open_pnl": float(st.session_state.get("s_peak_open_pnl", 0.0)),
-        "peak_open_pnl_day": st.session_state.get("s_peak_open_pnl_day", ""),
-        "profit_guard_triggered_day": st.session_state.get("s_profit_guard_triggered_day", ""),
-        "profit_ladder_day": st.session_state.get("s_profit_ladder_day", ""),
-        "profit_ladder_armed": bool(st.session_state.get("s_profit_ladder_armed", False)),
-        "profit_ladder_pullback_started": bool(st.session_state.get("s_profit_ladder_pullback_started", False)),
-        "profit_ladder_exited_day": st.session_state.get("s_profit_ladder_exited_day", ""),
-        "market": _selected_market(),
-    }
-    state_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    state = session_state_to_paper_state(st.session_state)
+    counters = session_state_to_counters(st.session_state)
+    _paper_repo().save(state, counters)
 
 
 def _today_entry_count() -> int:
@@ -1753,6 +1721,7 @@ def _scan_watchlist(
 
     sym_list = list(symbols)
     quotes_map: dict[str, Any] = {}
+    svc = None
     try:
         if _selected_market() == "US":
             quotes_map = _fetch_us_quotes(sym_list)
@@ -1762,6 +1731,21 @@ def _scan_watchlist(
     except Exception as e:
         errors.append(f"batch quotes: {e}")
 
+    if _selected_market() != "US" and sym_list and svc is not None:
+        diag = getattr(svc, "last_nse_batch_diag", None)
+        zero_price = 0
+        for _sym in sym_list:
+            _qobj = quotes_map.get(_sym)
+            if _qobj is None:
+                continue
+            try:
+                if float(_to_simple_quote(_qobj).get("price", 0.0) or 0.0) <= 0:
+                    zero_price += 1
+            except Exception:
+                zero_price += 1
+        if diag is not None and diag.with_price == 0:
+            errors.insert(0, f"{_NSE_FEED_ERROR_PREFIX} {diag.message}")
+
     for sym in symbols:
         try:
             qobj = quotes_map.get(sym)
@@ -1770,6 +1754,7 @@ def _scan_watchlist(
             q = _to_simple_quote(qobj)
             price = float(q["price"])
             if price <= 0:
+                errors.append(f"{sym}: quote price is zero (feed blocked or stale)")
                 continue
             if price < float(min_price) or price > float(max_price):
                 continue
@@ -1844,7 +1829,7 @@ def _scan_watchlist(
 @st.cache_data(ttl=120, show_spinner=False)
 def _batch_ml_scores_cached(
     symbols: tuple[str, ...],
-    state_mtime: float,
+    state_version: str,
     model_mtime: float,
 ) -> dict[str, float]:
     return _dashboard_scorer().batch_scores(symbols)
@@ -1862,14 +1847,13 @@ def _apply_effective_scores(
         st.session_state.get("s_ui_config", {}).get("enable_ml_scoring", False)
     )
     scorer = _dashboard_scorer(bias_map)
-    state_file = _state_file()
     model_path = scorer.model_path() if hasattr(scorer, "model_path") else None
     model_file = (
         model_path
         if isinstance(model_path, Path)
         else Path("outputs") / "market_learning_model.pkl"
     )
-    state_mtime = float(state_file.stat().st_mtime) if state_file.exists() else 0.0
+    state_version = _paper_state_version()
     model_mtime = float(model_file.stat().st_mtime) if model_file.exists() else 0.0
     return apply_effective_scores(
         buy_df,
@@ -1878,7 +1862,7 @@ def _apply_effective_scores(
         scorer,
         ml_enabled=ml_enabled,
         batch_ml_scores=_batch_ml_scores_cached,
-        state_mtime=state_mtime,
+        state_mtime=state_version,
         model_mtime=model_mtime,
     )
 
@@ -2257,18 +2241,24 @@ def _build_cycle_settings(
 
 
 def _rank_signals_for_cycle(**kwargs):
-    buy_df, sell_df, sell_exit_df, errors = _rank_signals(**kwargs)
-    buy_df, sell_df, _ = _apply_effective_scores(
-        buy_df,
-        sell_df,
-        pd.DataFrame(),
-        _symbol_bias_map(),
-    )
-    return buy_df, sell_df, sell_exit_df, errors
+    return _rank_signals(**kwargs)
 
 
 def _build_cycle_services():
     from stockmarket.cycle.factory import build_services
+
+    ml_enabled = bool(
+        st.session_state.get("s_ui_config", {}).get("enable_ml_scoring", False)
+    )
+    scorer = _dashboard_scorer(_symbol_bias_map())
+    model_path = scorer.model_path() if hasattr(scorer, "model_path") else None
+    model_file = (
+        model_path
+        if isinstance(model_path, Path)
+        else Path("outputs") / "market_learning_model.pkl"
+    )
+    state_version = _paper_state_version()
+    model_mtime = float(model_file.stat().st_mtime) if model_file.exists() else 0.0
 
     return build_services(
         session=st.session_state,
@@ -2280,10 +2270,12 @@ def _build_cycle_services():
         rank_signals_fn=_rank_signals_for_cycle,
         refresh_prices_fn=_refresh_holding_prices,
         persist_state_fn=_save_state,
-        use_paper_repo=_use_paper_repo(),
-        state_file=_state_file(),
         market=_selected_market(),
-        scorer=_dashboard_scorer(_symbol_bias_map()),
+        scorer=scorer,
+        ml_enabled=ml_enabled,
+        batch_ml_scores=_batch_ml_scores_cached,
+        state_mtime=state_version,
+        model_mtime=model_mtime,
     )
 
 
@@ -3044,9 +3036,29 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         if selected != st.session_state.get("_last_market"):
             st.session_state._last_market = selected
             st.session_state.s_skip_optimizer_after_market_switch = True
+            from stockmarket.market_status import clear_market_status_cache
+
+            clear_market_status_cache(st.session_state)
             _app_log("info", f"Switched to {_market_label(selected)} market")
-    
-    saved_state = _read_saved_state()
+
+    from stockmarket.market_status import MARKET_DISPLAY_LABELS, resolve_all_market_statuses
+    from stockmarket.settings import load_app_settings
+    from stockmarket.views.market_status_bar import render_market_status_bar
+
+    _status_settings = load_app_settings()
+    _market_statuses = resolve_all_market_statuses(
+        _status_settings.market,
+        MARKET_DISPLAY_LABELS,
+        selected_market=st.session_state.selected_market,
+        session=st.session_state,
+        nsefetch=nsefetch,
+    )
+    render_market_status_bar(
+        _market_statuses,
+        selected_market=st.session_state.selected_market,
+    )
+
+    saved_state = _saved_state_defaults()
     saved_ui = saved_state.get("ui_config", {}) if isinstance(
         saved_state, dict) else {}
     watchlist = _watchlist()
@@ -3365,9 +3377,9 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         _save_state()
     
     if reset_btn:
-        state_file = _state_file()
-        if state_file.exists():
-            state_file.unlink(missing_ok=True)
+        repo = _paper_repo()
+        if hasattr(repo, "clear_market"):
+            repo.clear_market()
         st.session_state.clear()
         st.rerun()
     
@@ -3404,6 +3416,8 @@ def render_simple_dashboard(standalone: bool = True) -> None:
         min_order_value=min_order_value,
         max_trade_invest_pct=max_trade_invest_pct,
     )
+    if _selected_market() == "NSE":
+        _maybe_alert_nse_feed_failure(scan_errors)
 
     learning_memory = _update_learning_memory()
     market_research = _market_research_from_signals(buy_df, sell_exit_df)
@@ -3747,9 +3761,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
             and show_ml_scores_table
         ):
             st.subheader("Symbol ML Quality Scores")
-            state_file = _state_file()
-            state_mtime = float(
-                state_file.stat().st_mtime) if state_file.exists() else 0.0
+            state_version = _paper_state_version()
             model_path = ml_scorer.model_path()
             model_file = (
                 model_path
@@ -3759,7 +3771,7 @@ def render_simple_dashboard(standalone: bool = True) -> None:
             model_mtime = float(
                 model_file.stat().st_mtime) if model_file.exists() else 0.0
             scores = _batch_ml_scores_cached(
-                tuple(active_watchlist), state_mtime, model_mtime)
+                tuple(active_watchlist), state_version, model_mtime)
     
             if scores:
                 score_df = pd.DataFrame(
@@ -3826,12 +3838,6 @@ def render_simple_dashboard(standalone: bool = True) -> None:
     
     from stockmarket.views.simple_auto_refresh import render_auto_refresh_footer
 
-    if auto_refresh_on and refresh_seconds > 0:
-        # TODO(phase-8b): _quick_portfolio_metrics already calls
-        # _refresh_holding_prices at the top of the render; this second
-        # call may be redundant. Left in place to preserve legacy
-        # behaviour exactly until dedup parity can be confirmed.
-        _refresh_holding_prices()
     render_auto_refresh_footer(
         enabled=auto_refresh_on,
         refresh_seconds=int(refresh_seconds),

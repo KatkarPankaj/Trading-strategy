@@ -6,5 +6,5 @@ __all__ = [
     "strategy",
     "backtest",
     "sweep",
-    "optimizer",
+    "optimization",
 ]

@@ -53,3 +53,28 @@ def fetch_nse_quote_equity_raw(
     return nsefetch(
         f"https://www.nseindia.com/api/quote-equity?symbol={nse_symbol}"
     )
+
+
+_NSE_MARKET_STATUS_URL = "https://www.nseindia.com/api/marketStatus"
+_CAPITAL_MARKET_SEGMENT = "capital market"
+
+
+def fetch_nse_market_status_raw(nsefetch: Callable[..., Any]) -> dict[str, Any]:
+    """Fetch NSE marketStatus JSON (all segments)."""
+    return nsefetch(_NSE_MARKET_STATUS_URL)
+
+
+def is_nse_capital_market_open(payload: dict[str, Any]) -> bool:
+    """True when Capital Market segment reports marketStatus Open."""
+    segments = payload.get("marketState") or payload.get("marketstate") or []
+    if not isinstance(segments, list):
+        return False
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        name = str(seg.get("market") or seg.get("marketType") or "").strip().lower()
+        if name != _CAPITAL_MARKET_SEGMENT:
+            continue
+        status = str(seg.get("marketStatus") or seg.get("marketstatus") or "").strip().lower()
+        return status == "open"
+    return False

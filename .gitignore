@@ -3,5 +3,7 @@ __pycache__/
 .venv/
 .env
 outputs/
+.database
+.database/
 .cursor/*.log
-.cache/py-yfinance/
+.cache/*.pkl

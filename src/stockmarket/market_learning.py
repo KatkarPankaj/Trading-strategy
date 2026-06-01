@@ -5,8 +5,8 @@ Market-based ML learning system: trains on market data, news sentiment, and pers
 from __future__ import annotations
 
 import csv
-import json
 import pickle
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import time
@@ -463,24 +463,26 @@ class MarketDataFetcher:
         return rsi.fillna(50.0)
 
 
+def _trade_entry_to_dict(entry: Any) -> dict[str, Any]:
+    if isinstance(entry, dict):
+        return dict(entry)
+    if is_dataclass(entry):
+        return asdict(entry)
+    if hasattr(entry, "__dict__"):
+        return dict(vars(entry))
+    return {}
+
+
 class PersonalTradeAnalyzer:
     """Analyze personal trade history to extract per-symbol performance."""
 
     @staticmethod
-    def analyze_trades(state_file: Path) -> dict[str, dict[str, Any]]:
+    def analyze_trades_from_log(log: list[Any]) -> dict[str, dict[str, Any]]:
         """Extract symbol-level stats from trade log."""
-        if not state_file.exists():
-            return {}
-
-        try:
-            state = json.loads(state_file.read_text())
-        except Exception:
-            return {}
-
-        log = state.get("log", [])
         symbol_stats: dict[str, dict[str, Any]] = {}
 
-        for entry in log:
+        for raw_entry in log:
+            entry = _trade_entry_to_dict(raw_entry)
             side = str(entry.get("side", "")).upper()
             if side not in {"BUY", "SHORT"}:
                 continue
@@ -531,13 +533,17 @@ class PersonalTradeAnalyzer:
         return symbol_stats
 
 
+def analyze_trades_from_log(log: list[Any]) -> dict[str, dict[str, Any]]:
+    return PersonalTradeAnalyzer.analyze_trades_from_log(log)
+
+
 class FeatureEngineer:
     """Engineer features combining market data, sentiment, and personal history."""
 
     @staticmethod
     def create_feature_vector(
         symbol: str,
-        state_file: Path,
+        trade_stats: dict[str, dict[str, Any]] | None = None,
         market_data: dict[str, Any] | None = None,
         sentiment: float = 0.0,
     ) -> dict[str, float]:
@@ -565,15 +571,14 @@ class FeatureEngineer:
         features["sentiment"] = float(sentiment)
 
         # Personal trade history
-        trade_stats = PersonalTradeAnalyzer.analyze_trades(
-            state_file).get(symbol, {})
-        if trade_stats:
-            features["win_rate"] = float(trade_stats.get("win_rate", 0.0))
+        symbol_trade_stats = (trade_stats or {}).get(symbol, {})
+        if symbol_trade_stats:
+            features["win_rate"] = float(symbol_trade_stats.get("win_rate", 0.0))
             features["total_trades"] = float(
-                trade_stats.get("total_trades", 0.0))
-            features["total_pnl"] = float(trade_stats.get("total_pnl", 0.0))
-            features["avg_win"] = float(trade_stats.get("avg_win", 0.0))
-            features["avg_loss"] = float(trade_stats.get("avg_loss", 0.0))
+                symbol_trade_stats.get("total_trades", 0.0))
+            features["total_pnl"] = float(symbol_trade_stats.get("total_pnl", 0.0))
+            features["avg_win"] = float(symbol_trade_stats.get("avg_win", 0.0))
+            features["avg_loss"] = float(symbol_trade_stats.get("avg_loss", 0.0))
 
         return features
 
@@ -696,24 +701,20 @@ class MarketLearningModel:
             pass
 
 
-def resolve_learning_model_path(state_file: Path) -> Path:
-    """Map each trade state file to its own persisted ML model file."""
-    stem = state_file.stem
-    if stem == "simple_paper_state":
-        model_name = "market_learning_model.pkl"
-    elif stem.startswith("simple_paper_state"):
-        suffix = stem[len("simple_paper_state"):]
-        model_name = f"market_learning_model{suffix}.pkl"
-    else:
-        model_name = f"{stem}_market_learning_model.pkl"
-    return state_file.with_name(model_name)
+def resolve_learning_model_path(market: str = "NSE") -> Path:
+    """Map each market to its own persisted ML model file."""
+    market_key = str(market or "NSE").upper()
+    suffix = "" if market_key == "NSE" else f"_{market_key.lower()}"
+    return Path("outputs") / f"market_learning_model{suffix}.pkl"
 
 
 def train_market_learning_model(
-    state_file: Path,
+    trade_log: list[Any],
     watchlist: list[str],
     use_historical_data: bool = True,
     historical_days: int = 60,
+    market: str = "NSE",
+    model_path: Path | None = None,
 ) -> dict[str, Any]:
     """
     Main orchestration: build training dataset from market + personal history,
@@ -742,7 +743,7 @@ def train_market_learning_model(
         "rate_limited": False,
     }
 
-    trade_stats = PersonalTradeAnalyzer.analyze_trades(state_file)
+    trade_stats = PersonalTradeAnalyzer.analyze_trades_from_log(trade_log)
 
     # Phase 1: Train on historical OHLCV (if available)
     if use_historical_data:
@@ -825,7 +826,7 @@ def train_market_learning_model(
         if stats.get("total_trades", 0) > 0:
             market_trend = MarketDataFetcher.compute_trend(sym)
             features = FeatureEngineer.create_feature_vector(
-                sym, state_file, market_data=market_trend, sentiment=0.0
+                sym, trade_stats, market_data=market_trend, sentiment=0.0
             )
             win_rate = float(stats.get("win_rate", 0.0))
             label = 1 if win_rate >= 0.55 else 0
@@ -873,7 +874,7 @@ def train_market_learning_model(
             short_result["historical_warning"] = "Data provider rate limit detected; using cache where available."
         return short_result
 
-    model = MarketLearningModel(resolve_learning_model_path(state_file))
+    model = MarketLearningModel(model_path or resolve_learning_model_path(market))
     result = model.train(symbol_data, labels)
     result["symbols_trained"] = len(watchlist)
     result["total_training_samples"] = len(symbol_data)
@@ -904,15 +905,18 @@ def train_market_learning_model(
 
 def get_symbol_quality_score(
     symbol: str,
-    state_file: Path,
+    trade_log: list[Any],
+    market: str = "NSE",
+    model_path: Path | None = None,
 ) -> float:
     """Fetch or compute ML-based quality score for a symbol (0-1)."""
+    trade_stats = PersonalTradeAnalyzer.analyze_trades_from_log(trade_log)
     market_trend = MarketDataFetcher.compute_trend(symbol)
     features = FeatureEngineer.create_feature_vector(
-        symbol, state_file, market_data=market_trend, sentiment=0.0
+        symbol, trade_stats, market_data=market_trend, sentiment=0.0
     )
 
-    model = MarketLearningModel(resolve_learning_model_path(state_file))
+    model = MarketLearningModel(model_path or resolve_learning_model_path(market))
     prob = model.predict_probability(features)
 
     return min(1.0, max(0.0, prob))

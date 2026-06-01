@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import time, timedelta
 from typing import Any
@@ -10,10 +9,6 @@ import pandas as pd
 
 from stockmarket.config import TradingConfig
 from stockmarket.strategy import add_strategy_columns
-
-
-def _backtest_use_cycle() -> bool:
-    return os.environ.get("BACKTEST_USE_CYCLE") == "1"
 
 
 @dataclass
@@ -40,12 +35,14 @@ def _position_size(entry_price: float, capital: float, cfg: TradingConfig) -> in
 
 
 def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
-    if _backtest_use_cycle():
-        from .cycle import run_backtest_via_cycle
+    from .cycle import run_backtest_via_cycle
 
-        trades_df, summary = run_backtest_via_cycle(df, cfg)
-        return BacktestResult(trades=trades_df, summary=summary)
+    trades_df, summary = run_backtest_via_cycle(df, cfg)
+    return BacktestResult(trades=trades_df, summary=summary)
 
+
+def run_backtest_legacy(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
+    """Legacy bar-loop backtest retained for parity checks only."""
     return _run_backtest_legacy(df, cfg)
 
 

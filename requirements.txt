@@ -5,4 +5,4 @@ python-dotenv>=1.0.0
 python-dateutil==2.9.0.post0
 streamlit>=1.35.0
 pytz>=2024.1
-nsepython>=2.97
+nsepython==2.97

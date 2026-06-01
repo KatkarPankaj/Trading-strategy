@@ -8,6 +8,8 @@ import pandas as pd
 
 from stockmarket.domain.scorer import SymbolScorer
 
+from .ports import RankedSignals
+
 
 def apply_effective_scores(
     buy_df: pd.DataFrame,
@@ -16,9 +18,9 @@ def apply_effective_scores(
     scorer: SymbolScorer,
     *,
     ml_enabled: bool,
-    batch_ml_scores: Callable[[tuple[str, ...], float, float], dict[str, float]]
+    batch_ml_scores: Callable[[tuple[str, ...], float | str, float], dict[str, float]]
     | None = None,
-    state_mtime: float = 0.0,
+    state_mtime: float | str = 0.0,
     model_mtime: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     buy_out = buy_df.copy() if not buy_df.empty else buy_df
@@ -103,3 +105,30 @@ def apply_effective_scores(
         ).clip(lower=0.0, upper=95.0).round(2)
 
     return buy_out, sell_out, sell_exit_out
+
+
+def apply_scorer_to_ranked_signals(
+    signals: RankedSignals,
+    scorer: SymbolScorer,
+    *,
+    ml_enabled: bool,
+    batch_ml_scores: Callable[[tuple[str, ...], float | str, float], dict[str, float]]
+    | None = None,
+    state_mtime: float | str = 0.0,
+    model_mtime: float = 0.0,
+) -> RankedSignals:
+    buy_df, sell_df, sell_exit_df = apply_effective_scores(
+        signals.buy_df,
+        signals.sell_df,
+        signals.sell_exit_df,
+        scorer,
+        ml_enabled=ml_enabled,
+        batch_ml_scores=batch_ml_scores,
+        state_mtime=state_mtime,
+        model_mtime=model_mtime,
+    )
+    return RankedSignals(
+        buy_df=buy_df,
+        sell_df=sell_df,
+        sell_exit_df=sell_exit_df,
+    )

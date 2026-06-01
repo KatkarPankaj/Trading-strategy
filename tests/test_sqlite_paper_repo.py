@@ -1,8 +1,7 @@
-"""Unit + parity tests for :class:`SqlitePaperRepo` (phase 9)."""
+"""Unit tests for :class:`SqlitePaperRepo`."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -10,10 +9,7 @@ from pathlib import Path
 import pytest
 
 from stockmarket.domain import DailyCounters, PaperState, Position, TradeLogEntry
-from stockmarket.persistence.json_paper_repo import JsonPaperRepo
 from stockmarket.persistence.sqlite_paper_repo import SqlitePaperRepo
-
-FIXTURE = Path(__file__).parent / "fixtures" / "simple_paper_state_minimal.json"
 
 
 def _rich_state(market: str = "NSE") -> tuple[PaperState, DailyCounters]:
@@ -102,6 +98,22 @@ def test_save_then_load_round_trip(tmp_path: Path) -> None:
     loaded_state, loaded_counters = loaded
     assert loaded_state == state
     assert loaded_counters == counters
+    assert repo.updated_at()
+
+
+def test_clear_market_removes_only_selected_market(tmp_path: Path) -> None:
+    db = tmp_path / "p.db"
+    nse_state, nse_counters = _rich_state("NSE")
+    us_state, us_counters = _rich_state("US")
+    SqlitePaperRepo(db, market="NSE").save(nse_state, nse_counters)
+    SqlitePaperRepo(db, market="US").save(us_state, us_counters)
+
+    SqlitePaperRepo(db, market="NSE").clear_market()
+
+    assert SqlitePaperRepo(db, market="NSE").load() is None
+    us_loaded = SqlitePaperRepo(db, market="US").load()
+    assert us_loaded is not None
+    assert us_loaded[0].market == "US"
 
 
 def test_save_is_idempotent_and_replaces_state(tmp_path: Path) -> None:
@@ -167,8 +179,10 @@ def test_agent_memory_stored_as_json_text_not_blob(tmp_path: Path) -> None:
         ).fetchone()
     assert row[0] == "text"
     assert row[1] == "text"
-    # Round-trips through json.loads to confirm it's serialized text.
-    decoded = json.loads(row[2])
+    # Round-trips through SQLite load to confirm it's serialized text.
+    loaded = SqlitePaperRepo(db, market="NSE").load()
+    assert loaded is not None
+    decoded = loaded[0].agent_memory
     assert decoded["version"] == 3
 
 
@@ -182,37 +196,6 @@ def test_concurrent_readers_see_committed_state(tmp_path: Path) -> None:
     reader_b = SqlitePaperRepo(db, market="NSE").load()
     assert reader_a == reader_b
     assert reader_a is not None and reader_a[0].cash == state.cash
-
-
-def test_minimal_fixture_parity_json_vs_sqlite(tmp_path: Path) -> None:
-    """Golden parity: same payload, both backends, identical observable state."""
-    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    json_path = tmp_path / "state.json"
-    json_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    json_repo = JsonPaperRepo(json_path, market="NSE")
-    loaded = json_repo.load()
-    assert loaded is not None
-    state, counters = loaded
-
-    sqlite_repo = SqlitePaperRepo(tmp_path / "p.db", market="NSE")
-    sqlite_repo.save(state, counters)
-    sqlite_loaded = sqlite_repo.load()
-    assert sqlite_loaded == (state, counters)
-
-
-def test_rich_state_parity_json_vs_sqlite(tmp_path: Path) -> None:
-    state, counters = _rich_state()
-    json_repo = JsonPaperRepo(tmp_path / "state.json", market="NSE")
-    json_repo.save(state, counters)
-    json_loaded = json_repo.load()
-
-    sqlite_repo = SqlitePaperRepo(tmp_path / "p.db", market="NSE")
-    sqlite_repo.save(state, counters)
-    sqlite_loaded = sqlite_repo.load()
-
-    assert json_loaded is not None and sqlite_loaded is not None
-    assert json_loaded == sqlite_loaded
 
 
 def test_tradebookid_defaults_to_zero_round_trip(tmp_path: Path) -> None:

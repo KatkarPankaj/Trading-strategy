@@ -159,6 +159,7 @@ def run_backtest_via_cycle(df: pd.DataFrame, cfg: TradingConfig) -> tuple[pd.Dat
         idle_fallback=DefaultIdleFallbackPolicy(),
     )
 
+    running_capital = initial_capital
     for date_key, day_df in data.groupby(data.index.date, sort=True):
         day_str = str(date_key)
         counters.day = day_str
@@ -170,6 +171,7 @@ def run_backtest_via_cycle(df: pd.DataFrame, cfg: TradingConfig) -> tuple[pd.Dat
             clock.set_now(now)
             broker.set_bar(row)
             signals.set_bar(row)
+            state.ui_config["_risk_capital"] = running_capital
 
             ctx = CycleContext(
                 now=clock.now(),
@@ -181,10 +183,15 @@ def run_backtest_via_cycle(df: pd.DataFrame, cfg: TradingConfig) -> tuple[pd.Dat
                 entries_today=ctx_entries_today,
                 open_positions=len(state.holdings) + len(state.shorts),
             )
+            log_len_before = len(state.log)
             ctx = run_cycle(ctx, svc, steps=BACKTEST_STEPS)
             ctx_entries_today = svc.history.today_entry_count(state, day_str)
-            if state.log:
-                state.ui_config["_risk_capital"] = float(state.start_capital)
+            if len(state.log) > log_len_before:
+                closed = _trades_from_log(
+                    state.log, initial_capital=initial_capital, cfg=cfg
+                )
+                if closed:
+                    running_capital = float(closed[-1]["capital_after_trade"])
 
         if symbol in broker.open_positions:
             last_ts = day_df.index[-1]

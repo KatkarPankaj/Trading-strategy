@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
-"""Reconcile portfolio math from dashboard_simple saved state (no Streamlit).
+"""Reconcile portfolio math from SQLite paper state (no Streamlit).
 
 Usage:
   python debug_portfolio.py
-  python debug_portfolio.py outputs/simple_paper_state.json
-  python debug_portfolio.py outputs/simple_paper_state_us.json
+  python debug_portfolio.py NSE
+  python debug_portfolio.py US
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
+_SRC_DIR = Path(__file__).resolve().parent / "src"
+if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-def _reconcile(path: Path) -> None:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    cash = float(data.get("cash", 0.0))
-    start = float(data.get("start", 0.0))
-    realized = float(data.get("realized", 0.0))
-    charges = float(data.get("charges", 0.0))
-    prices = {str(k): float(v) for k, v in (data.get("prices") or {}).items()}
-    holdings = data.get("holdings") or {}
-    shorts = data.get("shorts") or {}
+from stockmarket.persistence.paper_repo import get_paper_repo
+
+
+def _reconcile(market: str) -> None:
+    loaded = get_paper_repo(market=market).load()
+    if loaded is None:
+        raise SystemExit(f"No SQLite paper state found for market: {market}")
+    state, _ = loaded
+    cash = float(state.cash)
+    start = float(state.start_capital)
+    realized = float(state.realized)
+    charges = float(state.charges)
+    prices = {str(k): float(v) for k, v in state.prices.items()}
+    holdings = state.holdings
+    shorts = state.shorts
 
     long_mv = 0.0
     u_long = 0.0
     invested_long = 0.0
     for sym, h in holdings.items():
-        qty = int(h.get("qty", 0))
-        avg = float(h.get("avg", 0.0))
+        qty = int(h.qty)
+        avg = float(h.avg)
         ltp = float(prices.get(str(sym), avg))
         invested_long += avg * qty
         long_mv += ltp * qty
@@ -38,8 +46,8 @@ def _reconcile(path: Path) -> None:
     u_short = 0.0
     invested_short = 0.0
     for sym, h in shorts.items():
-        qty = int(h.get("qty", 0))
-        avg = float(h.get("avg", 0.0))
+        qty = int(h.qty)
+        avg = float(h.avg)
         ltp = float(prices.get(str(sym), avg))
         invested_short += avg * qty
         u_short += (avg - ltp) * qty
@@ -52,7 +60,7 @@ def _reconcile(path: Path) -> None:
     # Previous bug: cash + (invested long + invested short) + unreal
     equity_buggy = cash + invested_long + invested_short + unreal
 
-    print(f"State file: {path.resolve()}")
+    print(f"Market: {market}")
     print(f"  start_capital:           {start:,.2f}")
     print(f"  cash:                    {cash:,.2f}")
     print(f"  long cost basis (inpos): {invested_long:,.2f}")
@@ -69,17 +77,8 @@ def _reconcile(path: Path) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
-        path = Path(sys.argv[1])
-    else:
-        path = Path("outputs/simple_paper_state.json")
-        if not path.exists():
-            alt = Path("outputs/simple_paper_state_us.json")
-            if alt.exists():
-                path = alt
-    if not path.exists():
-        raise SystemExit(f"State file not found: {path}")
-    _reconcile(path)
+    market = str(sys.argv[1] if len(sys.argv) > 1 else "NSE").upper()
+    _reconcile(market)
 
 
 if __name__ == "__main__":

@@ -17,10 +17,11 @@ def test_simple_signals_view_import_isolated_from_dashboard_module():
     assert "dashboard_simple" not in sys.modules
 
 
-def test_cycle_factory_builds_services_with_session_repo():
+def test_cycle_factory_builds_services_with_sqlite_repo(tmp_path, monkeypatch):
     from stockmarket.cycle.factory import build_services
     from stockmarket.ml.null_scorer import NullSymbolScorer
 
+    monkeypatch.chdir(tmp_path)
     services = build_services(
         session={},
         market_now_fn=lambda: datetime(2026, 1, 1, 9, 30, 0),
@@ -36,13 +37,11 @@ def test_cycle_factory_builds_services_with_session_repo():
         ),
         refresh_prices_fn=lambda: None,
         persist_state_fn=lambda: None,
-        use_paper_repo=False,
-        state_file=Path("outputs") / "simple_paper_state.json",
         market="NSE",
         scorer=NullSymbolScorer(),
     )
 
-    assert services.repo.__class__.__name__ == "SessionPaperRepo"
+    assert services.repo.__class__.__name__ == "SqlitePaperRepo"
     assert services.signals.__class__.__name__ == "DashboardSignalSource"
 
 

@@ -71,6 +71,37 @@ def fetch_quote(symbol: str, *, timeout: float = 10.0, max_retries: int = 3) -> 
     raise ValueError(f"Finnhub quote failed for {sym}: {last_exc}")
 
 
+def fetch_market_status(
+    exchange: str,
+    *,
+    timeout: float = 10.0,
+    max_retries: int = 3,
+) -> dict[str, Any]:
+    """GET /stock/market-status — exchange open/close (expects isOpen, exchange, session)."""
+    if requests is None:
+        raise RuntimeError("requests is required for Finnhub. Run: pip install requests")
+    ex = str(exchange).upper().strip()
+    token = finnhub_api_key()
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(
+                f"{FINNHUB_BASE_URL}/stock/market-status",
+                params={"exchange": ex, "token": token},
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict) and "isOpen" in data:
+                return data
+            last_exc = ValueError(f"Unexpected Finnhub market-status payload for {ex}")
+        except Exception as exc:
+            last_exc = exc
+        if attempt < max_retries - 1:
+            time.sleep(0.35 * (2**attempt))
+    raise ValueError(f"Finnhub market-status failed for {ex}: {last_exc}")
+
+
 def _interval_to_resolution(interval: str) -> str:
     m = str(interval).strip().lower()
     if m in ("1m", "1min"):

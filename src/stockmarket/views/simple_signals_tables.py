@@ -20,6 +20,12 @@ def render_live_tables_and_errors_fragment(
     raw_order_log: pd.DataFrame,
     currency_symbol: str,
 ) -> None:
+    feed_errors = [
+        e for e in scan_errors if str(e).startswith("NSE feed:")
+    ]
+    if feed_errors:
+        st.error(feed_errors[0])
+
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("🔥 Top 5 Buy Signals")

@@ -97,19 +97,13 @@ flowchart TD
   SessionBridge --> Types
   Scoring --> Scorer
 
-  subgraph Persistence["persistence/ (USE_PAPER_REPO=1)"]
+  subgraph Persistence["persistence/"]
     Factory2["paper_repo.get_paper_repo()"]
-    JsonRepo["JsonPaperRepo"]
     SqliteRepo["SqlitePaperRepo"]
-    DualWrite["_DualWriteSqlitePaperRepo\n(dual-write / fallback)"]
   end
 
   Adapters --> Factory2
-  Factory2 --> JsonRepo
   Factory2 --> SqliteRepo
-  Factory2 --> DualWrite
-  DualWrite --> SqliteRepo
-  DualWrite --> JsonRepo
 
   subgraph ML["ml/ (gated by DISABLE_ML_SCORER)"]
     Null["NullSymbolScorer"]
@@ -134,12 +128,10 @@ flowchart TD
   Simple --> Ranking
   Adapters --> Quotes
 
-  subgraph Files["Generated state"]
-    JsonFiles["outputs/simple_paper_state*.json"]
+  subgraph Files["Paper state"]
     Sqlite[".database/paper_state.db"]
   end
 
-  JsonRepo <--> JsonFiles
   SqliteRepo <--> Sqlite
 ```
 
@@ -157,7 +149,7 @@ flowchart LR
   S5 --> S6["6. forced exits: SL / TP / time /\nladder / guard / square-off\n(cycle/steps/exits.py)"]
   S6 --> S7["7. signal-based exits"]
   S7 --> S8["8. re-entry cooldown + regime gate\n(cycle/entry/cooldown.py)"]
-  S8 --> S9["9. rank, score, size\n(_rank_signals_for_cycle,\ncycle/scoring.py, cycle/entry/sizing.py)"]
+  S8 --> S9["9. rank + effective scores\n(_rank_signals_for_cycle rank only;\napply_scorer in entries/exits;\ncycle/entry/sizing.py)"]
   S9 --> S10["10. place entries (long/short)\n(cycle/steps/entries.py +\nstreamlit_broker adapter)"]
   S10 --> S11["11. record trades, mutate state,\nPaperRepo.save()"]
 ```
@@ -191,26 +183,19 @@ flowchart LR
 | `views/simple_auto_refresh.py` | refresh-interval seconds, current tick state | footer auto-refresh widget |
 | `views/theme.py` | (none) | injected CSS / Streamlit theme |
 
-## Persistence factory branching
+## Persistence factory
 
-`get_paper_repo(path, market)` is the single composition site for paper-state storage. Defaults to JSON; SQLite is opt-in via env or `config/database_config.json`; the dual-write wrapper is an opt-in migration aid that the eventual default-flip retires.
+`get_paper_repo(path, market)` is the single composition site for paper-state storage. It always returns `SqlitePaperRepo`; `path` is accepted only for compatibility with older callers.
 
 ```mermaid
 flowchart LR
   Caller["dashboard / cycle adapter"] --> Factory["get_paper_repo(path, market)"]
-  Factory --> Resolve["_resolve_backend()\n(env > config/database_config.json > 'json')"]
-  Resolve -->|"PAPER_REPO_BACKEND=json\n(or unset → default)"| JsonRepo["JsonPaperRepo\noutputs/simple_paper_state*.json"]
-  Resolve -->|"PAPER_REPO_BACKEND=sqlite"| SqliteCheck{"DUAL_WRITE\nor\nFALLBACK_JSON ?"}
-  SqliteCheck -- "neither" --> SqliteRepo["SqlitePaperRepo\n.database/paper_state.db"]
-  SqliteCheck -- "either flag set" --> Wrapper["_DualWriteSqlitePaperRepo\nprimary=SqliteRepo\nshadow=JsonRepo"]
-  Wrapper --> SqliteRepo
-  Wrapper -. "fallback on miss" .-> JsonRepo
-  Wrapper -. "dual-write on save" .-> JsonRepo
+  Factory --> SqliteRepo["SqlitePaperRepo\n.database/paper_state.db"]
 ```
 
 ## Backtest dataflow
 
-CLI is the entry; `BACKTEST_USE_CYCLE=1` routes through the new cycle adapters, otherwise the legacy `backtest.py` callable runs unchanged.
+CLI is the entry; `run_backtest()` routes through the cycle adapters (`run_backtest_via_cycle()`). `run_backtest_legacy()` remains for parity tests only.
 
 ```mermaid
 flowchart LR
@@ -230,7 +215,7 @@ flowchart LR
     Sweep["sweep.py"]
   end
 
-  subgraph CycleBacktest["backtest/ (BACKTEST_USE_CYCLE=1)"]
+  subgraph CycleBacktest["backtest/ (default)"]
     BTRun["run_backtest_via_cycle()"]
     BTAdapters["adapters/: clock,\nbroker, signals"]
     BTSteps["backtest/steps.py + sizer.py"]
@@ -267,20 +252,19 @@ flowchart LR
 
 ## Optimizer dataflow
 
-Two entry points share the same engine: the dashboard's "Run Optimizer Now" button and the CLI `optimize` command. Both land in `stockmarket.optimization`. The `stockmarket.optimizer` shim is a transitional re-export that emits `DeprecationWarning`.
+Two entry points share the same engine: the dashboard's "Run Optimizer Now" button and the CLI `optimize` command. Both land in `stockmarket.optimization`.
 
 ```mermaid
 flowchart LR
   DashBtn["dashboard 'Run Optimizer Now'"] --> DashHandler["_run_optimizer_from_dashboard"]
   CliOpt["python -m stockmarket optimize"] --> CliOptHandler["cli.optimize subcommand"]
 
-  DashHandler --> OptPkg["stockmarket.optimization"]
+  DashHandler --> SqliteLog["PaperState.log\nloaded from SQLite"]
+  SqliteLog --> OptPkg["stockmarket.optimization"]
   CliOptHandler --> OptPkg
 
-  Shim["stockmarket.optimizer\n(DeprecationWarning shim)"] -. "re-exports" .-> OptPkg
-
   subgraph OptPkg["stockmarket.optimization"]
-    TH["trade_history.py\n(CSV normalization)"]
+    TH["trade_history.py\n(CSV + paper-log normalization)"]
     FE["features.py\n(walk-forward feature engineering)"]
     RP["reports.py\n(export)"]
   end
@@ -302,7 +286,7 @@ flowchart LR
 
   subgraph Training["Training / data sources"]
     HistOHLCV["market_learning.MarketDataFetcher\n(60d daily OHLCV)"]
-    PersTrades["personal trade history\n(simple_paper_state.json)"]
+    PersTrades["personal trade history\nPaperState.log from SQLite"]
     LiveTrend["live quote → trend metrics"]
   end
 
@@ -320,19 +304,9 @@ flowchart LR
   Sklearn <--> Model
 ```
 
-## Migration script (one-shot, retained as future-proofing)
+## Fresh local start
 
-```mermaid
-flowchart LR
-  Op["operator"] --> Script["scripts/migrate_paper_state_json_to_sqlite.py"]
-  Script --> JsonInput["outputs/simple_paper_state*.json"]
-  Script --> SqliteOut[".database/paper_state.db"]
-  JsonInput --> JsonRepo["JsonPaperRepo (read)"]
-  JsonRepo --> SqliteRepo["SqlitePaperRepo (write)"]
-  SqliteRepo --> SqliteOut
-```
-
-The script is not on the active runtime path — it exists for the eventual SQLite default-flip rollout.
+Paper state starts blank when `.database/paper_state.db` is absent. Old `outputs/simple_paper_state*.json` files are not read or written and can be removed with other local artifacts.
 
 ## Source-of-truth pointers
 

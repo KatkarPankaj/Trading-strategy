@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from typing import Any, Callable
 
 from stockmarket.domain.scorer import SymbolScorer
 
@@ -20,11 +20,18 @@ __all__ = [
 ]
 
 
-def build_scorer(state_file: Path | None = None) -> SymbolScorer:
+def build_scorer(
+    *,
+    market: str = "NSE",
+    trade_log_provider: Callable[[], list[Any]] | None = None,
+) -> SymbolScorer:
     """Factory: null when disabled or sklearn unavailable; else sklearn adapter."""
     if os.environ.get("DISABLE_ML_SCORER") == "1":
         return NullSymbolScorer()
-    scorer = SklearnSymbolScorer(state_file=state_file)
+    scorer = SklearnSymbolScorer(
+        market=market,
+        trade_log_provider=trade_log_provider,
+    )
     if not scorer.can_train():
         return NullSymbolScorer()
     return scorer

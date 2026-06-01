@@ -23,12 +23,14 @@ from .steps.gates import (
     gate_post_guard_block,
 )
 from .steps.prices import refresh_holding_prices
+from .steps.scoring import apply_signal_scores
 
 DEFAULT_STEPS: tuple[Step, ...] = (
     refresh_holding_prices,
     block_on_weekend,
     roll_daily_counters,
     update_peak_open_pnl,
+    apply_signal_scores,
     evaluate_profit_ladder,
     force_exits_long,
     force_exits_short,
@@ -50,7 +52,7 @@ def run_cycle(
     svc: Services,
     steps: tuple[Step, ...] = DEFAULT_STEPS,
 ) -> CycleContext:
-    if (
+    if steps is DEFAULT_STEPS and (
         ctx.signals.buy_df.empty
         and ctx.signals.sell_df.empty
         and ctx.signals.sell_exit_df.empty

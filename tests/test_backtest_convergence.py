@@ -1,20 +1,23 @@
-"""Backtest legacy vs cycle pipeline parity (BACKTEST_USE_CYCLE)."""
+"""Backtest legacy vs cycle pipeline parity."""
 
 from __future__ import annotations
 
 import json
-import os
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from stockmarket.backtest import BacktestResult, run_backtest
+from stockmarket.backtest import BacktestResult, run_backtest, run_backtest_legacy
 from stockmarket.config import TradingConfig
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "golden"
 GOLDEN_TRADES = FIXTURE_DIR / "backtest_trades_synthetic.csv"
 GOLDEN_SUMMARY = FIXTURE_DIR / "backtest_summary_synthetic.json"
+RELIANCE_OHLCV = FIXTURE_DIR / "reliance_intraday_30d.csv"
+RELIANCE_TRADES = FIXTURE_DIR / "backtest_trades_reliance_30d.csv"
+RELIANCE_SUMMARY = FIXTURE_DIR / "backtest_summary_reliance_30d.json"
 
 
 def _synthetic_intraday_df() -> pd.DataFrame:
@@ -73,10 +76,25 @@ def _cfg() -> TradingConfig:
     )
 
 
-def _write_golden(result: BacktestResult) -> None:
+def _reliance_cfg() -> TradingConfig:
+    return replace(
+        TradingConfig.from_json(Path(__file__).parent.parent / "config.json"),
+        period="30d",
+        volume_spike_threshold=1.0,
+    )
+
+
+def _write_golden(result: BacktestResult, trades_path: Path, summary_path: Path) -> None:
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    result.trades.to_csv(GOLDEN_TRADES, index=False)
-    GOLDEN_SUMMARY.write_text(json.dumps(result.summary, indent=2), encoding="utf-8")
+    result.trades.to_csv(trades_path, index=False)
+    summary_path.write_text(json.dumps(result.summary, indent=2), encoding="utf-8")
+
+
+def _load_reliance_df() -> pd.DataFrame:
+    df = pd.read_csv(RELIANCE_OHLCV, index_col=0, parse_dates=True)
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("Asia/Kolkata")
+    return df
 
 
 @pytest.fixture
@@ -86,10 +104,10 @@ def synthetic_df() -> pd.DataFrame:
 
 def test_legacy_backtest_matches_golden(synthetic_df: pd.DataFrame):
     if not GOLDEN_TRADES.exists():
-        _write_golden(run_backtest(synthetic_df, _cfg()))
+        _write_golden(run_backtest_legacy(synthetic_df, _cfg()), GOLDEN_TRADES, GOLDEN_SUMMARY)
 
     golden = pd.read_csv(GOLDEN_TRADES)
-    legacy = run_backtest(synthetic_df, _cfg()).trades
+    legacy = run_backtest_legacy(synthetic_df, _cfg()).trades
     assert len(legacy) == len(golden)
     if len(legacy):
         assert float(legacy["net_pnl"].sum()) == pytest.approx(
@@ -97,10 +115,8 @@ def test_legacy_backtest_matches_golden(synthetic_df: pd.DataFrame):
         )
 
 
-def test_cycle_backtest_parity_with_legacy(synthetic_df: pd.DataFrame, monkeypatch):
-    monkeypatch.delenv("BACKTEST_USE_CYCLE", raising=False)
-    legacy = run_backtest(synthetic_df, _cfg()).trades
-    monkeypatch.setenv("BACKTEST_USE_CYCLE", "1")
+def test_cycle_backtest_parity_with_legacy(synthetic_df: pd.DataFrame):
+    legacy = run_backtest_legacy(synthetic_df, _cfg()).trades
     cycle = run_backtest(synthetic_df, _cfg()).trades
 
     assert len(cycle) == len(legacy)
@@ -112,3 +128,29 @@ def test_cycle_backtest_parity_with_legacy(synthetic_df: pd.DataFrame, monkeypat
             legacy[col].tolist(), rel=1e-9, abs=1e-4
         )
     assert cycle["exit_reason"].tolist() == legacy["exit_reason"].tolist()
+
+
+def test_reliance_fixture_cycle_matches_legacy_golden():
+    if not RELIANCE_OHLCV.exists():
+        pytest.skip("RELIANCE golden OHLCV fixture missing; run fixture generator once")
+
+    df = _load_reliance_df()
+    cfg = _reliance_cfg()
+    legacy = run_backtest_legacy(df, cfg)
+    cycle = run_backtest(df, cfg)
+
+    if not RELIANCE_TRADES.exists():
+        _write_golden(legacy, RELIANCE_TRADES, RELIANCE_SUMMARY)
+
+    golden = pd.read_csv(RELIANCE_TRADES)
+    assert len(cycle.trades) == len(legacy.trades) == len(golden)
+    assert len(legacy.trades) > 0
+
+    for col in ("net_pnl", "qty", "entry_price", "exit_price"):
+        assert cycle.trades[col].tolist() == pytest.approx(
+            legacy.trades[col].tolist(), rel=1e-9, abs=1e-4
+        )
+        assert legacy.trades[col].tolist() == pytest.approx(
+            golden[col].tolist(), rel=1e-9, abs=1e-4
+        )
+    assert cycle.trades["exit_reason"].tolist() == legacy.trades["exit_reason"].tolist()

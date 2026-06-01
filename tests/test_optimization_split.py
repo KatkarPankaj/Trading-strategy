@@ -1,52 +1,34 @@
-"""Optimizer package split: shim imports and report shape parity."""
+"""Optimizer package imports and report shape parity."""
 
 from __future__ import annotations
 
 import json
-import warnings
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from stockmarket.config import TradingConfig
 from stockmarket.optimization import (
+    benchmark_symbol_for_cfg,
     collect_clean_closed_trades,
     export_optimization_report,
     run_intelligent_optimization,
-)
-from stockmarket.optimizer import (
-    _benchmark_symbol_for_cfg,
-    collect_clean_closed_trades as shim_collect,
-    run_intelligent_optimization as shim_run,
 )
 
 FIXTURE_TRADES = Path(__file__).parent / "fixtures" / "golden" / "backtest_trades_synthetic.csv"
 GOLDEN_KEYS = Path(__file__).parent / "fixtures" / "golden" / "optimization_report_keys.json"
 
 
-def test_shim_exports_benchmark_helper():
+def test_benchmark_symbol_for_cfg_nse():
     cfg = TradingConfig(market_timezone="Asia/Kolkata")
-    assert _benchmark_symbol_for_cfg(cfg) == "^NSEI"
+    assert benchmark_symbol_for_cfg(cfg) == "^NSEI"
 
 
-def test_shim_warns_on_import():
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        import importlib
-        import stockmarket.optimizer as opt
-
-        importlib.reload(opt)
-    assert any(issubclass(x.category, DeprecationWarning) for x in w)
-
-
-def test_collect_trades_via_shim_and_package():
+def test_collect_trades_via_package():
     if not FIXTURE_TRADES.exists():
         pytest.skip("backtest golden trades fixture missing")
-    a, _ = collect_clean_closed_trades(FIXTURE_TRADES)
-    b, _ = shim_collect(FIXTURE_TRADES)
-    assert len(a) == len(b)
-    assert set(a.columns) == set(b.columns)
+    trades, _ = collect_clean_closed_trades(FIXTURE_TRADES)
+    assert not trades.empty
 
 
 def test_optimization_report_artifact_keys(tmp_path, monkeypatch):
@@ -88,6 +70,3 @@ def test_optimization_report_artifact_keys(tmp_path, monkeypatch):
     assert len(report.recommendations) == golden["recommendation_count"]
     assert len(report.symbol_scores) == golden["symbol_score_rows"]
     assert len(report.feature_scores) == golden["feature_score_rows"]
-
-    shim_report = shim_run(FIXTURE_TRADES, cfg, lookback_trades=50)
-    assert shim_report.summary.keys() == report.summary.keys()

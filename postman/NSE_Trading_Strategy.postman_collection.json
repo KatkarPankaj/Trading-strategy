@@ -1,0 +1,519 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "NSE — Trading Strategy App",
+    "description": "NSE and niftyindices endpoints used by this repo (via nsepython).\n\n**Before any www.nseindia.com API call:** run both requests in folder `0 - Session warm-up` in order so Postman stores cookies.\n\nSymbol mapping: `RELIANCE.NS` → query param `RELIANCE`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "nse_symbol",
+      "value": "RELIANCE",
+      "type": "string"
+    },
+    {
+      "key": "hist_from",
+      "value": "01-03-2026",
+      "type": "string"
+    },
+    {
+      "key": "hist_to",
+      "value": "29-05-2026",
+      "type": "string"
+    },
+    {
+      "key": "bhavcopy_ddmmyyyy",
+      "value": "29052026",
+      "type": "string"
+    },
+    {
+      "key": "index_start",
+      "value": "01-Mar-2026",
+      "type": "string"
+    },
+    {
+      "key": "index_end",
+      "value": "29-May-2026",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "0 - Session warm-up (run first)",
+      "description": "NSE blocks bare API calls. Run these two GETs in order before quote, marketStatus, or historical endpoints.",
+      "item": [
+        {
+          "name": "Warm-up — nseindia.com home",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "accept",
+                "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+              },
+              {
+                "key": "accept-language",
+                "value": "en-US,en;q=0.9,en-IN;q=0.8,en-GB;q=0.7"
+              },
+              {
+                "key": "cache-control",
+                "value": "max-age=0"
+              },
+              {
+                "key": "user-agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0"
+              },
+              {
+                "key": "sec-ch-ua",
+                "value": "\"Microsoft Edge\";v=\"129\", \"Not=A?Brand\";v=\"8\", \"Chromium\";v=\"129\""
+              },
+              {
+                "key": "sec-ch-ua-mobile",
+                "value": "?0"
+              },
+              {
+                "key": "sec-ch-ua-platform",
+                "value": "\"Windows\""
+              },
+              {
+                "key": "sec-fetch-dest",
+                "value": "document"
+              },
+              {
+                "key": "sec-fetch-mode",
+                "value": "navigate"
+              },
+              {
+                "key": "sec-fetch-site",
+                "value": "none"
+              },
+              {
+                "key": "sec-fetch-user",
+                "value": "?1"
+              },
+              {
+                "key": "upgrade-insecure-requests",
+                "value": "1"
+              }
+            ],
+            "url": {
+              "raw": "https://www.nseindia.com",
+              "protocol": "https",
+              "host": ["www", "nseindia", "com"]
+            },
+            "description": "Step 1 of 2 — establishes session cookies (same as nsepython nsefetch)."
+          },
+          "response": []
+        },
+        {
+          "name": "Warm-up — option-chain page",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "accept",
+                "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+              },
+              {
+                "key": "accept-language",
+                "value": "en-US,en;q=0.9,en-IN;q=0.8,en-GB;q=0.7"
+              },
+              {
+                "key": "cache-control",
+                "value": "max-age=0"
+              },
+              {
+                "key": "user-agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0"
+              },
+              {
+                "key": "sec-ch-ua",
+                "value": "\"Microsoft Edge\";v=\"129\", \"Not=A?Brand\";v=\"8\", \"Chromium\";v=\"129\""
+              },
+              {
+                "key": "sec-ch-ua-mobile",
+                "value": "?0"
+              },
+              {
+                "key": "sec-ch-ua-platform",
+                "value": "\"Windows\""
+              },
+              {
+                "key": "sec-fetch-dest",
+                "value": "document"
+              },
+              {
+                "key": "sec-fetch-mode",
+                "value": "navigate"
+              },
+              {
+                "key": "sec-fetch-site",
+                "value": "none"
+              },
+              {
+                "key": "sec-fetch-user",
+                "value": "?1"
+              },
+              {
+                "key": "upgrade-insecure-requests",
+                "value": "1"
+              }
+            ],
+            "url": {
+              "raw": "https://www.nseindia.com/option-chain",
+              "protocol": "https",
+              "host": ["www", "nseindia", "com"],
+              "path": ["option-chain"]
+            },
+            "description": "Step 2 of 2 — completes cookie bootstrap before API calls."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "1 - Live quotes and market status",
+      "item": [
+        {
+          "name": "Quote equity (live LTP)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Optional: uncomment to auto warm-up before each quote call",
+                  "// pm.sendRequest('https://www.nseindia.com', function () {});",
+                  "// pm.sendRequest('https://www.nseindia.com/option-chain', function () {});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "accept",
+                "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+              },
+              {
+                "key": "accept-language",
+                "value": "en-US,en;q=0.9,en-IN;q=0.8,en-GB;q=0.7"
+              },
+              {
+                "key": "cache-control",
+                "value": "max-age=0"
+              },
+              {
+                "key": "user-agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0"
+              },
+              {
+                "key": "sec-ch-ua",
+                "value": "\"Microsoft Edge\";v=\"129\", \"Not=A?Brand\";v=\"8\", \"Chromium\";v=\"129\""
+              },
+              {
+                "key": "sec-ch-ua-mobile",
+                "value": "?0"
+              },
+              {
+                "key": "sec-ch-ua-platform",
+                "value": "\"Windows\""
+              },
+              {
+                "key": "sec-fetch-dest",
+                "value": "document"
+              },
+              {
+                "key": "sec-fetch-mode",
+                "value": "navigate"
+              },
+              {
+                "key": "sec-fetch-site",
+                "value": "none"
+              },
+              {
+                "key": "sec-fetch-user",
+                "value": "?1"
+              },
+              {
+                "key": "upgrade-insecure-requests",
+                "value": "1"
+              }
+            ],
+            "url": {
+              "raw": "https://www.nseindia.com/api/quote-equity?symbol={{nse_symbol}}",
+              "protocol": "https",
+              "host": ["www", "nseindia", "com"],
+              "path": ["api", "quote-equity"],
+              "query": [
+                {
+                  "key": "symbol",
+                  "value": "{{nse_symbol}}",
+                  "description": "Root symbol without .NS (e.g. RELIANCE, TCS)"
+                }
+              ]
+            },
+            "description": "Used by QuoteService and market_learning. Response fields: priceInfo.lastPrice, vwap, pChange, intraDayHighLow, totalTradedVolume."
+          },
+          "response": []
+        },
+        {
+          "name": "Market status (open/closed)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "accept",
+                "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+              },
+              {
+                "key": "accept-language",
+                "value": "en-US,en;q=0.9,en-IN;q=0.8,en-GB;q=0.7"
+              },
+              {
+                "key": "cache-control",
+                "value": "max-age=0"
+              },
+              {
+                "key": "user-agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0"
+              },
+              {
+                "key": "sec-ch-ua",
+                "value": "\"Microsoft Edge\";v=\"129\", \"Not=A?Brand\";v=\"8\", \"Chromium\";v=\"129\""
+              },
+              {
+                "key": "sec-ch-ua-mobile",
+                "value": "?0"
+              },
+              {
+                "key": "sec-ch-ua-platform",
+                "value": "\"Windows\""
+              },
+              {
+                "key": "sec-fetch-dest",
+                "value": "document"
+              },
+              {
+                "key": "sec-fetch-mode",
+                "value": "navigate"
+              },
+              {
+                "key": "sec-fetch-site",
+                "value": "none"
+              },
+              {
+                "key": "sec-fetch-user",
+                "value": "?1"
+              },
+              {
+                "key": "upgrade-insecure-requests",
+                "value": "1"
+              }
+            ],
+            "url": {
+              "raw": "https://www.nseindia.com/api/marketStatus",
+              "protocol": "https",
+              "host": ["www", "nseindia", "com"],
+              "path": ["api", "marketStatus"]
+            },
+            "description": "Used by market_status bar. App checks marketState[] for Capital Market segment and marketStatus == Open."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2 - Historical equity (NSE API + bhavcopy)",
+      "item": [
+        {
+          "name": "Historical CM equity OHLCV",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "accept",
+                "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+              },
+              {
+                "key": "accept-language",
+                "value": "en-US,en;q=0.9,en-IN;q=0.8,en-GB;q=0.7"
+              },
+              {
+                "key": "cache-control",
+                "value": "max-age=0"
+              },
+              {
+                "key": "user-agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0"
+              },
+              {
+                "key": "sec-ch-ua",
+                "value": "\"Microsoft Edge\";v=\"129\", \"Not=A?Brand\";v=\"8\", \"Chromium\";v=\"129\""
+              },
+              {
+                "key": "sec-ch-ua-mobile",
+                "value": "?0"
+              },
+              {
+                "key": "sec-ch-ua-platform",
+                "value": "\"Windows\""
+              },
+              {
+                "key": "sec-fetch-dest",
+                "value": "document"
+              },
+              {
+                "key": "sec-fetch-mode",
+                "value": "navigate"
+              },
+              {
+                "key": "sec-fetch-site",
+                "value": "none"
+              },
+              {
+                "key": "sec-fetch-user",
+                "value": "?1"
+              },
+              {
+                "key": "upgrade-insecure-requests",
+                "value": "1"
+              }
+            ],
+            "url": {
+              "raw": "https://www.nseindia.com/api/historical/cm/equity?symbol={{nse_symbol}}&series=[\"EQ\"]&from={{hist_from}}&to={{hist_to}}",
+              "protocol": "https",
+              "host": ["www", "nseindia", "com"],
+              "path": ["api", "historical", "cm", "equity"],
+              "query": [
+                {
+                  "key": "symbol",
+                  "value": "{{nse_symbol}}"
+                },
+                {
+                  "key": "series",
+                  "value": "[\"EQ\"]",
+                  "description": "Keep brackets and quotes as shown"
+                },
+                {
+                  "key": "from",
+                  "value": "{{hist_from}}",
+                  "description": "DD-MM-YYYY"
+                },
+                {
+                  "key": "to",
+                  "value": "{{hist_to}}",
+                  "description": "DD-MM-YYYY"
+                }
+              ]
+            },
+            "description": "Used by market_learning via nsepython equity_history. JSON response has data[] array."
+          },
+          "response": []
+        },
+        {
+          "name": "Bhavcopy full CSV (archives)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "https://archives.nseindia.com/products/content/sec_bhavdata_full_{{bhavcopy_ddmmyyyy}}.csv",
+              "protocol": "https",
+              "host": ["archives", "nseindia", "com"],
+              "path": [
+                "products",
+                "content",
+                "sec_bhavdata_full_{{bhavcopy_ddmmyyyy}}.csv"
+              ]
+            },
+            "description": "Used by nse_intraday bhavcopy fallback. Date format DDMMYYYY (e.g. 29052026 for 29-May-2026). No session cookies usually required. Filter rows by SYMBOL column."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3 - Nifty 50 index (niftyindices.com)",
+      "item": [
+        {
+          "name": "Nifty 50 historical OHLCV",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json, text/javascript, */*; q=0.01"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json; charset=UTF-8"
+              },
+              {
+                "key": "Origin",
+                "value": "https://niftyindices.com"
+              },
+              {
+                "key": "Referer",
+                "value": "https://niftyindices.com/reports/historical-data"
+              },
+              {
+                "key": "X-Requested-With",
+                "value": "XMLHttpRequest"
+              },
+              {
+                "key": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Safari/537.36"
+              },
+              {
+                "key": "DNT",
+                "value": "1"
+              },
+              {
+                "key": "sec-ch-ua",
+                "value": "\" Not;A Brand\";v=\"99\", \"Google Chrome\";v=\"91\", \"Chromium\";v=\"91\""
+              },
+              {
+                "key": "sec-ch-ua-mobile",
+                "value": "?0"
+              },
+              {
+                "key": "Sec-Fetch-Site",
+                "value": "same-origin"
+              },
+              {
+                "key": "Sec-Fetch-Mode",
+                "value": "cors"
+              },
+              {
+                "key": "Sec-Fetch-Dest",
+                "value": "empty"
+              },
+              {
+                "key": "Accept-Language",
+                "value": "en-US,en;q=0.9,hi;q=0.8"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cinfo\": \"{'name':'Nifty 50','startDate':'{{index_start}}','endDate':'{{index_end}}','indexName':'Nifty 50'}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "https://niftyindices.com/Backpage.aspx/getHistoricaldatatabletoString",
+              "protocol": "https",
+              "host": ["niftyindices", "com"],
+              "path": ["Backpage.aspx", "getHistoricaldatatabletoString"]
+            },
+            "description": "Used for ^NSEI / Nifty 50 in nse_intraday. Response JSON has \"d\" field — parse that string as JSON. Dates: DD-Mon-YYYY (e.g. 29-May-2026)."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

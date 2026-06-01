@@ -14,7 +14,7 @@ from stockmarket.state.session_bridge import (
 )
 
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "simple_paper_state_minimal.json"
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "paper_state_domain_minimal.json"
 
 
 def _session_from_payload(payload: dict) -> dict:

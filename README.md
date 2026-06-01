@@ -76,6 +76,10 @@ $env:PYTHONPATH = "src"
 
 Run the command from the repo root so `.streamlit/config.toml` applies: saving Python files triggers an automatic app rerun (“hot reload”) without restarting the server.
 
+The dashboard shows a top bar with NSE and US session status (NSE `marketStatus` API and Finnhub `market-status`; config hours if an API is unavailable). Status is refreshed when you switch the sidebar market radio.
+
+Live NSE watchlist quotes use `nsepython==2.97` with a hardened session (`src/stockmarket/quotes/nse_client.py`). If NSE blocks the API (HTTP 403 / empty JSON), the app surfaces an **NSE feed** error in the UI, Activity panel, and server log.
+
 ## Launch research/backtest UI (optional)
 
 `webapp.py` is a small research/backtest Streamlit page that overlaps the CLI
@@ -102,10 +106,14 @@ $env:PYTHONPATH = "src"
 
 US quotes for `dashboard_simple.py` use Finnhub; set `FINNHUB_API_KEY` in your environment.
 Optional `dashboard_simple_data_config.json` field `us_market_data_batch_size` controls parallel US quote requests in the scanner.
-Set `USE_PAPER_REPO=1` to exercise the flagged JSON repository path for simple paper state persistence.
 Set `USE_APP_SETTINGS=1` to resolve NSE/US market watchlists and session times from `config/market_config.json` (default uses inline dashboard constants).
 Set `DISABLE_ML_SCORER=1` to skip sklearn market-learning scoring in `dashboard_simple.py` (effective scores use rule scores + trade-history bias only).
-Set `PAPER_REPO_BACKEND=sqlite` to use the SQLite paper-state backend (`.database/paper_state.db`) instead of the JSON file; see `CODEBASE_STRUCTURE.md` for the full env-var matrix (`PAPER_REPO_DUAL_WRITE`, `PAPER_REPO_FALLBACK_JSON`, etc.).
+
+## Paper-trading storage
+
+Paper state is stored only in SQLite at `.database/paper_state.db` (created on first save). Override the path via `storage.paper_state_database_path` in `config/database_config.json`.
+
+The old `outputs/simple_paper_state*.json` files are no longer read or written as live storage. For a fresh local start, remove `.database/paper_state.db` and any old `outputs/simple_paper_state*.json` artifacts.
 
 For a tour of the codebase (packages, design patterns, feature flags) see
 [`CODEBASE_STRUCTURE.md`](CODEBASE_STRUCTURE.md); for runtime sequencing diagrams

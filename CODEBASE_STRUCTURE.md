@@ -23,13 +23,13 @@ Companion docs: `CODEBASE_DATAFLOW.md` (runtime sequencing + mermaid diagrams), 
 - `app.py`, `dashboard_simple.py`, `dashboard.py` — Streamlit entrypoints described above.
 - `config.json` / `config.example.json` — CLI/backtest `TradingConfig` files.
 - `dashboard_simple_data_config.json` — simple-dashboard data-fetch settings (e.g. `us_market_data_batch_size`).
-- `config/` — JSON config used by `AppSettings` and the persistence factory: `app_config.json`, `market_config.json` (NSE/US watchlists, session times, intraday charges), `trading_config.json`, `database_config.json` (`paper_repo_backend` + SQLite path).
+- `config/` — JSON config used by `AppSettings` and the persistence factory: `app_config.json`, `market_config.json` (NSE/US watchlists, session times, intraday charges), `trading_config.json`, `database_config.json` (`storage.paper_state_database_path`).
 - `src/stockmarket/` — reusable package, see below.
-- `scripts/` — operational scripts. Currently only `migrate_paper_state_json_to_sqlite.py` (one-shot JSON → SQLite migration; retained as future-proofing for a SQLite default flip).
+- `scripts/` — operational scripts.
 - `tests/` — pytest suite (160 tests at the time of writing).
 - `.cache/market_data/` — intraday OHLCV pickle cache (untracked).
-- `outputs/` — generated artifacts: `simple_paper_state*.json` (paper state), `paper_trade_history.csv`, `daily_pnl_history.csv`, `sweep_*.csv`, `optimize_*_recommendations.json` / `*_symbol_scores.csv` / `*_feature_scores.csv` / `*_model_feature_importance.csv` / `*_enriched_trades.csv`, `market_learning_model.pkl`, `market_data_cache/*.csv`.
-- `.database/paper_state.db` — SQLite paper-state DB when `PAPER_REPO_BACKEND=sqlite` (untracked).
+- `outputs/` — generated artifacts: `paper_trade_history.csv`, `daily_pnl_history.csv`, `sweep_*.csv`, `optimize_*_recommendations.json` / `*_symbol_scores.csv` / `*_feature_scores.csv` / `*_model_feature_importance.csv` / `*_enriched_trades.csv`, `market_learning_model*.pkl`, `market_data_cache/*.csv`.
+- `.database/paper_state.db` — SQLite paper-state DB (untracked).
 
 ## Package Layout (`src/stockmarket/`)
 
@@ -48,12 +48,9 @@ Companion docs: `CODEBASE_DATAFLOW.md` (runtime sequencing + mermaid diagrams), 
 
 ### Persistence
 
-- `persistence/paper_repo.py` — `PaperRepo` Protocol + `get_paper_repo(path, market)` factory. Reads `PAPER_REPO_BACKEND` (env), falling back to `paper_repo_backend` in `config/database_config.json`, default `json`. Wraps SQLite in `_DualWriteSqlitePaperRepo` when `PAPER_REPO_DUAL_WRITE=1` or `PAPER_REPO_FALLBACK_JSON=1` is set.
-- `persistence/json_paper_repo.py` — `JsonPaperRepo` (default backend; reads/writes `outputs/simple_paper_state*.json`).
+- `persistence/paper_repo.py` — `PaperRepo` Protocol + `get_paper_repo(path, market)` factory. Always returns `SqlitePaperRepo`; the path arg is retained only for old call compatibility.
 - `persistence/sqlite_paper_repo.py` — `SqlitePaperRepo` (`.database/paper_state.db`). Schema: `paper_state`, `positions`, `prices`, `trade_log` (includes `tradebookid INTEGER NOT NULL DEFAULT 0` plus an idempotent `ALTER TABLE ADD COLUMN` migration shim), `daily_counters`. `ui_config` / `agent_memory` stored as JSON `TEXT`.
 - `persistence/db_storage.py` — `open_sqlite_connection()` helper (row factory, foreign keys, WAL). Retained for SQLite plumbing reuse.
-
-The `_DualWriteSqlitePaperRepo` wrapper is wired through the factory but is **off by default**; it exists for the eventual SQLite default flip and retires when the flags retire.
 
 ### Trading cycle (gated by `USE_TRADING_CYCLE=1`)
 
@@ -67,7 +64,7 @@ The `_DualWriteSqlitePaperRepo` wrapper is wired through the factory but is **of
 - `cycle/entry/` — `cooldown.py`, `idle_fallback.py`, `sizing.py` (entry sub-rules).
 - `cycle/adapters/` — Streamlit-backed adapters: `streamlit_broker`, `session_repo`, `session_prices`, `dashboard_signals`, `live_clock`, `log_history`.
 
-### Backtest (gated by `BACKTEST_USE_CYCLE=1`)
+### Backtest (cycle pipeline default)
 
 - `backtest/__init__.py`, `backtest/cycle.py` — `run_backtest_via_cycle()` drives `run_cycle` over historical bars.
 - `backtest/settings.py`, `backtest/sizer.py`, `backtest/steps.py` — backtest-specific helpers.
@@ -75,11 +72,9 @@ The `_DualWriteSqlitePaperRepo` wrapper is wired through the factory but is **of
 
 ### Optimization
 
-- `optimization/trade_history.py` — CSV normalization.
+- `optimization/trade_history.py` — CSV normalization plus SQLite-loaded paper trade-log normalization for dashboard optimizer runs.
 - `optimization/features.py` — walk-forward feature engineering (candle strength, wick/body, prev-day breakout, ATR, NIFTY vs VWAP, etc.).
 - `optimization/reports.py` — exports (`*_recommendations.json`, `*_symbol_scores.csv`, `*_feature_scores.csv`, `*_model_feature_importance.csv`, `*_enriched_trades.csv`).
-- `optimization/_debug.py` — debug helpers (internal).
-- `optimizer.py` (package root) — thin shim that re-exports the subpackage and emits `DeprecationWarning`. Migrate callers off before deletion.
 
 ### ML / scoring
 
@@ -120,27 +115,22 @@ The patterns absorbed from the (now-deleted) `DesignPattern.md` that still descr
 
 - **Ports & adapters (hexagonal) at the boundaries.** `cycle/ports.py` declares `Clock`, `SignalsProvider`, `Broker`, `LogHistory`, `Repo`, `PriceStore`; Streamlit-backed implementations live under `cycle/adapters/` and historical-bar implementations under `backtest/adapters/`. The cycle core doesn't import Streamlit.
 - **Dataclass-as-domain.** `domain/types.py` holds frozen dataclasses (`Position`, `TradeLogEntry`, `RiskSettings`, `SignalSettings`, `GuardSettings`, `CycleSettings`, `PortfolioSnapshot`) plus the mutable `PaperState`. Domain code never imports Streamlit, persistence, or sklearn.
-- **Repository pattern.** `PaperRepo` Protocol with `JsonPaperRepo` / `SqlitePaperRepo` implementations; `get_paper_repo()` is the only composition site that picks a backend. Migration aids (`_DualWriteSqlitePaperRepo`) wrap rather than fork the implementation.
+- **Repository pattern.** `PaperRepo` Protocol with the SQLite implementation; `get_paper_repo()` is the single composition site for paper state.
 - **Dependency injection via `Services`.** `cycle.factory.build_services_from_session()` is the composition root; `run_cycle(state, services, settings)` is pure-args. Tests construct fake `Services` rather than monkeypatching modules.
 - **Strategy / scorer protocol.** `SymbolScorer` Protocol with three swappable implementations (`NullSymbolScorer`, `SklearnSymbolScorer`, `BiasOverlayScorer`); `DISABLE_ML_SCORER=1` selects null.
 - **Pipeline of small steps.** `cycle/steps/` (prices → gates → entries → exits → counters) plus `cycle/entry/` sub-rules; each step has a single responsibility and is testable in isolation.
 - **State bridge.** `state/session_bridge.py` is the only place that converts between `st.session_state` dicts and domain dataclasses; everything downstream consumes dataclasses.
 - **View purity (AST-guarded).** `views/simple_*.py` modules take pure inputs and must not import `dashboard_simple` or read `st.session_state`. `tests/test_phase8b_top_panels.py` walks the AST and fails the suite on violations.
-- **Strangler / feature-flag rollout.** Every new code path landed behind a default-off flag (`USE_PAPER_REPO`, `USE_TRADING_CYCLE`, `USE_APP_SETTINGS`, `BACKTEST_USE_CYCLE`, etc.) so production behavior was preserved at each step. Flags retire once the new path becomes the only path (e.g. the `USE_SIMPLE_VIEWS*` family was deleted in phase-8b slice 6).
+- **Strangler / feature-flag rollout.** New code paths landed behind default-off flags (`USE_TRADING_CYCLE`, `USE_APP_SETTINGS`, `BACKTEST_USE_CYCLE`, etc.) so production behavior was preserved at each step. Flags retire once the new path becomes the only path.
 - **Streamlit observer pattern (at the edge only).** Session-state mutations trigger reruns; the dashboard owns this. Cycle/domain/persistence code is rerun-agnostic.
 
 ## Feature flags in play
 
 All default OFF unless noted; production behavior is preserved when unset.
 
-- `USE_PAPER_REPO=1` — route dashboard load/save through the `PaperRepo` factory.
 - `USE_TRADING_CYCLE=1` — route auto-trading through `cycle.runner.run_cycle`.
 - `USE_APP_SETTINGS=1` — read `AppSettings` (resolved from `config/market_config.json`) instead of the inline JSON config block.
-- `BACKTEST_USE_CYCLE=1` — drive legacy backtest via `run_backtest_via_cycle()`.
 - `DISABLE_ML_SCORER=1` — force `NullSymbolScorer` (skip sklearn + bias overlay).
-- `PAPER_REPO_BACKEND=json|sqlite` — phase-9 backend selector. Default `json`. Also read from `paper_repo_backend` in `config/database_config.json` when the env var is unset.
-- `PAPER_REPO_DUAL_WRITE=1` — when on SQLite, also write the JSON file each save. Migration aid; retire once SQLite is the default.
-- `PAPER_REPO_FALLBACK_JSON=1` — when on SQLite, fall back to JSON on a load miss. Migration aid; same retirement plan.
 
 External (not Cursor-managed) but relevant:
 
@@ -175,9 +165,6 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m stockmarket.cli optimize    --config config.json \
     --trade-file outputs/paper_trade_history.csv --lookback-trades 200
 
-# One-shot JSON → SQLite paper-state migration (operational, not on the runtime path)
-.\.venv\Scripts\python.exe scripts/migrate_paper_state_json_to_sqlite.py
-
 # Tests (160 passing as of this review)
 .\.venv\Scripts\python.exe -m pytest tests/ -q
 ```
@@ -191,12 +178,12 @@ Detailed mermaid sequencing lives in `CODEBASE_DATAFLOW.md`. The narrative:
 Supported dashboard:
 1. `streamlit run app.py` — `app.py` injects the theme and calls `dashboard_simple.render_simple_dashboard(standalone=False)`.
 2. `dashboard_simple.py` owns layout, sidebar, market selection, and lifecycle hooks. UI panels are rendered via `views/simple_*` modules; trade execution runs through `cycle.runner.run_cycle()` (when `USE_TRADING_CYCLE=1`) over a `Services` graph built by `cycle.factory.build_services_from_session()`.
-3. State persistence goes through `persistence.paper_repo.get_paper_repo()` (when `USE_PAPER_REPO=1`); the factory chooses `JsonPaperRepo` (default) or `SqlitePaperRepo` based on `PAPER_REPO_BACKEND` and may wrap SQLite in `_DualWriteSqlitePaperRepo` for the migration window.
+3. State persistence goes through `persistence.paper_repo.get_paper_repo()` and SQLite at `.database/paper_state.db`.
 4. Quotes come from `stockmarket.quotes.get_default_quote_service()`; ranking via `ranking.py` + `simple_signals.py`; costs via `charges.py`. Optional ML scoring lazy-loads `ml/sklearn_scorer.py` and `ml/bias.py`.
 
 CLI research:
 1. `python -m stockmarket <command>` parses in `cli.py` against `config.json` (`TradingConfig`).
-2. `backtest`/`signals`/`sweep`/`replay-best` use `data.py` → `strategy.py` → `backtest.py` (or `run_backtest_via_cycle()` when `BACKTEST_USE_CYCLE=1`) → `sweep.py`.
+2. `backtest`/`signals`/`sweep`/`replay-best` use `data.py` → `strategy.py` → `backtest.run_backtest()` (cycle pipeline) → `sweep.py`.
 3. `optimize` uses `stockmarket.optimization` and writes reports under `outputs/`.
 
 One auto-paper cycle, as ordered by `_auto_paper_cycle()` / `run_cycle()`:
@@ -215,12 +202,11 @@ One auto-paper cycle, as ordered by `_auto_paper_cycle()` / `run_cycle()`:
 
 ## Testing surface
 
-The pytest suite (`source .venv/bin/activate && python -m pytest tests/ -q`) currently reports 160 passed, with known deprecation warnings only (the `stockmarket.optimizer` shim and a couple of pandas/datetime deprecations). Notable test groups:
+The pytest suite (`source .venv/bin/activate && python -m pytest tests/ -q`) should be run after changes. Notable test groups:
 
 - `test_dashboard_simple.py`, `test_simple_signals.py`, `test_ranking.py`, `test_charges.py`, `test_data_batch.py`, `test_quotes.py` — pre-existing helper / behavioral tests.
 - `test_domain_bridge.py` — `state/session_bridge.py` round-trips.
-- `test_json_paper_repo.py`, `test_sqlite_paper_repo.py`, `test_paper_repo_backend_selection.py` — persistence backends + factory.
-- `test_migrate_paper_state.py` — JSON → SQLite migration script.
+- `test_sqlite_paper_repo.py`, `test_paper_repo_backend_selection.py` — SQLite persistence + factory.
 - `test_cycle_steps.py`, `test_cycle_parity.py`, `test_streamlit_broker.py` — trading cycle.
 - `test_backtest_convergence.py` — phase-5 golden parity.
 - `test_optimization_split.py`, `test_optimizer_market.py` — phase-6 + US optimizer market awareness.
@@ -231,7 +217,8 @@ The pytest suite (`source .venv/bin/activate && python -m pytest tests/ -q`) cur
 ## Practical maintenance notes
 
 - Prefer new feature work in `dashboard_simple.py` (orchestration only), `views/simple_*` (rendering), `cycle/steps/` (decisions), and `domain/` / `state/` (data shapes). Keep `views/*.py` free of `st.session_state` and `dashboard_simple` imports — the AST guard tests will flag violations.
-- Do not extend `dashboard.py` (deprecation stub) or `optimizer.py` (shim with `DeprecationWarning`); migrate callers off the shim opportunistically before removing it.
+- Do not extend `dashboard.py` (deprecation stub).
 - When adding a column to `trade_log` (or any `paper_state.db` table), add an `ALTER TABLE ADD COLUMN IF MISSING` shim in `_ensure_schema` (see `tradebookid` for the pattern).
+- For a fresh local paper-trading start, remove `.database/paper_state.db`. Old `outputs/simple_paper_state*.json` files can also be removed; they are not live storage.
 - Generated paths (`.cache/`, `outputs/`, `.database/`) are never committed; treat them as runtime state.
 - When introducing a new boundary, add a Protocol to `cycle/ports.py` (or a sibling) and a fake adapter for tests rather than monkeypatching the concrete one.

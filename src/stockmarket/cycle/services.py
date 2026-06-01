@@ -37,3 +37,9 @@ class Services:
     sizer: PositionSizer = field(default_factory=DefaultPositionSizer)
     idle_fallback: IdleFallbackPolicy = field(default_factory=DefaultIdleFallbackPolicy)
     scorer: SymbolScorer = field(default_factory=NullSymbolScorer)
+    ml_enabled: bool = False
+    batch_ml_scores: Callable[[tuple[str, ...], float | str, float], dict[str, float]] | None = (
+        None
+    )
+    state_mtime: float | str = 0.0
+    model_mtime: float = 0.0

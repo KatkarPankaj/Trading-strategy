@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
 from ..context import CycleContext
+from ..ports import RankedSignals
+from ..scoring import apply_scorer_to_ranked_signals
 from ..services import Services
 from .counters import _today_realized
 
@@ -147,8 +151,22 @@ def signal_exits(ctx: CycleContext, svc: Services) -> CycleContext:
     if not signals.enable_signal_sell or ctx.signals.sell_exit_df.empty:
         return ctx
 
+    scored = apply_scorer_to_ranked_signals(
+        RankedSignals(
+            buy_df=pd.DataFrame(),
+            sell_df=pd.DataFrame(),
+            sell_exit_df=ctx.signals.sell_exit_df,
+        ),
+        svc.scorer,
+        ml_enabled=svc.ml_enabled,
+        batch_ml_scores=svc.batch_ml_scores,
+        state_mtime=svc.state_mtime,
+        model_mtime=svc.model_mtime,
+    )
+    sell_exit_df = scored.sell_exit_df
+
     signal_exits_done = 0
-    for _, row in ctx.signals.sell_exit_df.iterrows():
+    for _, row in sell_exit_df.iterrows():
         if signal_exits_done >= int(signals.max_signal_exits_per_cycle):
             break
         sym = str(row.get("symbol", ""))

@@ -89,6 +89,16 @@ def test_render_auto_refresh_footer_caption_only_when_seconds_non_positive():
     fake_st.html.assert_not_called()
 
 
+def test_dashboard_footer_does_not_double_refresh_holding_prices():
+    """Per-render refresh is owned by _quick_portfolio_metrics, not the footer."""
+    dashboard_path = Path(__file__).parent.parent / "dashboard_simple.py"
+    source = dashboard_path.read_text(encoding="utf-8")
+    footer_idx = source.index("render_auto_refresh_footer(")
+    block_start = source.rfind("\n", 0, footer_idx)
+    block = source[block_start:footer_idx]
+    assert "_refresh_holding_prices" not in block
+
+
 def test_render_auto_refresh_footer_emits_js_when_enabled_and_positive_seconds():
     from stockmarket.views import simple_auto_refresh
 

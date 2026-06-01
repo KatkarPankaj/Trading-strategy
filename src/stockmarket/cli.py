@@ -13,7 +13,7 @@ import pandas as pd
 from .backtest import run_backtest
 from .config import TradingConfig
 from .data import fetch_intraday_data, latest_bars
-from .optimizer import export_optimization_report, run_intelligent_optimization
+from .optimization import export_optimization_report, run_intelligent_optimization
 from .strategy import add_strategy_columns
 from .sweep import run_parameter_sweep
 
