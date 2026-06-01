@@ -7,3 +7,4 @@ outputs/
 .database/
 .cursor/*.log
 .cache/*.pkl
+.cache
