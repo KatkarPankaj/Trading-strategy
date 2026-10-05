@@ -5,7 +5,10 @@ Run with: streamlit run dashboard_simple.py --server.port 8507
 
 from __future__ import annotations
 
+import csv
 import json
+import os
+import re
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -41,7 +44,25 @@ WATCHLIST = [
     "PERSISTENT.NS",
 ]
 
-STATE_FILE = Path("outputs") / "simple_paper_state.json"
+
+def _resolve_instance_id() -> str:
+    raw = str(os.getenv("TRADING_INSTANCE", "default")).strip()
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw)
+    return safe or "default"
+
+
+INSTANCE_ID = _resolve_instance_id()
+OUTPUTS_DIR = Path("outputs")
+if INSTANCE_ID == "default":
+    STATE_FILE = OUTPUTS_DIR / "simple_paper_state.json"
+    TRADE_LEDGER_FILE = OUTPUTS_DIR / "simple_trade_ledger.csv"
+    DAILY_SUMMARY_FILE = OUTPUTS_DIR / "simple_daily_summary.csv"
+else:
+    STATE_FILE = OUTPUTS_DIR / f"simple_paper_state_{INSTANCE_ID}.json"
+    TRADE_LEDGER_FILE = OUTPUTS_DIR / f"simple_trade_ledger_{INSTANCE_ID}.csv"
+    DAILY_SUMMARY_FILE = OUTPUTS_DIR / \
+        f"simple_daily_summary_{INSTANCE_ID}.csv"
+SNAPSHOT_DIR = OUTPUTS_DIR / "snapshots"
 
 
 def _read_saved_state() -> dict[str, Any]:
@@ -51,6 +72,111 @@ def _read_saved_state() -> dict[str, Any]:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _append_csv_row(file_path: Path, fieldnames: list[str], row: dict[str, Any]) -> None:
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not file_path.exists()
+    with file_path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+
+def _append_trade_ledger_row(row: dict[str, Any]) -> None:
+    fields = [
+        "timestamp_ist",
+        "instance_id",
+        "symbol",
+        "side",
+        "qty",
+        "price",
+        "value",
+        "charges",
+        "realized_pnl",
+        "cash_after",
+        "note",
+    ]
+    qty = int(row.get("qty", 0) or 0)
+    price = float(row.get("price", 0.0) or 0.0)
+    payload = {
+        "timestamp_ist": row.get("ts", ""),
+        "instance_id": INSTANCE_ID,
+        "symbol": row.get("symbol", ""),
+        "side": row.get("side", ""),
+        "qty": qty,
+        "price": round(price, 4),
+        "value": round(qty * price, 4),
+        "charges": round(float(row.get("charges", 0.0) or 0.0), 6),
+        "realized_pnl": round(float(row.get("realized_delta", 0.0) or 0.0), 6),
+        "cash_after": round(float(row.get("cash_after", 0.0) or 0.0), 6),
+        "note": row.get("reason", ""),
+    }
+    _append_csv_row(TRADE_LEDGER_FILE, fields, payload)
+
+
+def _append_daily_summary_row() -> None:
+    today = ist_now().strftime("%Y-%m-%d")
+    today_rows = [
+        row
+        for row in st.session_state.s_log
+        if str(row.get("ts", "")).startswith(today)
+    ]
+    closed_rows = [
+        row
+        for row in today_rows
+        if str(row.get("side", "")).upper() in {"SELL", "COVER"}
+    ]
+    wins = [row for row in closed_rows if float(
+        row.get("realized_delta", 0.0) or 0.0) > 0]
+    losses = [row for row in closed_rows if float(
+        row.get("realized_delta", 0.0) or 0.0) <= 0]
+    realized = float(sum(float(row.get("realized_delta", 0.0) or 0.0)
+                     for row in closed_rows))
+    charges = float(sum(float(row.get("charges", 0.0) or 0.0)
+                    for row in today_rows))
+    closed_count = len(closed_rows)
+    win_rate = (len(wins) / closed_count * 100.0) if closed_count > 0 else 0.0
+
+    fields = [
+        "snapshot_ts_ist",
+        "trade_date",
+        "instance_id",
+        "closed_trades",
+        "wins",
+        "losses",
+        "win_rate_pct",
+        "realized_pnl",
+        "charges",
+        "net_after_charges",
+        "cash",
+        "open_pnl",
+        "equity",
+    ]
+    payload = {
+        "snapshot_ts_ist": ist_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "trade_date": today,
+        "instance_id": INSTANCE_ID,
+        "closed_trades": closed_count,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": round(win_rate, 4),
+        "realized_pnl": round(realized, 6),
+        "charges": round(charges, 6),
+        "net_after_charges": round(realized - charges, 6),
+        "cash": round(float(st.session_state.s_cash), 6),
+        "open_pnl": round(_current_open_pnl(), 6),
+        "equity": round(float(st.session_state.s_cash) + _current_open_pnl(), 6),
+    }
+    _append_csv_row(DAILY_SUMMARY_FILE, fields, payload)
+
+
+def _write_state_snapshot(payload: dict[str, Any]) -> None:
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = ist_now().strftime("%Y%m%d_%H%M%S")
+    snap_file = SNAPSHOT_DIR / f"simple_state_{INSTANCE_ID}_{ts}.json"
+    snap_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def ist_now() -> datetime:
@@ -205,6 +331,14 @@ def _save_state() -> None:
         "profit_ladder_exited_day": st.session_state.get("s_profit_ladder_exited_day", ""),
     }
     STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    try:
+        _write_state_snapshot(payload)
+    except Exception:
+        pass
+    try:
+        _append_daily_summary_row()
+    except Exception:
+        pass
 
 
 def _today_entry_count() -> int:
@@ -231,6 +365,38 @@ def _current_open_pnl() -> float:
         if qty > 0 and avg > 0 and ltp > 0:
             pnl += (avg - ltp) * qty
     return float(pnl)
+
+
+def _open_side_stats() -> dict[str, float]:
+    long_pnl = 0.0
+    short_pnl = 0.0
+    long_count = 0
+    short_count = 0
+
+    for sym, h in st.session_state.s_holdings.items():
+        qty = int(h.get("qty", 0))
+        avg = float(h.get("avg", 0.0))
+        ltp = float(st.session_state.s_prices.get(sym, avg))
+        if qty <= 0 or avg <= 0 or ltp <= 0:
+            continue
+        long_count += 1
+        long_pnl += (ltp - avg) * qty
+
+    for sym, h in st.session_state.s_shorts.items():
+        qty = int(h.get("qty", 0))
+        avg = float(h.get("avg", 0.0))
+        ltp = float(st.session_state.s_prices.get(sym, avg))
+        if qty <= 0 or avg <= 0 or ltp <= 0:
+            continue
+        short_count += 1
+        short_pnl += (avg - ltp) * qty
+
+    return {
+        "long_count": float(long_count),
+        "short_count": float(short_count),
+        "long_pnl": float(long_pnl),
+        "short_pnl": float(short_pnl),
+    }
 
 
 def _summarize_day_from_log(day: str) -> dict[str, Any]:
@@ -560,6 +726,10 @@ def _record_trade(
             "cash_after": float(st.session_state.s_cash),
         }
     )
+    try:
+        _append_trade_ledger_row(st.session_state.s_log[-1])
+    except Exception:
+        pass
     _save_state()
 
 
@@ -571,7 +741,44 @@ def _in_entry_window() -> bool:
     return MARKET_OPEN <= t <= ENTRY_CUTOFF
 
 
-def _rank_signals(symbols: list[str], min_price: float, max_price: float) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+def _estimate_regime_from_symbols(symbols: list[str]) -> dict[str, float | str]:
+    vals: list[float] = []
+    vol_vals: list[float] = []
+    for sym in symbols:
+        try:
+            q = fetch_nse_quote(sym)
+            vals.append(float(q.get("pchange", 0.0) or 0.0))
+            vol_vals.append(float(q.get("range_pct", 0.0) or 0.0))
+        except Exception:
+            continue
+
+    if not vals:
+        return {"regime": "mixed", "avg_pchange": 0.0, "volatility": 0.0}
+
+    avg_pchange = float(sum(vals) / max(len(vals), 1))
+    volatility = float(sum(abs(v) for v in vals) / max(len(vals), 1))
+    regime = "mixed"
+    if avg_pchange >= 0.4:
+        regime = "bullish"
+    elif avg_pchange <= -0.4:
+        regime = "bearish"
+    elif abs(avg_pchange) < 0.25:
+        regime = "sideways"
+
+    return {
+        "regime": regime,
+        "avg_pchange": avg_pchange,
+        "volatility": max(volatility, float(sum(vol_vals) / max(len(vol_vals), 1))),
+    }
+
+
+def _rank_signals(
+    symbols: list[str],
+    min_price: float,
+    max_price: float,
+    strategy_mode: str = "single_current",
+    regime_hint: str = "mixed",
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
 
@@ -588,8 +795,8 @@ def _rank_signals(symbols: list[str], min_price: float, max_price: float) -> tup
             pchange = float(q["pchange"])
             range_pct = float(q["range_pct"])
 
-            buy_score = 0.0
-            sell_score = 0.0
+            mom_buy_score = 0.0
+            mom_sell_score = 0.0
             buy_ready = False
             sell_ready = False
 
@@ -600,24 +807,61 @@ def _rank_signals(symbols: list[str], min_price: float, max_price: float) -> tup
                 above = 0.0
                 below = 0.0
 
-            buy_score += min(45.0, max(0.0, pchange) * 6.0)
-            buy_score += min(35.0, above * 20.0)
-            buy_score += min(20.0, range_pct * 2.0)
-            buy_ready = price > vwap and pchange > 0.25 and range_pct > 0.5
+            mom_buy_score += min(45.0, max(0.0, pchange) * 6.0)
+            mom_buy_score += min(35.0, above * 20.0)
+            mom_buy_score += min(20.0, range_pct * 2.0)
+            momentum_buy_ready = price > vwap and pchange > 0.25 and range_pct > 0.5
 
-            sell_score += min(45.0, max(0.0, -pchange) * 6.0)
-            sell_score += min(35.0, below * 20.0)
-            sell_score += min(20.0, range_pct * 2.0)
-            sell_ready = price < vwap and pchange < -0.25 and range_pct > 0.5
+            mom_sell_score += min(45.0, max(0.0, -pchange) * 6.0)
+            mom_sell_score += min(35.0, below * 20.0)
+            mom_sell_score += min(20.0, range_pct * 2.0)
+            momentum_sell_ready = price < vwap and pchange < -0.25 and range_pct > 0.5
+
+            mr_buy_score = 0.0
+            mr_sell_score = 0.0
+            mr_buy_score += min(45.0, max(0.0, -pchange) * 5.5)
+            mr_buy_score += min(35.0, below * 24.0)
+            mr_buy_score += min(20.0, max(0.0, 2.5 - range_pct) * 5.0)
+            meanrev_buy_ready = price < vwap and pchange < -0.2 and range_pct < 2.5
+
+            mr_sell_score += min(45.0, max(0.0, pchange) * 5.5)
+            mr_sell_score += min(35.0, above * 24.0)
+            mr_sell_score += min(20.0, max(0.0, 2.5 - range_pct) * 5.0)
+            meanrev_sell_ready = price > vwap and pchange > 0.2 and range_pct < 2.5
+
+            buy_score = mom_buy_score
+            sell_score = mom_sell_score
+            buy_ready = momentum_buy_ready
+            sell_ready = momentum_sell_ready
+
+            if strategy_mode == "combo_ensemble":
+                if regime_hint == "sideways":
+                    w_mom, w_mr = 0.35, 0.65
+                elif regime_hint in {"bullish", "bearish"}:
+                    w_mom, w_mr = 0.75, 0.25
+                else:
+                    w_mom, w_mr = 0.55, 0.45
+
+                buy_score = (w_mom * mom_buy_score) + (w_mr * mr_buy_score)
+                sell_score = (w_mom * mom_sell_score) + (w_mr * mr_sell_score)
+
+                if regime_hint == "sideways":
+                    buy_ready = meanrev_buy_ready or buy_score >= 52.0
+                    sell_ready = meanrev_sell_ready or sell_score >= 52.0
+                else:
+                    buy_ready = momentum_buy_ready or buy_score >= 56.0
+                    sell_ready = momentum_sell_ready or sell_score >= 56.0
 
             rows.append(
                 {
                     "symbol": sym,
                     "price": round(price, 2),
-                    "buy_score": round(buy_score, 2),
+                    "buy_score": round(float(buy_score), 2),
                     "buy_signal": "READY" if buy_ready else "WAIT",
-                    "sell_score": round(sell_score, 2),
+                    "sell_score": round(float(sell_score), 2),
                     "sell_signal": "READY" if sell_ready else "WAIT",
+                    "strategy_mode": strategy_mode,
+                    "regime_hint": regime_hint,
                     "pchange": round(pchange, 2),
                     "updated": ist_now().strftime("%H:%M:%S"),
                 }
@@ -652,7 +896,15 @@ def _refresh_holding_prices() -> None:
 def _auto_paper_cycle(
     buy_df: pd.DataFrame,
     sell_df: pd.DataFrame,
+    strategy_mode: str,
+    regime_hint: str,
     risk_pct: float,
+    explore_mode_on: bool,
+    explore_risk_scale: float,
+    explore_qty_cap: int,
+    strict_mode_on: bool,
+    strict_risk_scale: float,
+    strict_qty_cap: int,
     max_trades_day: int,
     max_positions: int,
     sl_pct: float,
@@ -677,6 +929,7 @@ def _auto_paper_cycle(
 
     now = ist_now()
     today = now.strftime("%Y-%m-%d")
+    exit_context = f"[eng={strategy_mode}|reg={regime_hint}]"
 
     # Block all automated actions on weekends
     if now.weekday() >= 5:
@@ -744,7 +997,8 @@ def _auto_paper_cycle(
                         sym, h.get("avg", 0.0) or 0.0))
                     if ltp <= 0:
                         continue
-                    _record_trade(sym, "SELL", qty, ltp, "Profit ladder exit")
+                    _record_trade(sym, "SELL", qty, ltp,
+                                  f"Profit ladder exit {exit_context}")
                     actions.append(f"SELL {sym}: profit ladder @ Rs {ltp:.2f}")
 
                 for sym, h in list(st.session_state.s_shorts.items()):
@@ -755,7 +1009,8 @@ def _auto_paper_cycle(
                         sym, h.get("avg", 0.0) or 0.0))
                     if ltp <= 0:
                         continue
-                    _record_trade(sym, "COVER", qty, ltp, "Profit ladder exit")
+                    _record_trade(sym, "COVER", qty, ltp,
+                                  f"Profit ladder exit {exit_context}")
                     actions.append(
                         f"COVER {sym}: profit ladder @ Rs {ltp:.2f}")
 
@@ -776,10 +1031,10 @@ def _auto_paper_cycle(
         stop_price = float(h.get("stop", avg * (1.0 - sl_pct)))
         target_price = float(h.get("target", avg * (1.0 + tp_pct)))
         if ltp <= stop_price:
-            _record_trade(sym, "SELL", qty, ltp, "Auto SL")
+            _record_trade(sym, "SELL", qty, ltp, f"Auto SL {exit_context}")
             actions.append(f"SELL {sym}: SL hit @ Rs {ltp:.2f}")
         elif ltp >= target_price:
-            _record_trade(sym, "SELL", qty, ltp, "Auto TP")
+            _record_trade(sym, "SELL", qty, ltp, f"Auto TP {exit_context}")
             actions.append(f"SELL {sym}: TP hit @ Rs {ltp:.2f}")
 
     # Auto-cover short positions on SL/TP.
@@ -793,10 +1048,12 @@ def _auto_paper_cycle(
         stop_price = float(h.get("stop", avg * (1.0 + sl_pct)))
         target_price = float(h.get("target", avg * (1.0 - tp_pct)))
         if ltp >= stop_price:
-            _record_trade(sym, "COVER", qty, ltp, "Auto short SL")
+            _record_trade(sym, "COVER", qty, ltp,
+                          f"Auto short SL {exit_context}")
             actions.append(f"COVER {sym}: short SL hit @ Rs {ltp:.2f}")
         elif ltp <= target_price:
-            _record_trade(sym, "COVER", qty, ltp, "Auto short TP")
+            _record_trade(sym, "COVER", qty, ltp,
+                          f"Auto short TP {exit_context}")
             actions.append(f"COVER {sym}: short TP hit @ Rs {ltp:.2f}")
 
     # Optional: exit holdings when sell signal is READY with sufficient score.
@@ -830,7 +1087,7 @@ def _auto_paper_cycle(
                 continue
 
             _record_trade(sym, "SELL", qty, ltp,
-                          f"Auto SELL signal (score {score:.1f})")
+                          f"Auto SELL signal (score {score:.1f}) {exit_context}")
             actions.append(
                 f"SELL {sym}: signal READY @ Rs {ltp:.2f} (score {score:.1f})")
             signal_exits_done += 1
@@ -853,7 +1110,8 @@ def _auto_paper_cycle(
                     sym, h.get("avg", 0.0) or 0.0))
                 if ltp <= 0:
                     continue
-                _record_trade(sym, "SELL", qty, ltp, "Profit guard square-off")
+                _record_trade(sym, "SELL", qty, ltp,
+                              f"Profit guard square-off {exit_context}")
                 actions.append(f"SELL {sym}: profit guard @ Rs {ltp:.2f}")
 
             for sym, h in list(st.session_state.s_shorts.items()):
@@ -865,7 +1123,7 @@ def _auto_paper_cycle(
                 if ltp <= 0:
                     continue
                 _record_trade(sym, "COVER", qty, ltp,
-                              "Profit guard square-off")
+                              f"Profit guard square-off {exit_context}")
                 actions.append(f"COVER {sym}: profit guard @ Rs {ltp:.2f}")
 
             st.session_state.s_profit_guard_triggered_day = today
@@ -883,7 +1141,8 @@ def _auto_paper_cycle(
                 sym, h.get("avg", 0.0) or 0.0))
             if ltp <= 0:
                 continue
-            _record_trade(sym, "SELL", qty, ltp, "Auto square-off")
+            _record_trade(sym, "SELL", qty, ltp,
+                          f"Auto square-off {exit_context}")
             actions.append(f"SELL {sym}: square-off @ Rs {ltp:.2f}")
 
         for sym, h in list(st.session_state.s_shorts.items()):
@@ -894,7 +1153,8 @@ def _auto_paper_cycle(
                 sym, h.get("avg", 0.0) or 0.0))
             if ltp <= 0:
                 continue
-            _record_trade(sym, "COVER", qty, ltp, "Auto square-off")
+            _record_trade(sym, "COVER", qty, ltp,
+                          f"Auto square-off {exit_context}")
             actions.append(f"COVER {sym}: square-off @ Rs {ltp:.2f}")
         return actions
 
@@ -918,7 +1178,78 @@ def _auto_paper_cycle(
             f"AUTO-BUY paused: max {max_positions} open positions reached")
         return actions
 
-    risk_budget = float(st.session_state.s_start) * (float(risk_pct) / 100.0)
+    effective_risk_pct = float(risk_pct)
+    if explore_mode_on:
+        effective_risk_pct = max(0.05, float(
+            risk_pct) * float(explore_risk_scale))
+    if strict_mode_on:
+        effective_risk_pct = min(
+            effective_risk_pct,
+            max(0.05, float(risk_pct) * float(strict_risk_scale)),
+        )
+
+    risk_budget = float(st.session_state.s_start) * \
+        (effective_risk_pct / 100.0)
+    per_trade_qty_cap = 300
+    if explore_mode_on:
+        per_trade_qty_cap = min(
+            per_trade_qty_cap, int(max(1, explore_qty_cap)))
+    if strict_mode_on:
+        per_trade_qty_cap = min(per_trade_qty_cap, int(max(1, strict_qty_cap)))
+
+    side_stats = _open_side_stats()
+    long_count = int(side_stats.get("long_count", 0.0) or 0.0)
+    short_count = int(side_stats.get("short_count", 0.0) or 0.0)
+    long_open_pnl = float(side_stats.get("long_pnl", 0.0) or 0.0)
+    short_open_pnl = float(side_stats.get("short_pnl", 0.0) or 0.0)
+
+    long_score_adj = 0.0
+    short_score_adj = 0.0
+    long_qty_scale = 1.0
+    short_qty_scale = 1.0
+
+    if daily_pnl_now < 0.0:
+        loss_pct = abs(daily_pnl_now) / \
+            max(float(st.session_state.s_start), 1.0)
+        tighten = min(6.0, loss_pct * 600.0)
+        long_score_adj += tighten
+        short_score_adj += tighten
+
+    if long_open_pnl < short_open_pnl:
+        long_score_adj += 2.0
+        long_qty_scale *= 0.70
+        short_score_adj -= 1.0
+    elif short_open_pnl < long_open_pnl:
+        short_score_adj += 2.0
+        short_qty_scale *= 0.70
+        long_score_adj -= 1.0
+
+    if (long_count - short_count) >= 2 and long_open_pnl < 0.0:
+        long_score_adj += 2.0
+        long_qty_scale *= 0.75
+    if (short_count - long_count) >= 2 and short_open_pnl < 0.0:
+        short_score_adj += 2.0
+        short_qty_scale *= 0.75
+
+    effective_min_buy_dynamic = float(
+        min(100.0, max(0.0, float(min_buy_score) + long_score_adj)))
+    effective_min_short_dynamic = float(
+        min(100.0, max(0.0, float(min_short_score) + short_score_adj)))
+    long_qty_cap = max(1, int(per_trade_qty_cap * long_qty_scale))
+    short_qty_cap = max(1, int(per_trade_qty_cap * short_qty_scale))
+
+    trade_context = (
+        f"eng={strategy_mode}|reg={regime_hint}|"
+        f"bmin={effective_min_buy_dynamic:.1f}|smin={effective_min_short_dynamic:.1f}|"
+        f"bcap={long_qty_cap}|scap={short_qty_cap}"
+    )
+
+    if abs(long_score_adj) > 0.1 or abs(short_score_adj) > 0.1:
+        actions.append(
+            "Adaptive posture -> "
+            f"buy_min {effective_min_buy_dynamic:.1f}, short_min {effective_min_short_dynamic:.1f}, "
+            f"buy_qty_cap {long_qty_cap}, short_qty_cap {short_qty_cap}"
+        )
 
     for _, row in buy_df.iterrows():
         if entries_today >= int(max_trades_day):
@@ -936,15 +1267,15 @@ def _auto_paper_cycle(
         score = float(
             row.get("effective_buy_score", row.get("buy_score", 0.0)) or 0.0
         )
-        if price <= 0 or score < float(min_buy_score):
+        if price <= 0 or score < float(effective_min_buy_dynamic):
             actions.append(
-                f"BUY {sym} SKIPPED: score {score:.1f} < min {float(min_buy_score):.1f}")
+                f"BUY {sym} SKIPPED: score {score:.1f} < min {float(effective_min_buy_dynamic):.1f}")
             continue
 
         risk_per_share = max(price * float(sl_pct), 0.01)
         qty_by_risk = int(risk_budget // risk_per_share)
         qty_by_cash = int(st.session_state.s_cash // max(price, 1e-6))
-        qty = max(0, min(qty_by_risk, qty_by_cash, 300))
+        qty = max(0, min(qty_by_risk, qty_by_cash, long_qty_cap))
 
         if qty <= 0:
             actions.append(f"BUY {sym} SKIPPED: insufficient cash/risk budget")
@@ -956,7 +1287,8 @@ def _auto_paper_cycle(
             actions.append(f"BUY {sym} SKIPPED: insufficient cash")
             continue
 
-        _record_trade(sym, "BUY", qty, price, "Auto BUY signal",
+        _record_trade(sym, "BUY", qty, price,
+                      f"Auto BUY signal [{trade_context}]",
                       sl_pct=sl_pct, tp_pct=tp_pct)
         actions.append(f"BUY {sym} {qty}qty @ Rs {price:.2f}")
         entries_today += 1
@@ -981,14 +1313,14 @@ def _auto_paper_cycle(
                 row.get("effective_sell_score", row.get(
                     "sell_score", 0.0)) or 0.0
             )
-            if price <= 0 or score < float(min_short_score):
+            if price <= 0 or score < float(effective_min_short_dynamic):
                 continue
 
             risk_per_share = max(price * float(sl_pct), 0.01)
             qty_by_risk = int(risk_budget // risk_per_share)
             qty_by_margin = int(
                 max(0.0, st.session_state.s_cash) // max(price * 0.2, 0.01))
-            qty = max(0, min(qty_by_risk, qty_by_margin, 300))
+            qty = max(0, min(qty_by_risk, qty_by_margin, short_qty_cap))
             if qty <= 0:
                 actions.append(
                     f"SHORT {sym} SKIPPED: insufficient cash/risk budget")
@@ -1003,7 +1335,7 @@ def _auto_paper_cycle(
                 continue
 
             _record_trade(sym, "SHORT", qty, price,
-                          "Auto SHORT signal", sl_pct=sl_pct, tp_pct=tp_pct)
+                          f"Auto SHORT signal [{trade_context}]", sl_pct=sl_pct, tp_pct=tp_pct)
             actions.append(f"SHORT {sym} {qty}qty @ Rs {price:.2f}")
             entries_today += 1
             open_positions += 1
@@ -1070,12 +1402,78 @@ def _portfolio_view() -> tuple[pd.DataFrame, float]:
 st.set_page_config(page_title="Simple Budget Trading Simulator",
                    page_icon="\U0001f4b0", layout="wide")
 st.title("\U0001f4b0 Simple Budget-Based Trading Simulator")
+st.caption(
+    f"Instance: {INSTANCE_ID} | State: {STATE_FILE.name} | Ledger: {TRADE_LEDGER_FILE.name}"
+)
 
 saved_state = _read_saved_state()
 saved_ui = saved_state.get("ui_config", {}) if isinstance(
     saved_state, dict) else {}
 
+_pending_ui_overrides = st.session_state.pop("pending_ui_overrides", None)
+if isinstance(_pending_ui_overrides, dict):
+    saved_ui = {**saved_ui, **_pending_ui_overrides}
+
+MODE_PRESETS: dict[str, dict[str, Any]] = {
+    "Explore": {
+        "explore_mode_on": True,
+        "explore_risk_scale": 0.35,
+        "explore_qty_cap": 120,
+        "strict_mode_on": False,
+        "risk_pct": 0.5,
+        "max_trades_day": 16,
+        "max_open_positions": 6,
+    },
+    "Balanced": {
+        "explore_mode_on": True,
+        "explore_risk_scale": 0.5,
+        "explore_qty_cap": 100,
+        "strict_mode_on": False,
+        "risk_pct": 0.4,
+        "max_trades_day": 10,
+        "max_open_positions": 5,
+    },
+    "Strict": {
+        "explore_mode_on": False,
+        "strict_mode_on": True,
+        "strict_risk_scale": 0.5,
+        "strict_qty_cap": 80,
+        "strict_buy_score_bonus": 6.0,
+        "strict_short_score_bonus": 6.0,
+        "strict_max_trades_cap": 8,
+        "strict_max_positions_cap": 4,
+        "risk_pct": 0.35,
+        "max_trades_day": 10,
+        "max_open_positions": 5,
+    },
+}
+
 with st.sidebar:
+    st.header("Mode Preset")
+    _preset_choices = ["Custom", "Explore", "Balanced", "Strict"]
+    _saved_preset = str(saved_ui.get("mode_preset", "Custom"))
+    if _saved_preset not in _preset_choices:
+        _saved_preset = "Custom"
+    mode_preset = st.selectbox(
+        "Preset",
+        options=_preset_choices,
+        index=_preset_choices.index(_saved_preset),
+        help="Apply a full settings profile; you can still fine-tune fields afterward.",
+    )
+    if mode_preset in MODE_PRESETS:
+        _preset_view = MODE_PRESETS[mode_preset]
+        st.caption("Preset overrides:")
+        for _k, _v in _preset_view.items():
+            st.caption(f"- {_k}: {_v}")
+    apply_preset_btn = st.button("Apply Preset", use_container_width=True)
+    if apply_preset_btn and mode_preset in MODE_PRESETS:
+        st.session_state["pending_ui_overrides"] = {
+            **saved_ui,
+            **MODE_PRESETS[mode_preset],
+            "mode_preset": mode_preset,
+        }
+        st.rerun()
+
     st.header("Setup")
     total_capital = float(st.number_input(
         "Total Capital (Rs)", min_value=1000.0, value=float(saved_ui.get("total_capital", saved_state.get("start", 200000.0))), step=1000.0))
@@ -1086,7 +1484,103 @@ with st.sidebar:
     max_open_positions = int(st.number_input(
         "Max Open Positions", min_value=1, max_value=10, value=int(saved_ui.get("max_open_positions", 3)), step=1))
 
+    st.header("Explore Mode")
+    explore_mode_on = st.checkbox(
+        "Enable Explore Mode (small size, more samples)",
+        value=bool(saved_ui.get("explore_mode_on", True)),
+    )
+    explore_risk_scale = float(st.slider(
+        "Explore risk scale",
+        min_value=0.1,
+        max_value=1.0,
+        value=float(saved_ui.get("explore_risk_scale", 0.35)),
+        step=0.05,
+        disabled=not explore_mode_on,
+    ))
+    explore_qty_cap = int(st.number_input(
+        "Explore max qty per trade",
+        min_value=10,
+        max_value=300,
+        value=int(saved_ui.get("explore_qty_cap", 120)),
+        step=5,
+        disabled=not explore_mode_on,
+    ))
+
+    st.header("Strict Execution Mode")
+    strict_mode_on = st.checkbox(
+        "Enable Strict Execution Mode",
+        value=bool(saved_ui.get("strict_mode_on", False)),
+    )
+    strict_risk_scale = float(st.slider(
+        "Strict risk scale",
+        min_value=0.1,
+        max_value=1.0,
+        value=float(saved_ui.get("strict_risk_scale", 0.5)),
+        step=0.05,
+        disabled=not strict_mode_on,
+    ))
+    strict_qty_cap = int(st.number_input(
+        "Strict max qty per trade",
+        min_value=5,
+        max_value=300,
+        value=int(saved_ui.get("strict_qty_cap", 80)),
+        step=5,
+        disabled=not strict_mode_on,
+    ))
+    strict_buy_score_bonus = float(st.slider(
+        "Strict buy score bonus",
+        min_value=0.0,
+        max_value=25.0,
+        value=float(saved_ui.get("strict_buy_score_bonus", 6.0)),
+        step=1.0,
+        disabled=not strict_mode_on,
+    ))
+    strict_short_score_bonus = float(st.slider(
+        "Strict short score bonus",
+        min_value=0.0,
+        max_value=25.0,
+        value=float(saved_ui.get("strict_short_score_bonus", 6.0)),
+        step=1.0,
+        disabled=not strict_mode_on,
+    ))
+    strict_max_trades_cap = int(st.number_input(
+        "Strict max trades/day",
+        min_value=1,
+        max_value=20,
+        value=int(saved_ui.get("strict_max_trades_cap", 8)),
+        step=1,
+        disabled=not strict_mode_on,
+    ))
+    strict_max_positions_cap = int(st.number_input(
+        "Strict max open positions",
+        min_value=1,
+        max_value=10,
+        value=int(saved_ui.get("strict_max_positions_cap", 4)),
+        step=1,
+        disabled=not strict_mode_on,
+    ))
+
     st.header("Signal Filter")
+    strategy_mode = st.selectbox(
+        "Strategy Engine",
+        options=["single_current", "combo_ensemble"],
+        index=0 if str(saved_ui.get("strategy_mode",
+                       "single_current")) == "single_current" else 1,
+        help="single_current keeps legacy behavior; combo_ensemble blends momentum + mean-reversion by regime.",
+    )
+    dynamic_prefilter_on = st.checkbox(
+        "Enable dynamic prefilter",
+        value=bool(saved_ui.get("dynamic_prefilter_on", True)),
+    )
+    dynamic_prefilter_size = int(st.number_input(
+        "Prefilter active symbols",
+        min_value=6,
+        max_value=max(6, len(WATCHLIST)),
+        value=int(saved_ui.get("dynamic_prefilter_size",
+                  min(10, len(WATCHLIST)))),
+        step=1,
+        disabled=not dynamic_prefilter_on,
+    ))
     min_price = float(st.number_input("Min Price (Rs)",
                       min_value=0.0, max_value=50000.0, value=float(saved_ui.get("min_price", 50.0)), step=10.0))
     max_price = float(st.number_input(
@@ -1152,8 +1646,22 @@ with st.sidebar:
 _init_state(total_capital)
 
 current_ui_config = {
+    "mode_preset": str(mode_preset),
     "total_capital": float(total_capital),
     "risk_pct": float(risk_pct),
+    "explore_mode_on": bool(explore_mode_on),
+    "explore_risk_scale": float(explore_risk_scale),
+    "explore_qty_cap": int(explore_qty_cap),
+    "strict_mode_on": bool(strict_mode_on),
+    "strict_risk_scale": float(strict_risk_scale),
+    "strict_qty_cap": int(strict_qty_cap),
+    "strict_buy_score_bonus": float(strict_buy_score_bonus),
+    "strict_short_score_bonus": float(strict_short_score_bonus),
+    "strict_max_trades_cap": int(strict_max_trades_cap),
+    "strict_max_positions_cap": int(strict_max_positions_cap),
+    "strategy_mode": str(strategy_mode),
+    "dynamic_prefilter_on": bool(dynamic_prefilter_on),
+    "dynamic_prefilter_size": int(dynamic_prefilter_size),
     "max_trades_day": int(max_trades_day),
     "max_open_positions": int(max_open_positions),
     "min_price": float(min_price),
@@ -1187,8 +1695,35 @@ if reset_btn:
     st.session_state.clear()
     st.rerun()
 
+scan_symbols = list(WATCHLIST)
+prefilter_errors: list[str] = []
+if dynamic_prefilter_on and len(scan_symbols) > int(dynamic_prefilter_size):
+    activity_rows: list[tuple[float, str]] = []
+    for sym in scan_symbols:
+        try:
+            q = fetch_nse_quote(sym)
+            pchange = float(q.get("pchange", 0.0) or 0.0)
+            range_pct = float(q.get("range_pct", 0.0) or 0.0)
+            activity = abs(pchange) * 1.2 + range_pct
+            activity_rows.append((float(activity), sym))
+        except Exception as exc:
+            prefilter_errors.append(f"{sym}: {exc}")
+    if activity_rows:
+        activity_rows.sort(key=lambda x: x[0], reverse=True)
+        scan_symbols = [
+            s for _, s in activity_rows[:int(dynamic_prefilter_size)]]
+
+regime_hint_pack = _estimate_regime_from_symbols(scan_symbols)
+regime_hint = str(regime_hint_pack.get("regime", "mixed"))
+
 buy_df, sell_df, scan_errors = _rank_signals(
-    WATCHLIST, min_price=min_price, max_price=max_price)
+    scan_symbols,
+    min_price=min_price,
+    max_price=max_price,
+    strategy_mode=str(strategy_mode),
+    regime_hint=regime_hint,
+)
+scan_errors = prefilter_errors + scan_errors
 
 learning_memory = _update_learning_memory()
 market_research = _market_research_from_signals(buy_df, sell_df)
@@ -1230,14 +1765,34 @@ if enable_learning_agent:
     effective_min_short_score = float(agent_plan["effective_min_short_score"])
     effective_tp_pct = float(agent_plan["effective_tp_pct"])
 
+effective_max_trades_day = int(max_trades_day)
+effective_max_open_positions = int(max_open_positions)
+if strict_mode_on:
+    effective_min_buy_score = min(
+        100.0, effective_min_buy_score + float(strict_buy_score_bonus))
+    effective_min_short_score = min(
+        100.0, effective_min_short_score + float(strict_short_score_bonus))
+    effective_max_trades_day = min(
+        int(max_trades_day), int(strict_max_trades_cap))
+    effective_max_open_positions = min(
+        int(max_open_positions), int(strict_max_positions_cap))
+
 actions: list[str] = []
 if auto_trade_on:
     actions = _auto_paper_cycle(
         buy_df=buy_df,
         sell_df=sell_df,
+        strategy_mode=str(strategy_mode),
+        regime_hint=str(regime_hint),
         risk_pct=risk_pct,
-        max_trades_day=max_trades_day,
-        max_positions=max_open_positions,
+        explore_mode_on=explore_mode_on,
+        explore_risk_scale=explore_risk_scale,
+        explore_qty_cap=explore_qty_cap,
+        strict_mode_on=strict_mode_on,
+        strict_risk_scale=strict_risk_scale,
+        strict_qty_cap=strict_qty_cap,
+        max_trades_day=effective_max_trades_day,
+        max_positions=effective_max_open_positions,
         sl_pct=sl_pct,
         tp_pct=effective_tp_pct,
         min_buy_score=effective_min_buy_score,
@@ -1316,11 +1871,25 @@ with st.expander("\U0001f916 Learning Agent: Tomorrow Plan", expanded=True):
         f"Avg pchange: {float(market_research.get('avg_pchange', 0.0)):.2f}% | "
         f"Volatility proxy: {float(market_research.get('volatility', 0.0)):.2f}"
     )
+    st.write(
+        f"Engine: {strategy_mode} | Regime hint used for ranking: {regime_hint} | "
+        f"Scanned symbols: {len(scan_symbols)}"
+    )
 
     st.write(
         f"Effective thresholds now -> Buy score: {effective_min_buy_score:.1f}, "
         f"Short score: {effective_min_short_score:.1f}, TP: {effective_tp_pct * 100.0:.2f}%"
     )
+    if explore_mode_on:
+        st.write(
+            f"Explore mode active -> risk scale {explore_risk_scale:.2f}x, qty cap {int(explore_qty_cap)}"
+        )
+    if strict_mode_on:
+        st.write(
+            f"Strict mode active -> risk scale {strict_risk_scale:.2f}x, qty cap {int(strict_qty_cap)}, "
+            f"+buy score {strict_buy_score_bonus:.1f}, +short score {strict_short_score_bonus:.1f}, "
+            f"max trades {effective_max_trades_day}, max positions {effective_max_open_positions}"
+        )
 
     notes = agent_plan.get("notes", []) if isinstance(agent_plan, dict) else []
     if notes:
