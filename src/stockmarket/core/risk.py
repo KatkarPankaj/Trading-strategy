@@ -23,6 +23,7 @@ from .models import (
     TradingStatus,
 )
 from .market_session import MarketSession
+from .risk_portfolio import PortfolioRiskLimits, check_portfolio_limits
 
 
 class OrderIntent(str, Enum):
@@ -109,6 +110,7 @@ class RiskContext:
     stop_loss: Any = None
     take_profit: Any = None
     signal: Signal | None = None
+    portfolio: Any = None  # PortfolioRiskState; required when portfolio limits are set
 
 
 def _is_aware(value: object) -> bool:
@@ -151,8 +153,24 @@ def _valid_count(value: object) -> bool:
 class RiskEngine:
     """Evaluate an order proposal before any portfolio/order state is mutated."""
 
-    def __init__(self, limits: RiskLimits | None) -> None:
+    def __init__(
+        self,
+        limits: RiskLimits | None,
+        portfolio_limits: PortfolioRiskLimits | None = None,
+    ) -> None:
+        if portfolio_limits is not None and not isinstance(
+            portfolio_limits, PortfolioRiskLimits
+        ):
+            raise TypeError("portfolio_limits must be a PortfolioRiskLimits")
         self._limits = limits
+        self._portfolio_limits = portfolio_limits
+
+    @property
+    def disabled_controls(self) -> dict[str, str]:
+        """Explicitly disabled portfolio controls and their recorded reasons."""
+        if self._portfolio_limits is None:
+            return {}
+        return dict(self._portfolio_limits.disabled)
 
     def evaluate_proposal(
         self,
@@ -623,6 +641,17 @@ class RiskEngine:
                 order,
                 context,
             )
+        if self._portfolio_limits is not None:
+            breach = check_portfolio_limits(
+                self._portfolio_limits,
+                context.portfolio,
+                order,
+                reference_price=float(context.reference_price),
+                notional=notional,
+                stop_loss=stop_loss,
+            )
+            if breach is not None:
+                return self._reject(breach[0], breach[1], order, context)
         return None
 
     def _protective_levels(

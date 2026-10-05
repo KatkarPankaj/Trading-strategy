@@ -32,9 +32,16 @@ class TradingConfig:
     allow_short: bool = False
     volume_ma_window: int = 20
     volume_spike_threshold: float = 1.2
+    vwap_price_source: str = "typical"
 
     @classmethod
     def from_json(cls, file_path: str | Path) -> "TradingConfig":
+        # core imports config
+        from .core.security import assert_no_secrets_in_config, validate_symbol
+
         path = Path(file_path)
         data = json.loads(path.read_text(encoding="utf-8"))
+        assert_no_secrets_in_config(data, str(path))
+        if "symbol" in data:
+            validate_symbol(data["symbol"])
         return cls(**data)

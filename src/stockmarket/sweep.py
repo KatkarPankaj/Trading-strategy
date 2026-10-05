@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from itertools import product
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -22,7 +22,7 @@ def run_parameter_sweep(
     take_profits: Iterable[float],
     volume_spikes: Iterable[float],
 ) -> pd.DataFrame:
-    rows: list[dict[str, float]] = []
+    rows: list[dict[str, Any]] = []
 
     range_values = sorted(set(int(v) for v in opening_ranges))
     stop_values = _unique_sorted(stop_losses)
@@ -52,6 +52,11 @@ def run_parameter_sweep(
             "return_pct": result.summary["return_pct"],
             "max_drawdown_pct": result.summary["max_drawdown_pct"],
             "profit_factor": result.summary["profit_factor"],
+            "expectancy": result.summary.get("expectancy"),
+            "maximum_drawdown": result.summary.get("maximum_drawdown"),
+            "sharpe_ratio": result.summary.get("sharpe_ratio"),
+            "sortino_ratio": result.summary.get("sortino_ratio"),
+            "exposure": result.summary.get("exposure"),
         }
         rows.append(row)
 
@@ -59,8 +64,11 @@ def run_parameter_sweep(
         return pd.DataFrame()
 
     out = pd.DataFrame(rows)
+    out["_profit_factor_rank"] = pd.to_numeric(
+        out["profit_factor"], errors="coerce"
+    ).fillna(0.0)
     out = out.sort_values(
-        by=["return_pct", "net_pnl", "profit_factor", "max_drawdown_pct"],
+        by=["return_pct", "net_pnl", "_profit_factor_rank", "max_drawdown_pct"],
         ascending=[False, False, False, False],
-    ).reset_index(drop=True)
+    ).drop(columns=["_profit_factor_rank"]).reset_index(drop=True)
     return out

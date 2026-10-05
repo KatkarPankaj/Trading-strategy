@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time as _time_mod
 import hashlib
-import pickle
 from datetime import datetime, date
 from pathlib import Path
 
@@ -27,8 +26,8 @@ _CACHE_TTL_HISTORICAL = 6 * 3600  # 6 hours
 
 def _cache_path(symbol: str, interval: str, period: str) -> Path:
     key = f"{symbol}_{interval}_{period}"
-    h = hashlib.md5(key.encode()).hexdigest()[:10]
-    return _CACHE_DIR / f"{h}.pkl"
+    h = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return _CACHE_DIR / f"{h}.parquet"
 
 
 def _cache_ttl(period: str) -> int:
@@ -47,8 +46,7 @@ def _load_cache(symbol: str, interval: str, period: str) -> pd.DataFrame | None:
         path.unlink(missing_ok=True)
         return None
     try:
-        with path.open("rb") as f:
-            return pickle.load(f)
+        return pd.read_parquet(path)
     except Exception:
         path.unlink(missing_ok=True)
         return None
@@ -57,8 +55,7 @@ def _load_cache(symbol: str, interval: str, period: str) -> pd.DataFrame | None:
 def _save_cache(symbol: str, interval: str, period: str, df: pd.DataFrame) -> None:
     path = _cache_path(symbol, interval, period)
     try:
-        with path.open("wb") as f:
-            pickle.dump(df, f)
+        df.to_parquet(path)
     except Exception:
         pass
 

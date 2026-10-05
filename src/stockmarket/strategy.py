@@ -17,10 +17,15 @@ def add_strategy_columns(df: pd.DataFrame, cfg: TradingConfig) -> pd.DataFrame:
     out = df.copy()
 
     out["date"] = out.index.date
-    out["typical_price"] = (out["high"] + out["low"] + out["close"]) / 3.0
+    if cfg.vwap_price_source == "typical":
+        out["vwap_price"] = (out["high"] + out["low"] + out["close"]) / 3.0
+    elif cfg.vwap_price_source == "close":
+        out["vwap_price"] = out["close"]
+    else:
+        raise ValueError("vwap_price_source must be 'typical' or 'close'")
 
     # VWAP is session-reset daily.
-    out["cum_tpv"] = (out["typical_price"] * out["volume"]
+    out["cum_tpv"] = (out["vwap_price"] * out["volume"]
                       ).groupby(out["date"]).cumsum()
     out["cum_vol"] = out["volume"].groupby(out["date"]).cumsum()
     out["vwap"] = out["cum_tpv"] / out["cum_vol"].where(out["cum_vol"] != 0)

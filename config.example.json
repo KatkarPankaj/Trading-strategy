@@ -19,5 +19,6 @@
     "slippage_pct": 0.0005,
     "allow_short": false,
     "volume_ma_window": 20,
-    "volume_spike_threshold": 1.2
+    "volume_spike_threshold": 1.2,
+    "vwap_price_source": "typical"
 }

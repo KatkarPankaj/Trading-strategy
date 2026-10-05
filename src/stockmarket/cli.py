@@ -15,10 +15,45 @@ from .core.market_session import MarketSession
 from .data import fetch_intraday_data, latest_bars
 from .strategy import add_strategy_columns
 from .sweep import run_parameter_sweep
+from .validation.robustness import default_parameter_variations, run_robustness_analysis
+from .validation.reports import write_validation_report
+from .validation.walk_forward import WalkForwardConfig, walk_forward_validate
 
 
 def _market_now(cfg: TradingConfig) -> datetime:
     return datetime.now(ZoneInfo(cfg.market_timezone))
+
+
+def _summarize_observed_data(df: pd.DataFrame, cfg: TradingConfig) -> dict[str, object]:
+    session = MarketSession.from_config(cfg)
+    local_index = df.index.tz_convert(session.zone)
+    interval_minutes: int | None = None
+    if cfg.interval.endswith("m"):
+        try:
+            interval_minutes = int(cfg.interval[:-1])
+        except ValueError:
+            interval_minutes = None
+    missing_bars: int | None = None
+    if interval_minutes is not None and interval_minutes > 0:
+        missing_bars = 0
+        for _, day_index in pd.Series(local_index, index=local_index).groupby(local_index.date):
+            deltas = day_index.diff().dropna()
+            cadence = pd.Timedelta(minutes=interval_minutes)
+            for delta in deltas:
+                if delta > cadence:
+                    missing_bars += max(1, int(round(delta / cadence)) - 1)
+    return {
+        "observations": int(len(df)),
+        "observed_sessions": int(len(set(local_index.date))),
+        "first_timestamp": local_index[0].isoformat(),
+        "last_timestamp": local_index[-1].isoformat(),
+        "missing_in_session_bars": missing_bars,
+        "gap_detection": (
+            f"same-date timestamp deltas above {interval_minutes} minute cadence"
+            if interval_minutes is not None
+            else "not available for non-minute interval"
+        ),
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -106,6 +141,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum allowed absolute drawdown as decimal (example: 0.08 for 8%)",
     )
 
+    validation_parser = subparsers.add_parser(
+        "validate",
+        help="Run time-series walk-forward and robustness validation",
+    )
+    validation_parser.add_argument("--config", default="config.json")
+    validation_parser.add_argument("--symbol", default=None)
+    validation_parser.add_argument(
+        "--period", default=None,
+        help="Historical lookback override; enough sessions are required for folds",
+    )
+    validation_parser.add_argument("--train-sessions", type=int, default=10)
+    validation_parser.add_argument("--test-sessions", type=int, default=3)
+    validation_parser.add_argument("--step-sessions", type=int, default=3)
+    validation_parser.add_argument("--gap-sessions", type=int, default=0)
+    validation_parser.add_argument(
+        "--window-mode", choices=["rolling", "expanding"], default="rolling")
+    validation_parser.add_argument("--min-train-trades", type=int, default=1)
+    validation_parser.add_argument("--opening-ranges", default="10,15,20")
+    validation_parser.add_argument(
+        "--stop-losses", default="0.003,0.004,0.005")
+    validation_parser.add_argument(
+        "--take-profits", default="0.006,0.008,0.01")
+    validation_parser.add_argument("--volume-spikes", default="1.1,1.2,1.4")
+    validation_parser.add_argument("--volume-ma-windows", default="20")
+    validation_parser.add_argument(
+        "--vwap-price-sources", default="typical,close")
+    validation_parser.add_argument(
+        "--commission-multipliers", default="0.5,1,1.5")
+    validation_parser.add_argument(
+        "--slippage-multipliers", default="0.5,1,1.5")
+    validation_parser.add_argument("--max-scenarios", type=int, default=30)
+    validation_parser.add_argument("--output-dir", default="outputs")
+
     return parser
 
 
@@ -124,11 +192,7 @@ def cmd_backtest(cfg: TradingConfig) -> int:
     result = run_backtest(df, cfg)
 
     print("Backtest Summary")
-    for k, v in result.summary.items():
-        if "pct" in k or k in {"win_rate", "return_pct"}:
-            print(f"- {k}: {v:.4%}")
-        else:
-            print(f"- {k}: {v:.4f}")
+    _print_backtest_summary(result)
 
     if result.trades.empty:
         print("No trades generated for the selected period/config.")
@@ -298,11 +362,7 @@ def cmd_replay_best(
     result = run_backtest(df, tuned_cfg)
 
     print("Replay Backtest Summary")
-    for k, v in result.summary.items():
-        if "pct" in k or k in {"win_rate", "return_pct"}:
-            print(f"- {k}: {v:.4%}")
-        else:
-            print(f"- {k}: {v:.4f}")
+    _print_backtest_summary(result)
 
     out_dir = Path("outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +380,106 @@ def cmd_replay_best(
     print(f"Saved replay trades: {trades_file}")
     print(f"Saved replay config: {config_file}")
     return 0
+
+
+def cmd_validate(
+    cfg: TradingConfig,
+    *,
+    period: str | None,
+    train_sessions: int,
+    test_sessions: int,
+    step_sessions: int,
+    gap_sessions: int,
+    window_mode: str,
+    min_train_trades: int,
+    opening_ranges: str,
+    stop_losses: str,
+    take_profits: str,
+    volume_spikes: str,
+    volume_ma_windows: str,
+    vwap_price_sources: str,
+    commission_multipliers: str,
+    slippage_multipliers: str,
+    max_scenarios: int,
+    output_dir: str,
+) -> int:
+    if period:
+        cfg.period = period
+    data = fetch_intraday_data(
+        cfg.symbol,
+        cfg.interval,
+        cfg.period,
+        tz=cfg.market_timezone,
+        session=MarketSession.from_config(cfg),
+    )
+    validation_config = WalkForwardConfig(
+        train_sessions=train_sessions,
+        test_sessions=test_sessions,
+        step_sessions=step_sessions,
+        gap_sessions=gap_sessions,
+        mode=window_mode,
+        min_train_trades=min_train_trades,
+    )
+    parameter_grid = {
+        "opening_range_minutes": tuple(_parse_int_list(opening_ranges)),
+        "stop_loss_pct": tuple(_parse_float_list(stop_losses)),
+        "take_profit_pct": tuple(_parse_float_list(take_profits)),
+        "volume_spike_threshold": tuple(_parse_float_list(volume_spikes)),
+        "volume_ma_window": tuple(_parse_int_list(volume_ma_windows)),
+        "vwap_price_source": tuple(
+            value.strip()
+            for value in vwap_price_sources.split(",")
+            if value.strip()
+        ),
+    }
+    walk_forward = walk_forward_validate(
+        data,
+        cfg,
+        validation_config,
+        parameter_grid=parameter_grid,
+    )
+    robustness = run_robustness_analysis(
+        data,
+        cfg,
+        validation_config,
+        parameter_variations=default_parameter_variations(cfg),
+        commission_multipliers=_parse_float_list(commission_multipliers),
+        slippage_multipliers=_parse_float_list(slippage_multipliers),
+        max_scenarios=max_scenarios,
+    )
+    report_paths = write_validation_report(
+        output_dir,
+        symbol=cfg.symbol,
+        config=cfg,
+        walk_forward=walk_forward,
+        robustness=robustness,
+        data_source=f"Yahoo Finance: {cfg.symbol} {cfg.interval} {cfg.period}",
+        data_summary=_summarize_observed_data(data, cfg),
+        report_id=_market_now(cfg).strftime("%Y%m%d_%H%M%S_%f"),
+    )
+    print("Walk-forward out-of-sample summary")
+    for key, value in walk_forward.aggregate_oos_metrics.items():
+        print(f"- {key}: {'N/A' if value is None else value}")
+    evaluated_folds = sum(
+        fold.status == "evaluated" for fold in walk_forward.folds)
+    print(f"Evaluated folds: {evaluated_folds}/{len(walk_forward.folds)}")
+    print(f"Robustness scenarios: {len(robustness.scenarios)}")
+    for kind, path in report_paths.items():
+        print(f"Saved {kind} report: {path}")
+    return 0
+
+
+def _print_backtest_summary(result) -> None:
+    for key, value in result.summary.items():
+        if value is None:
+            status = result.summary.get(f"{key}_status", "undefined")
+            print(f"- {key}: N/A ({status})")
+        elif key in {"win_rate", "return_pct", "total_return", "exposure", "max_drawdown_pct", "maximum_drawdown"}:
+            print(f"- {key}: {value:.4%}")
+        elif isinstance(value, (int, float)):
+            print(f"- {key}: {value:.4f}")
+        else:
+            print(f"- {key}: {value}")
 
 
 def main() -> int:
@@ -347,6 +507,27 @@ def main() -> int:
             rank=args.rank,
             min_trades=args.min_trades,
             max_drawdown_pct=args.max_drawdown_pct,
+        )
+    if args.command == "validate":
+        return cmd_validate(
+            cfg,
+            period=args.period,
+            train_sessions=args.train_sessions,
+            test_sessions=args.test_sessions,
+            step_sessions=args.step_sessions,
+            gap_sessions=args.gap_sessions,
+            window_mode=args.window_mode,
+            min_train_trades=args.min_train_trades,
+            opening_ranges=args.opening_ranges,
+            stop_losses=args.stop_losses,
+            take_profits=args.take_profits,
+            volume_spikes=args.volume_spikes,
+            volume_ma_windows=args.volume_ma_windows,
+            vwap_price_sources=args.vwap_price_sources,
+            commission_multipliers=args.commission_multipliers,
+            slippage_multipliers=args.slippage_multipliers,
+            max_scenarios=args.max_scenarios,
+            output_dir=args.output_dir,
         )
 
     parser.error("Unknown command")

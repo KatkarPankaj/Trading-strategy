@@ -1,0 +1,147 @@
+# Run: docker compose up --build        (needs .env and ./secrets/* -- see .env.example)
+# The stack is paper-only: TRADING_MODE and ENABLE_LIVE_TRADING are fixed here on purpose.
+# Order: db healthy -> migrate (one-shot) -> app. Backups: docker compose --profile backup up -d backup
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trading}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    build: .
+    image: trading-platform:local
+    restart: "no"
+    command: [ "python", "-m", "stockmarket.ops", "migrate" ]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+    secrets:
+      - database_url
+    logging: *default-logging
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    build: .
+    image: trading-platform:local
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV:-paper}
+      TRADING_MODE: paper
+      ENABLE_LIVE_TRADING: "false"
+      BASE_CURRENCY: ${BASE_CURRENCY:-USD}
+      MARKETS: ${MARKETS:-US}
+      DATA_PROVIDER: ${DATA_PROVIDER:-mock}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENTRY_WINDOW_START: ${ENTRY_WINDOW_START:?set ENTRY_WINDOW_START in .env}
+      ENTRY_WINDOW_END: ${ENTRY_WINDOW_END:?set ENTRY_WINDOW_END in .env}
+      MAX_POSITION_QUANTITY: ${MAX_POSITION_QUANTITY:?set MAX_POSITION_QUANTITY in .env}
+      MAX_ORDER_NOTIONAL: ${MAX_ORDER_NOTIONAL:?set MAX_ORDER_NOTIONAL in .env}
+      PAPER_STARTING_CASH: ${PAPER_STARTING_CASH:-100000}
+      DATABASE_URL_FILE: /run/secrets/database_url
+      API_TOKEN_FILE: /run/secrets/api_token
+      AUTO_MIGRATE: "false"
+    secrets:
+      - database_url
+      - api_token
+    ports:
+      - "127.0.0.1:8000:8000" # loopback only; put a TLS-terminating proxy in front for remote access
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.cache
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # Optional periodic PostgreSQL dumps with retention (BACKUP_KEEP, BACKUP_INTERVAL_SECONDS).
+  backup:
+    image: postgres:16-alpine
+    profiles: [ "backup" ]
+    restart: unless-stopped
+    entrypoint: [ "/bin/sh", "/deploy/backup.sh" ]
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-trading_app}
+      PGDATABASE: ${POSTGRES_DB:-trading}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    depends_on:
+      db:
+        condition: service_healthy
+    secrets:
+      - db_password
+    volumes:
+      - ./deploy/backup.sh:/deploy/backup.sh:ro
+      - backups:/backups
+    logging: *default-logging
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # Optional; nothing in the platform requires it yet. Enable with: docker compose --profile redis up
+  redis:
+    image: redis:7-alpine
+    profiles: [ "redis" ]
+    restart: unless-stopped
+    command: [ "redis-server", "--save", "", "--appendonly", "no" ]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  database_url:
+    file: ./secrets/database_url.txt
+  api_token:
+    file: ./secrets/api_token.txt
+
+volumes:
+  pgdata:
+  backups:

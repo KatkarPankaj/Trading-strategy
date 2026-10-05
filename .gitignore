@@ -1,5 +1,23 @@
 __pycache__/
 *.pyc
 .venv/
+venv/
+
+# Secrets and local environment: never commit
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+*.secret
+
+# Local state and caches
 outputs/
+.cache/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm

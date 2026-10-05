@@ -2,6 +2,11 @@ pandas==2.2.2
 numpy==2.0.2
 yfinance==0.2.55
 python-dateutil==2.9.0.post0
-streamlit>=1.35.0
-pytz>=2024.1
-nsepython>=2.97
+streamlit==1.65.0
+pytz==2026.5
+nsepython==2.97
+pyarrow==25.0.1
+fastapi==0.110.1
+uvicorn==0.25.0
+pydantic==2.12.3
+psycopg[binary]==3.2.3

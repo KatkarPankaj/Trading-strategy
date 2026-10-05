@@ -229,6 +229,30 @@ This command exports:
 - `replay_trades_*.csv` (detailed trades)
 - `replay_config_*.json` (exact config used)
 
+## Walk-Forward Validation and Robustness
+
+Run offline chronological train/test validation for the configured symbol:
+```powershell
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe -m stockmarket.cli validate --config config.json --period 60d
+```
+
+Use rolling or expanding training windows, an optional session gap, and explicit parameter grids:
+```powershell
+.\.venv\Scripts\python.exe -m stockmarket.cli validate --config config.json --period 60d --window-mode rolling --train-sessions 20 --test-sessions 5 --step-sessions 5 --gap-sessions 1 --min-train-trades 5
+```
+
+For each fold, parameters are selected from training sessions only and then frozen for the subsequent out-of-sample sessions. OOS windows do not overlap. The command also runs one-factor robustness scenarios for opening range, stop loss, target, volume settings, VWAP price source, commission, and slippage. `typical` remains the default VWAP source; `close` is an experimental sensitivity case and is not selected into dashboard settings.
+
+Validation writes three files under `outputs/` (or `--output-dir`):
+- `validation_<symbol>_<run>.json`: versioned machine-readable report.
+- `validation_<symbol>_<run>.csv`: fold/scenario rows with separately prefixed train and OOS metrics.
+- `validation_<symbol>_<run>.md`: human-readable report.
+
+Reports include total return, win rate, profit factor, expectancy, maximum drawdown, daily-equity Sharpe and Sortino, average win/loss, consecutive wins/losses, trade count, exposure, and fold-level/aggregate OOS results. Undefined metrics are represented as `null` in JSON rather than `Infinity` or `NaN`.
+
+The validation backtest uses a signal-at-close, fill-at-next-observed-bar-open model with adverse percentage slippage. Stop/target checks begin after that fill; if both are crossed within a later OHLC bar, stop is assumed first. Input bars with invalid timestamps or OHLCV values are rejected. Missing bars are not synthesized. Yahoo Finance data and these simulated fills are research assumptions, not guarantees of executable or profitable results. Existing dashboard learning/self-tuning and paper execution are unchanged and are not part of this validation command.
+
 ## Notes
 - Yahoo intraday history has period/interval limits. If data is missing, reduce `period` or change interval.
 - Yahoo can temporarily rate-limit requests. If this happens, wait and retry, reduce request frequency, or use a different symbol/time window.

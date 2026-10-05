@@ -1,0 +1,32 @@
+[Unit]
+Description=Trading platform API (paper by default)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trading
+Group=trading
+WorkingDirectory=/opt/trading
+# Secrets and settings live outside the repository and are readable only by the service user (chmod 600).
+EnvironmentFile=/etc/trading/trading.env
+Environment=PYTHONPATH=/opt/trading/src
+ExecStartPre=/opt/trading/.venv/bin/python -m stockmarket.ops check-config
+ExecStartPre=/opt/trading/.venv/bin/python -m stockmarket.ops migrate
+ExecStart=/opt/trading/.venv/bin/uvicorn stockmarket.api.bootstrap:create_app_from_env --factory --host 127.0.0.1 --port 8000 --workers 1 --no-server-header
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trading /var/log/trading
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
