@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import time
-
 import pandas as pd
 
 from .config import TradingConfig
+from .core.market_session import MarketSession
 
 
 def _interval_minutes(interval: str) -> int:
@@ -53,8 +52,10 @@ def add_strategy_columns(df: pd.DataFrame, cfg: TradingConfig) -> pd.DataFrame:
     out["or_low"] = opening_low
     out["valid_after_open"] = valid_after_open
 
-    cutoff = time.fromisoformat(cfg.entry_cutoff_time)
-    out["before_cutoff"] = [ts.time() <= cutoff for ts in out.index]
+    session = MarketSession.from_config(cfg)
+    out["before_cutoff"] = [
+        session.is_before_entry_cutoff(ts.to_pydatetime()) for ts in out.index
+    ]
 
     close_above_vwap = out["close"].gt(out["vwap"]).fillna(False)
     close_below_vwap = out["close"].lt(out["vwap"]).fillna(False)

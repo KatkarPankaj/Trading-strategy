@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pytz
 import streamlit as st
 import streamlit.components.v1 as components
+from stockmarket.config import TradingConfig
+from stockmarket.core import MarketSession
 
 try:
     from nsepython import nsefetch
@@ -24,10 +25,9 @@ except Exception:
     nsefetch = None
 
 
-IST = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN = time(9, 15)
-ENTRY_CUTOFF = time(13, 30)
-SQUARE_OFF = time(15, 15)
+SIMPLE_SESSION = MarketSession.from_config(
+    TradingConfig(), entry_starts_at_open=True
+)
 
 WATCHLIST = [
     "IEX.NS",
@@ -180,7 +180,7 @@ def _write_state_snapshot(payload: dict[str, Any]) -> None:
 
 
 def ist_now() -> datetime:
-    return datetime.now(pytz.utc).astimezone(IST)
+    return SIMPLE_SESSION.now()
 
 
 def _auto_refresh(seconds: int) -> None:
@@ -737,8 +737,7 @@ def _in_entry_window() -> bool:
     now = ist_now()
     if now.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
-    t = now.time()
-    return MARKET_OPEN <= t <= ENTRY_CUTOFF
+    return SIMPLE_SESSION.is_entry_allowed(now)
 
 
 def _estimate_regime_from_symbols(symbols: list[str]) -> dict[str, float | str]:
@@ -1094,7 +1093,7 @@ def _auto_paper_cycle(
 
     if (
         enable_profit_guard
-        and ist_now().time() >= profit_guard_after
+        and SIMPLE_SESSION.is_at_or_after(ist_now(), profit_guard_after)
         and float(st.session_state.get("s_peak_open_pnl", 0.0)) > 0.0
         and st.session_state.get("s_profit_guard_triggered_day", "") != today
     ):
@@ -1132,7 +1131,7 @@ def _auto_paper_cycle(
             )
 
     # Intraday square-off for all open positions.
-    if ist_now().time() >= SQUARE_OFF:
+    if SIMPLE_SESSION.is_square_off(ist_now()):
         for sym, h in list(st.session_state.s_holdings.items()):
             qty = int(h.get("qty", 0))
             if qty <= 0:

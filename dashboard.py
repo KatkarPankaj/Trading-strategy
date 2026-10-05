@@ -5,17 +5,18 @@ Run with: streamlit run dashboard.py
 
 import streamlit.components.v1 as components
 import streamlit as st
-import pytz
 import pandas as pd
 from typing import Any
 from pathlib import Path
 from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 import json
 import time as pytime
 import sys
 from stockmarket.config import TradingConfig
 from stockmarket.data import _cache_path, fetch_intraday_data
 from stockmarket.strategy import add_strategy_columns
+from stockmarket.core import MarketSession
 
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -27,13 +28,7 @@ except Exception:
     nsefetch = None
 
 
-IST = pytz.timezone("Asia/Kolkata")
-
-MARKET_OPEN = time(9, 15)
-OR_END = time(9, 30)
-ENTRY_CUTOFF = time(13, 30)
-SQUARE_OFF = time(15, 15)
-MARKET_CLOSE = time(15, 30)
+DEFAULT_SESSION = MarketSession.from_config(TradingConfig())
 
 WATCHLIST = [
     "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS",
@@ -121,41 +116,40 @@ MAX_BUY_NOTIONAL_PER_STOCK = 50000.0
 
 
 def ist_now() -> datetime:
-    return datetime.now(pytz.utc).astimezone(IST)
+    return DEFAULT_SESSION.now()
 
 
 def market_now(tz_name: str) -> datetime:
-    try:
-        tz = pytz.timezone(tz_name)
-    except Exception:
-        tz = IST
-    return datetime.now(pytz.utc).astimezone(tz)
+    return MarketSession.from_config(
+        TradingConfig(market_timezone=tz_name)
+    ).now()
 
 
 def format_market_timestamp(ts: pd.Timestamp | datetime, tz_name: str) -> str:
-    try:
-        tz = pytz.timezone(tz_name)
-    except Exception:
-        tz = IST
-
     dt = pd.Timestamp(ts)
     if dt.tzinfo is None:
-        dt = dt.tz_localize(tz)
+        dt = dt.tz_localize(ZoneInfo(tz_name))
     else:
-        dt = dt.tz_convert(tz)
+        dt = dt.tz_convert(ZoneInfo(tz_name))
     return dt.strftime("%Y-%m-%d %H:%M %Z")
 
 
-def market_phase(t: time) -> tuple[str, str, str]:
-    if t < MARKET_OPEN:
+def market_phase(
+    at: datetime, session: MarketSession
+) -> tuple[str, str, str]:
+    if session.is_before_open(at):
         return "Pre-Market", "Prepare watchlist. Do not enter trades yet.", "#6c757d"
-    if t <= OR_END:
-        return "Opening Range Formation", "Observe 9:15-9:30 opening range. No entries yet.", "#fd7e14"
-    if t <= ENTRY_CUTOFF:
+    if session.is_opening_range(at):
+        return (
+            "Opening Range Formation",
+            f"Observe {session.market_open:%H:%M}-{session.opening_range_end:%H:%M} opening range. No entries yet.",
+            "#fd7e14",
+        )
+    if session.is_entry_allowed(at):
         return "Active Trading Window", "Primary entry window for intraday setups is open.", "#198754"
-    if t <= SQUARE_OFF:
+    if session.is_late_session(at):
         return "Late Session", "Avoid fresh entries. Manage open trades.", "#ffc107"
-    if t <= MARKET_CLOSE:
+    if session.is_square_off(at) and not session.is_market_closed(at):
         return "Square-Off Zone", "Close all intraday positions.", "#dc3545"
     return "Market Closed", "Review session and prepare next day plan.", "#6c757d"
 
@@ -229,22 +223,18 @@ def _auto_refresh(seconds: int, hard_reload_fallback: bool = False) -> None:
 
 
 def _in_entry_window(cfg: TradingConfig) -> bool:
-    # No entries before 9:30 — Opening Range (9:15–9:30) is observation-only.
-    now_t = market_now(cfg.market_timezone).time()
-    return OR_END <= now_t <= _parse_time(cfg.entry_cutoff_time, ENTRY_CUTOFF)
+    session = MarketSession.from_config(cfg)
+    return session.is_entry_allowed(session.now())
 
 
 def _in_square_off_window(cfg: TradingConfig) -> bool:
-    now_t = market_now(cfg.market_timezone).time()
-    return now_t >= _parse_time(cfg.square_off_time, SQUARE_OFF)
+    session = MarketSession.from_config(cfg)
+    return session.is_square_off(session.now())
 
 
 def _in_auto_exit_window(cfg: TradingConfig) -> bool:
-    # Use exchange time (IST) for deterministic auto square-off behavior.
-    now_dt = ist_now()
-    close_dt = datetime.combine(now_dt.date(), MARKET_CLOSE, tzinfo=IST)
-    auto_exit_dt = close_dt - timedelta(minutes=10)
-    return now_dt >= auto_exit_dt
+    session = MarketSession.from_config(cfg)
+    return session.is_auto_exit_window(session.now(), minutes_before_close=10)
 
 
 def _today_buy_count() -> int:
@@ -267,9 +257,13 @@ def _scan_target_count(
     if not enable_expansion:
         return base_top_n, False
 
-    now_t = market_now(cfg.market_timezone).time()
-    cutoff_t = _parse_time(cfg.entry_cutoff_time, ENTRY_CUTOFF)
-    expansion_active = expansion_review_time <= now_t <= cutoff_t and _today_buy_count() == 0
+    session = MarketSession.from_config(cfg)
+    expansion_active = (
+        session.is_between_local_times(
+            session.now(), expansion_review_time, session.entry_cutoff
+        )
+        and _today_buy_count() == 0
+    )
     return (expanded_top_n if expansion_active else base_top_n), expansion_active
 
 
@@ -708,6 +702,7 @@ def _fetch_live_plan(
             cfg.interval,
             cfg.period,
             tz=cfg.market_timezone,
+            session=MarketSession.from_config(cfg),
             max_retries=1,
             backoff_base=1.0,
         )
@@ -1143,15 +1138,21 @@ def _expected_edge_after_costs(entry_price: float, qty: int, plan: dict[str, Any
     return float(expected_net_edge), float(rr)
 
 
-def _passes_buy_quality_gate(score: float, entry_price: float, qty: int, plan: dict[str, Any]) -> tuple[bool, str]:
+def _passes_buy_quality_gate(
+    score: float,
+    entry_price: float,
+    qty: int,
+    plan: dict[str, Any],
+    cfg: TradingConfig,
+) -> tuple[bool, str]:
     """Gate auto-buys using score, expected edge after costs, and reward/risk."""
     min_score = float(st.session_state.get("auto_min_score", 55.0))
     min_edge = float(st.session_state.get("auto_min_expected_edge_rs", 40.0))
     min_rr = float(st.session_state.get("auto_min_rr", 1.1))
 
     # Late-session relax: after noon and before entry cutoff, ease score gate slightly.
-    now_t = ist_now().time()
-    if time(12, 0) <= now_t <= ENTRY_CUTOFF:
+    session = MarketSession.from_config(cfg)
+    if session.is_late_entry_window(session.now()):
         min_score = max(35.0, min_score - 5.0)
 
     if float(score) < min_score:
@@ -1215,7 +1216,7 @@ def _add_dummy_funds(amount: float) -> None:
         st.session_state.paper_starting_cash) + float(amount)
     st.session_state.paper_trade_log.append(
         {
-            "timestamp_ist": market_now("Asia/Kolkata").strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp_ist": market_now(DEFAULT_SESSION.timezone).strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": "CASH",
             "side": "FUND_ADD",
             "qty": 0,
@@ -1247,6 +1248,7 @@ def _refresh_open_holding_prices(cfg: TradingConfig, data_source: str) -> None:
                     cfg.interval,
                     "1d",
                     tz=cfg.market_timezone,
+                    session=MarketSession.from_config(cfg),
                     max_retries=1,
                     backoff_base=1.0,
                 )
@@ -1301,7 +1303,7 @@ def _update_paper_price(symbol: str, price: float | None) -> None:
         return
     st.session_state.paper_prices[symbol] = float(price)
     st.session_state.paper_price_updates[symbol] = market_now(
-        "Asia/Kolkata").strftime("%Y-%m-%d %H:%M:%S IST")
+        DEFAULT_SESSION.timezone).strftime("%Y-%m-%d %H:%M:%S %Z")
     _save_paper_state()
 
 
@@ -1521,6 +1523,7 @@ def fetch_signals(symbol: str, cfg: TradingConfig) -> tuple[pd.DataFrame | None,
             cfg.interval,
             cfg.period,
             tz=cfg.market_timezone,
+            session=MarketSession.from_config(cfg),
         )
         sdf = add_strategy_columns(df, cfg)
         return sdf, cache_age_sec, None
@@ -1610,6 +1613,7 @@ def scan_top_stocks(
                 scan_cfg.interval,
                 scan_cfg.period,
                 tz=scan_cfg.market_timezone,
+                session=MarketSession.from_config(scan_cfg),
                 max_retries=1,
                 backoff_base=1.0,
             )
@@ -1728,10 +1732,8 @@ def _auto_trade_engine(
             elif ltp <= position_sl:
                 exit_reason = f"SL hit @ Rs {ltp:.2f} (stop Rs {position_sl:.2f})"
             elif _in_square_off_window(cfg):
-                # Square-off window starts at 15:15
                 exit_reason = f"Square-off time @ Rs {ltp:.2f}"
             elif _in_auto_exit_window(cfg):
-                # Failsafe: 10 min before close (15:20)
                 exit_reason = f"Auto square-off before close @ Rs {ltp:.2f}"
 
             if exit_reason:
@@ -2056,6 +2058,7 @@ def _auto_trade_engine(
                 entry_price=price,
                 qty=buy_qty,
                 plan=live_plan,
+                cfg=cfg,
             )
             if not passes_gate:
                 actions.append(
@@ -2229,7 +2232,8 @@ st.markdown("### 📈 NSE/BSE Intraday Paper-Testing Dashboard")
 
 boot_cfg = load_config("config.json")
 now_market = market_now(boot_cfg.market_timezone)
-phase, advice, phase_color = market_phase(now_market.time())
+boot_session = MarketSession.from_config(boot_cfg)
+phase, advice, phase_color = market_phase(now_market, boot_session)
 
 c1, c2, c3 = st.columns([1.2, 1.4, 2.4])
 with c1:
@@ -2839,9 +2843,10 @@ if "scan_errors" not in st.session_state:
 if "top_scan_requested_n" not in st.session_state:
     st.session_state.top_scan_requested_n = 5
 
-top5_now_t = market_now(cfg.market_timezone).time()
-top5_cutoff = _parse_time(cfg.entry_cutoff_time, ENTRY_CUTOFF)
-top5_allowed_now = top5_now_t <= top5_cutoff
+active_session = MarketSession.from_config(cfg)
+top5_now = active_session.now()
+top5_cutoff = active_session.entry_cutoff
+top5_allowed_now = active_session.is_before_entry_cutoff(top5_now)
 has_open_positions = not top_holdings_df.empty
 scan_target_n, scan_expansion_active = _scan_target_count(
     cfg=cfg,

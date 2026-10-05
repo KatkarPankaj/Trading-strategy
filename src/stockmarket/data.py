@@ -9,6 +9,9 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+from .config import TradingConfig
+from .core.market_session import MarketSession
+
 
 REQUIRED_COLUMNS = ["open", "high", "low", "close", "volume"]
 
@@ -98,14 +101,18 @@ def fetch_intraday_data(
     symbol: str,
     interval: str,
     period: str,
-    tz: str = "Asia/Kolkata",
+    tz: str | None = None,
+    session: MarketSession | None = None,
     max_retries: int = 4,
     backoff_base: float = 5.0,
 ) -> pd.DataFrame:
+    active_session = session or MarketSession.from_config(
+        TradingConfig(market_timezone=tz or TradingConfig().market_timezone)
+    )
     # 1. Check disk cache first
     cached = _load_cache(symbol, interval, period)
     if cached is not None:
-        return cached
+        return _filter_to_session(cached, active_session)
 
     # 2. Download with retry
     df = _download_yahoo(
@@ -124,25 +131,40 @@ def fetch_intraday_data(
         raise ValueError(f"Missing required columns from provider: {missing}")
 
     if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC").tz_convert(tz)
+        df.index = df.index.tz_localize(
+            "UTC").tz_convert(active_session.timezone)
     else:
-        df.index = df.index.tz_convert(tz)
+        df.index = df.index.tz_convert(active_session.timezone)
 
     df = df.sort_index()
     df = df.loc[:, REQUIRED_COLUMNS]
     df = df[~df.index.duplicated(keep="first")]
 
-    # Keep regular session only (NSE/BSE cash session).
-    df = df.between_time("09:15", "15:30")
-
-    if df.empty:
-        raise ValueError(
-            "Data exists but no rows are in regular market session 09:15-15:30 IST")
+    df = _filter_to_session(df, active_session)
 
     # 3. Save to cache before returning
     _save_cache(symbol, interval, period, df)
 
     return df
+
+
+def _filter_to_session(
+    df: pd.DataFrame,
+    session: MarketSession,
+) -> pd.DataFrame:
+    normalized = df.copy()
+    if normalized.index.tz is None:
+        normalized.index = normalized.index.tz_localize("UTC")
+    normalized.index = normalized.index.tz_convert(session.timezone)
+    normalized = normalized.between_time(
+        session.market_open,
+        session.market_close,
+        inclusive="both",
+    )
+    if normalized.empty:
+        raise ValueError(
+            "Data exists but no rows are within the configured market session")
+    return normalized
 
 
 def latest_bars(df: pd.DataFrame, count: int = 5) -> pd.DataFrame:

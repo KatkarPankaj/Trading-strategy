@@ -11,6 +11,9 @@ class TradingConfig:
     interval: str = "5m"
     period: str = "30d"
     market_timezone: str = "Asia/Kolkata"
+    market_open_time: str = "09:15"
+    market_close_time: str = "15:30"
+    late_entry_start_time: str = "12:00"
 
     opening_range_minutes: int = 15
     entry_cutoff_time: str = "13:30"

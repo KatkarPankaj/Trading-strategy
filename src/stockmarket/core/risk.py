@@ -8,7 +8,6 @@ from enum import Enum
 from math import isclose, isfinite
 from typing import Any
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from .models import (
     Instrument,
@@ -23,6 +22,7 @@ from .models import (
     SignalSide,
     TradingStatus,
 )
+from .market_session import MarketSession
 
 
 class OrderIntent(str, Enum):
@@ -39,12 +39,13 @@ class RiskLimits:
     max_open_positions: int
     max_trades_per_day: int
     cash_requirement_rate: float
-    entry_window: tuple[time, time] | None
+    entry_window: tuple[time, time] | None = None
     minimum_reward_risk: float | None = None
     minimum_expected_edge: float | None = None
     require_stop_loss: bool = True
     require_take_profit: bool = True
     max_market_data_age: timedelta = field(default=timedelta(minutes=5))
+    market_session: MarketSession | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -84,6 +85,10 @@ class RiskLimits:
                 raise ValueError(
                     "entry_window must be a pair of timezone-naive local times"
                 )
+        if self.market_session is not None and not isinstance(
+            self.market_session, MarketSession
+        ):
+            raise TypeError("market_session must be a MarketSession or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,21 +486,31 @@ class RiskEngine:
                 order,
                 context,
             )
-        if self._limits.entry_window is None:
+        if self._limits.market_session is None and self._limits.entry_window is None:
             return self._reject(
                 "ENTRY_WINDOW_UNCONFIGURED",
                 "An instrument-local entry window must be configured for new entries.",
                 order,
                 context,
             )
-        local_time = context.assessed_at.astimezone(
-            ZoneInfo(instrument.timezone)
-        ).time().replace(tzinfo=None)
-        window_start, window_end = self._limits.entry_window
+        session = self._limits.market_session
         in_window = (
-            window_start <= local_time <= window_end
-            if window_start <= window_end
-            else local_time >= window_start or local_time <= window_end
+            session.is_entry_allowed(context.assessed_at)
+            if session is not None
+            else MarketSession(
+                timezone=instrument.timezone,
+                market_open=self._limits.entry_window[0],
+                opening_range_end=self._limits.entry_window[0],
+                entry_cutoff=self._limits.entry_window[1],
+                square_off=self._limits.entry_window[1],
+                market_close=self._limits.entry_window[1],
+                entry_start=self._limits.entry_window[0],
+                late_entry_start=self._limits.entry_window[0],
+            ).is_between_local_times(
+                context.assessed_at,
+                self._limits.entry_window[0],
+                self._limits.entry_window[1],
+            )
         )
         if not in_window:
             return self._reject(

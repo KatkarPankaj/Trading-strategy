@@ -11,6 +11,7 @@ import pandas as pd
 
 from .backtest import run_backtest
 from .config import TradingConfig
+from .core.market_session import MarketSession
 from .data import fetch_intraday_data, latest_bars
 from .strategy import add_strategy_columns
 from .sweep import run_parameter_sweep
@@ -116,8 +117,10 @@ def _load_config(config_path: str, symbol_override: str | None) -> TradingConfig
 
 
 def cmd_backtest(cfg: TradingConfig) -> int:
-    df = fetch_intraday_data(cfg.symbol, cfg.interval,
-                             cfg.period, tz=cfg.market_timezone)
+    df = fetch_intraday_data(
+        cfg.symbol, cfg.interval, cfg.period,
+        tz=cfg.market_timezone, session=MarketSession.from_config(cfg)
+    )
     result = run_backtest(df, cfg)
 
     print("Backtest Summary")
@@ -142,8 +145,10 @@ def cmd_backtest(cfg: TradingConfig) -> int:
 
 
 def cmd_signals(cfg: TradingConfig, bars: int) -> int:
-    df = fetch_intraday_data(cfg.symbol, cfg.interval,
-                             cfg.period, tz=cfg.market_timezone)
+    df = fetch_intraday_data(
+        cfg.symbol, cfg.interval, cfg.period,
+        tz=cfg.market_timezone, session=MarketSession.from_config(cfg)
+    )
     sdf = add_strategy_columns(df, cfg)
     view_cols = [
         "open",
@@ -179,8 +184,10 @@ def cmd_sweep(
     volume_spikes: str,
     top: int,
 ) -> int:
-    df = fetch_intraday_data(cfg.symbol, cfg.interval,
-                             cfg.period, tz=cfg.market_timezone)
+    df = fetch_intraday_data(
+        cfg.symbol, cfg.interval, cfg.period,
+        tz=cfg.market_timezone, session=MarketSession.from_config(cfg)
+    )
 
     table = run_parameter_sweep(
         df=df,
@@ -286,6 +293,7 @@ def cmd_replay_best(
         tuned_cfg.interval,
         tuned_cfg.period,
         tz=tuned_cfg.market_timezone,
+        session=MarketSession.from_config(tuned_cfg),
     )
     result = run_backtest(df, tuned_cfg)
 

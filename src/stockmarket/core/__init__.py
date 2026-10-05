@@ -31,6 +31,7 @@ from .orders import (
     OrderManager,
     OrderSubmissionResult,
 )
+from .market_session import MarketSession
 
 __all__ = [
     "AssetClass",
@@ -43,6 +44,7 @@ __all__ = [
     "OrderManager",
     "OrderSubmissionResult",
     "InvalidOrderTransition",
+    "MarketSession",
     "PaperAccountingMode",
     "PaperAction",
     "PaperExecutionError",

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from .config import TradingConfig
+from .core.market_session import MarketSession
 from .strategy import add_strategy_columns
 
 
@@ -37,7 +38,7 @@ def _position_size(entry_price: float, capital: float, cfg: TradingConfig) -> in
 def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
     data = add_strategy_columns(df, cfg)
 
-    square_off_t = time.fromisoformat(cfg.square_off_time)
+    market_session = MarketSession.from_config(cfg)
     initial_capital = cfg.starting_capital
     capital = initial_capital
 
@@ -109,7 +110,7 @@ def run_backtest(df: pd.DataFrame, cfg: TradingConfig) -> BacktestResult:
                     (1 - cfg.slippage_pct if side ==
                      "long" else 1 + cfg.slippage_pct)
 
-            if exit_reason is None and ts.time() >= square_off_t:
+            if exit_reason is None and market_session.is_square_off(ts.to_pydatetime()):
                 exit_reason = "square_off"
                 exit_price = raw_close * \
                     (1 - cfg.slippage_pct if side ==

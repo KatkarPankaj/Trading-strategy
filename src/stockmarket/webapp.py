@@ -8,6 +8,7 @@ import streamlit as st
 
 from stockmarket.backtest import run_backtest
 from stockmarket.config import TradingConfig
+from stockmarket.core.market_session import MarketSession
 from stockmarket.data import fetch_intraday_data
 from stockmarket.strategy import add_strategy_columns
 from stockmarket.sweep import run_parameter_sweep
@@ -19,8 +20,19 @@ st.caption("Personal-use intraday research UI")
 
 
 @st.cache_data(ttl=300)
-def _load_data(symbol: str, interval: str, period: str, tz: str) -> pd.DataFrame:
-    return fetch_intraday_data(symbol, interval, period, tz=tz)
+def _load_data(
+    symbol: str,
+    interval: str,
+    period: str,
+    session: MarketSession,
+) -> pd.DataFrame:
+    return fetch_intraday_data(
+        symbol,
+        interval,
+        period,
+        tz=session.timezone,
+        session=session,
+    )
 
 
 def _save_csv(df: pd.DataFrame, prefix: str, symbol: str) -> Path:
@@ -59,8 +71,12 @@ st.divider()
 if run_backtest_btn:
     try:
         with st.spinner("Fetching data and running backtest..."):
-            df = _load_data(cfg.symbol, cfg.interval,
-                            cfg.period, cfg.market_timezone)
+            df = _load_data(
+                cfg.symbol,
+                cfg.interval,
+                cfg.period,
+                MarketSession.from_config(cfg),
+            )
             result = run_backtest(df, cfg)
 
         m1, m2, m3, m4, m5, m6 = st.columns(6)
@@ -84,8 +100,12 @@ if run_backtest_btn:
 if show_signals_btn:
     try:
         with st.spinner("Fetching data and computing signals..."):
-            df = _load_data(cfg.symbol, cfg.interval,
-                            cfg.period, cfg.market_timezone)
+            df = _load_data(
+                cfg.symbol,
+                cfg.interval,
+                cfg.period,
+                MarketSession.from_config(cfg),
+            )
             sdf = add_strategy_columns(df, cfg)
 
         cols = [
@@ -120,8 +140,12 @@ if run_sweep_btn:
     if st.button("Execute Sweep", use_container_width=True):
         try:
             with st.spinner("Running parameter sweep..."):
-                df = _load_data(cfg.symbol, cfg.interval,
-                                cfg.period, cfg.market_timezone)
+                df = _load_data(
+                    cfg.symbol,
+                    cfg.interval,
+                    cfg.period,
+                    MarketSession.from_config(cfg),
+                )
                 table = run_parameter_sweep(
                     df=df,
                     base_cfg=cfg,
