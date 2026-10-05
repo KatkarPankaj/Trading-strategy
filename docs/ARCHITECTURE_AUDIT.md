@@ -2,7 +2,9 @@
 
 Date: 2026-10-05  
 Repository: KatkarPankaj/Trading-strategy  
-Scope: Non-destructive audit of current implementation only
+Scope: Non-destructive audit of the legacy implementation (baseline). Revised after verification: sections 16-18 add the required topic coverage, an evidence inventory and a status-since-baseline table.
+
+> Reading guide. Sections 1-15 describe the repository as it was before the production migration (legacy dashboards, `src/stockmarket/*.py`). Parts of the working tree have since been extended with new modules under `src/stockmarket/core/`, `api/`, `dashboard/` and `ops.py`. Where a baseline statement is no longer true it is marked "(baseline)" and the current state is recorded in section 18.
 
 ## 1) Executive Summary
 
@@ -16,7 +18,7 @@ It is not yet production-grade for live execution and not yet globally extensibl
 - Market assumptions hard-coded across modules (time window, timezone, symbols, session hours).
 - File-based mutable state with no transactional guarantees.
 - Data-provider reliability and validation safeguards are partial.
-- Limited automated testing footprint (no test suite detected in repository tree).
+- Limited automated testing footprint (baseline: no test suite was detected; see section 18).
 
 ## 2) Current Architecture
 
@@ -212,7 +214,7 @@ Impact:
 
 - src/stockmarket/webapp.py appears to be a legacy UI path while dashboards dominate interactive usage.
 - Multiple paths produce overlapping outputs, increasing maintenance burden.
-- No tests directory detected; behavior relies on manual run-time validation.
+- No tests directory was present at baseline; behavior relied on manual run-time validation (see section 18 for the current test suite).
 
 ## 13) Recommended Migration Plan (High-Level)
 
@@ -283,5 +285,172 @@ Medium:
 
 - Inspected repository source modules, dashboards, config files, requirements, and documentation.
 - Produced this non-destructive architecture audit.
+- Verified and completed the audit against the 16 required topics (sections 16-18).
 
-No runtime trading logic was modified in this phase.
+No runtime trading logic, `config.json`, or dashboard behavior was modified by the audit work.
+
+## 16) Required Topic Coverage
+
+| # | Required topic | Where covered |
+|---|---|---|
+| 1 | Current architecture | 2, 16.1 |
+| 2 | Current data flow | 3, 16.2 |
+| 3 | Current strategy flow | 4, 16.3 |
+| 4 | Current backtesting | 5.1, 16.4 |
+| 5 | Current paper trading | 5.2, 16.5 |
+| 6 | Portfolio / PnL | 16.6 |
+| 7 | Configuration | 3.2, 16.7 |
+| 8 | Dashboard | 8.1, 16.8 |
+| 9 | Tests | 16.9, 18 |
+| 10 | Security | 9, 16.10 |
+| 11 | Risk management | 7, 16.11 |
+| 12 | NSE / India-specific assumptions | 11, 16.12 |
+| 13 | Internationalization blockers | 11, 16.13 |
+| 14 | Production blockers | 10, 16.14 |
+| 15 | Recommended target architecture | 13, 16.15 |
+| 16 | Recommended migration sequence | 13, 16.16 |
+
+### 16.1 Current architecture (legacy baseline)
+
+- Two Streamlit applications carry most of the domain logic: `dashboard.py` (3,747 lines, 70 module-level functions) and `dashboard_simple.py` (1,980 lines, 30 module-level functions). They contain scanning, ranking, learning heuristics, paper order execution, charges, persistence and rendering.
+- The library layer is small: `backtest.py` (407 lines), `cli.py` (538), `data.py` (168), `strategy.py` (85), `sweep.py` (74), `webapp.py` (170), `config.py` (47).
+- There are no domain boundaries for instruments, orders, brokers, risk decisions, portfolio or audit in the legacy code.
+
+### 16.2 Current data flow
+
+- Yahoo path: `data.py` downloads via `yfinance`, normalizes columns, converts timezone, filters the configured session and caches locally (baseline cache format: pickle; now Parquet).
+- NSE quote path: both dashboards import `nsepython.nsefetch` and call NSE quote endpoints directly (`fetch_nse_quote`, `_fetch_nse_quote_payload`, `scan_top_stocks_nse`).
+- Data access is not behind an interface; dashboards call providers inline. Retry/backoff exists for Yahoo only. There is no stale/missing/duplicate-data gate that globally blocks trading.
+
+### 16.3 Current strategy flow
+
+- `strategy.py` adds opening-range high/low, VWAP, volume-spike and `long_signal`/`short_signal` columns to an OHLCV frame.
+- `dashboard.py` re-implements planning and scoring (`_strategy_plan_from_yahoo`, `_strategy_plan_from_nse_quote`, `score_signal`, `scan_top_stocks`) and `dashboard_simple.py` has a separate ranking (`_rank_signals`, `_estimate_regime_from_symbols`).
+- Signals exist in three shapes: DataFrame columns, dict plans, and UI labels. No common Strategy interface exists.
+
+### 16.4 Current backtesting
+
+- `backtest.py` simulates one position at a time per day with slippage, commission, stop/target/time exits and square-off, using next-bar-open entries and mark-to-market equity.
+- Gaps (baseline): no partial fills, no latency model, no spread, no holiday calendar, no corporate actions, single instrument, no portfolio limits. `sweep.py` runs parameter grids over this engine. A walk-forward validation package (`validation/`) and robustness scenarios already exist for the legacy engine.
+
+### 16.5 Current paper trading
+
+- Paper execution lives in the dashboards: `_execute_paper_order`, `_auto_trade_engine`, `_auto_exit_before_close`, `_add_pending_buy_order` / `_arm_symbol` (dashboard.py) and `_auto_paper_cycle`, `_record_trade` (dashboard_simple.py).
+- Cash, margin, holdings and pending orders are mutated inside Streamlit session state and written to local files. There is no order state machine, idempotency or broker abstraction in the legacy path.
+
+### 16.6 Portfolio / PnL
+
+- Positions, cash and margin are dictionaries in `st.session_state`; `_portfolio_snapshot` and `_current_open_pnl` derive values for display. Charges are computed separately in each dashboard (`_intraday_charges`).
+- PnL history is appended to CSV (`daily_pnl_history.csv`, `paper_trade_history.csv`; `simple_trade_ledger.csv`, `simple_daily_summary.csv`) plus JSON state and timestamped snapshots under `outputs/`.
+- Weaknesses: single currency (INR) implied, no realized/unrealized separation as a reusable service, no drawdown or monthly PnL tracking outside display code, duplicated accounting between the two apps.
+
+### 16.7 Configuration
+
+- `config.json` (tracked, 20 lines) and `config.example.json` load into `TradingConfig` (47 lines). Defaults are India-centric: `RELIANCE.NS`, `Asia/Kolkata`, 09:15 open, 15:30 close, 13:30 entry cutoff, 15:15 square-off.
+- Dashboards read `config.json` at runtime and add many sidebar/session_state controls that are not part of `TradingConfig` (146 `session_state` references in `dashboard.py`, 165 in `dashboard_simple.py`; UI preferences are persisted by `_load_saved_ui_preferences`).
+- No environment concept, no secret handling and no startup validation of mandatory production settings (baseline).
+
+### 16.8 Dashboard
+
+- Both dashboards combine rendering with orchestration, risk checks, order execution, persistence and learning. `webapp.py` is an older UI over the library modules.
+- Consequences: logic cannot be unit-tested without Streamlit, cannot be reused by an API or live path, and the two apps drift (separate state formats, duplicated charges and ranking).
+- Naive-time risk: `datetime.now()` without a timezone appears 8 times in `dashboard.py` and once in `dashboard_simple.py` next to timezone-aware helpers (`ist_now`, `market_now`).
+
+### 16.9 Tests
+
+- Baseline: none. Current: 15 test modules, 144 tests, all passing (see section 18).
+- Legacy dashboards remain untested because their logic is coupled to Streamlit.
+
+### 16.10 Security
+
+- Baseline findings are listed in section 9. Additional observations: `nsepython` relies on unofficial calls to NSE website endpoints (availability and terms-of-use should be reviewed); dashboards write state files with no integrity protection; 34 broad `except Exception` handlers in `dashboard.py`, 11 in `dashboard_simple.py`, 3 in `data.py` and 4 in `webapp.py` can hide failures.
+- `config.json` is tracked in git; `outputs/` and `.cache/` are not tracked (0 tracked files under `outputs/`).
+
+### 16.11 Risk management (legacy)
+
+- Controls exist but are scattered in dashboard functions: `_passes_buy_quality_gate`, `_expected_edge_after_costs`, `_max_allowed_buy_qty`, `_enforce_existing_position_qty_cap`, `_estimate_buy_block`, entry/square-off/auto-exit windows, max trades per day and open-position limits, stop-loss/take-profit.
+- `_auto_tuned_quality_filters`, `_apply_learning_bonus`, `_update_learning_memory` and `_agent_tuning_plan` adjust thresholds from recent results with no minimum sample size or out-of-sample check. This conflicts with the rule that live parameters must not change from a small sample.
+- No central, non-bypassable RiskEngine, no RiskDecision with reason codes, no portfolio-level sector/correlation/drawdown limits, no kill switch (baseline).
+
+### 16.12 NSE / India-specific assumptions discovered
+
+1. Default symbol and watchlists are NSE tickers with the `.NS` suffix: 30+ symbols in `dashboard.py` (lines 34-41) and 12 in `dashboard_simple.py`; the symbol-to-sector map (lines 45-74) and cap-bucket map (lines 78+) are Indian equities only.
+2. `config.py` defaults: `market_timezone="Asia/Kolkata"`, `market_open_time="09:15"`, `market_close_time="15:30"`, `entry_cutoff_time="13:30"`, `square_off_time="15:15"`; `config.json` and `config.example.json` repeat them.
+3. `nsepython.nsefetch` quote endpoint in both dashboards; `_to_nse_symbol` converts symbols to NSE format.
+4. Indian intraday charge model in `_intraday_charges` (both dashboards): brokerage, exchange transaction charge, SEBI turnover fee (turnover x 0.000001), 18% GST on fees, stamp duty, and STT of 0.025% on the sell side (dashboard_simple.py lines 245-249).
+5. `ist_now()` helpers (both dashboards) and market-phase logic fixed to IST.
+6. Currency is implicitly INR in accounting and display.
+7. Market-cap quota, price-band and cap-focus filters (`_apply_market_cap_quota`, `_apply_price_band_filter`, `_apply_cap_focus_filter`) assume Indian large/mid/small-cap buckets and INR price bands.
+8. Titles and help text name NSE/BSE (`cli.py` line 61, `webapp.py` line 18, `dashboard.py` line 2).
+9. `requirements.txt` includes `nsepython` as a hard dependency.
+10. No holiday calendar: weekends only are implied; exchange holidays are not modeled in the legacy engine.
+
+### 16.13 Internationalization blockers
+
+- Items 1-10 above, plus: session filtering and entry/exit windows live in dashboards and strategy configuration rather than a market definition; symbol conventions are Yahoo `.NS`-centric; charges, lot size and tick size are not instrument attributes; there is no multi-currency accounting in the legacy path.
+
+### 16.14 Production blockers (baseline)
+
+See section 10. In short: no paper/live separation, no broker abstraction, no central risk gate, no typed environment configuration, no relational persistence or migrations, no API layer, no automated tests, no observability, no CI, no container or deployment assets.
+
+### 16.15 Recommended target architecture
+
+```mermaid
+flowchart LR
+  DP[Data providers] --> Q[Quality gate]
+  Q --> S[Strategies]
+  N[News / AI research] --> A[Signal aggregation]
+  S --> A
+  A --> SZ[Position sizing]
+  SZ --> R[Risk engine]
+  R --> OM[Order manager]
+  OM --> EX[Paper or live executor]
+  EX --> B[Broker adapter]
+  OM --> P[Portfolio manager]
+  P --> DB[(Relational store + audit log)]
+  API[API] --> OM
+  UI[Dashboard] --> API
+  MON[Health, alerts, kill switch] --> R
+```
+
+- Strategies and AI only produce signals or research; only the order manager can create orders, and only after a risk decision.
+- Market, instrument, calendar and currency facts come from definitions, not code. Paper is the default; live requires explicit configuration and passing safety gates.
+
+### 16.16 Recommended migration sequence
+
+1. Domain models and market/instrument definitions. 2. Market sessions and calendars. 3. Data-provider interface with quality gates. 4. Strategy interface (migrate ORB/VWAP, add regime filter). 5. Risk engine and position sizing. 6. Portfolio and order manager. 7. Paper/live executors and broker adapter. 8. Backtesting upgrade and anti-overfitting. 9. Persistence, audit trail and versioning. 10. Observability, kill switch and recovery. 11. API, then dashboard on the API. 12. Tests, CI and security scanning. 13. Docker and deployment. 14. Documentation. 15. Retire legacy dashboards.
+
+## 17) Evidence Inventory (verified)
+
+| Item | Value |
+|---|---|
+| `dashboard.py` / `dashboard_simple.py` | 3,747 / 1,980 lines; 70 / 30 module-level functions |
+| Streamlit `session_state` references | 146 / 165 |
+| Broad `except Exception` / bare `except` | 34 / 11 (dashboards), 3 (`data.py`), 4 (`webapp.py`) |
+| Naive `.now()` calls | 8 / 1 |
+| India-specific matching lines | `dashboard.py` 180, `dashboard_simple.py` 48, `config.py` 6, `cli.py` 7, `config.json` 4, `config.example.json` 6 |
+| Persisted legacy files | `outputs/paper_state.json`, `paper_trade_history.csv`, `daily_pnl_history.csv`; `simple_paper_state.json`, `simple_trade_ledger.csv`, `simple_daily_summary.csv`, `snapshots/` |
+| Tracked in git | `config.json` yes; `outputs/` none |
+
+## 18) Status Since Baseline
+
+The repository now also contains a new platform layer. This audit did not change it; the table records the difference from the baseline findings so the audit is not misleading.
+
+| Baseline finding | Current state |
+|---|---|
+| No tests | 15 test modules, 144 tests passing. They cover domain models, market sessions, news, legacy paper order management, risk engine, portfolio risk, sizing, portfolio manager, signal aggregation, backtest validation, performance statistics, robustness, walk-forward and validation CLI/reports. No committed tests exist yet for the order manager, brokers, executors, recovery, kill switch, learning registry, audit trail, AI layer, data providers, persistence, settings, API or live-readiness modules. |
+| No central RiskEngine | `core/risk.py` and `core/risk_portfolio.py` exist; legacy dashboards do not call them. |
+| No order state machine / paper-live split | `core/order_management.py`, `core/executors.py`, `core/brokers.py` exist (paper default, live gated); legacy dashboards still execute orders themselves. |
+| Pickle cache | `data.py` now writes Parquet. |
+| No .env.example, unpinned dependencies | `.env.example` added; `requirements.txt` pinned. |
+| No persistence layer / API / observability | `core/persistence/`, `api/`, `core/observability/` exist and are not used by the legacy dashboards. |
+| No data-provider interface | `core/data/` (interface, mock, Yahoo adapter, quality gates, resilience) exists; the legacy `data.py` and dashboards still call Yahoo/NSE directly. |
+| No regime engine, no Strategy interface | Still open. ORB/VWAP are not migrated. |
+| No CI | Still open (no `.github/workflows`). |
+| No docs set | Still open (`docs/` has only this audit and `PHASE_5_PLAN.md`). |
+| Legacy dashboards contain business logic | Still open; the new read-only dashboard is in `src/stockmarket/dashboard/`. |
+| India-specific assumptions | Still present in all legacy code (section 16.12); the new `core/markets.py` defines US, IN and DE markets, with IN/DE holiday data not yet supplied. |
+
+### Recommended next implementation phase
+
+Complete the missing platform pieces that other work depends on: the Strategy interface with ORB/VWAP migrated (and a market-regime engine), then add automated tests for the new modules before wiring any of them into the legacy dashboards. Do not enable live trading.
