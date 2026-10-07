@@ -89,7 +89,12 @@ class InstrumentRepository(_Repository):
             "trading_status": i.trading_status.value,
             "payload": to_json({
                 "trading_hours": i.trading_hours, "price_precision": i.price_precision,
-                "minimum_order_quantity": i.minimum_order_quantity, "shortable": i.shortable}),
+                "minimum_order_quantity": i.minimum_order_quantity, "shortable": i.shortable,
+                "name": i.name, "country": i.country, "sector": i.sector,
+                "industry": i.industry, "isin": i.isin, "figi": i.figi,
+                "cusip": i.cusip, "mic": i.mic, "exchange_symbol": i.exchange_symbol,
+                "provider_symbol": i.provider_symbol, "active": i.active,
+                "tradable": i.tradable, "market_cap": i.market_cap}),
             "updated_at": ts(datetime.now(timezone.utc))})
 
     def get(self, instrument_id: str) -> dict[str, Any] | None:
@@ -486,6 +491,83 @@ class ExecutionRecordRepository(_Repository):
         return self._db.query("SELECT * FROM execution_records ORDER BY decision_timestamp DESC LIMIT ?", (limit,))
 
 
+class ScannerRunRepository(_Repository):
+    """Durable scanner runs and candidate audit data, isolated from order persistence."""
+
+    def save_scan(self, result: Any, *, candidates: Iterable[Any] | None = None) -> None:
+        candidate_rows = tuple(result.candidates if candidates is None else candidates)
+        with self._db.transaction():
+            self._db.execute(
+                """INSERT INTO scanner_runs
+                   (scan_id, universe_id, markets, mode, started_at, completed_at, status,
+                    requested_count, evaluated_count, accepted_count, rejected_count,
+                    failed_count, failure_summary, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    result.scan_id, result.universe_id, to_json(result.markets),
+                    result.mode.value,
+                    ts(result.started_at), ts(result.completed_at), result.status.value,
+                    result.requested_count, result.evaluated_count, result.accepted_count,
+                    result.rejected_count, result.failed_count, to_json(result.failure_summary),
+                    to_json({"scan_id": result.scan_id, "universe_id": result.universe_id,
+                             "mode": result.mode, "status": result.status}),
+                ),
+            )
+            accepted_ids = {
+                candidate.instrument_id for candidate in candidate_rows
+                if not candidate.rejection_reasons and not candidate.evaluation_failed
+            }
+            for candidate in candidate_rows:
+                self._db.execute(
+                    """INSERT INTO scanner_candidates
+                       (scan_id, instrument_id, accepted, score, data_timestamp,
+                        quality_status, payload)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        result.scan_id, candidate.instrument_id,
+                        1 if candidate.instrument_id in accepted_ids else 0,
+                        candidate.preliminary_score, ts(candidate.data_timestamp),
+                        candidate.data_quality.value, to_json(candidate),
+                    ),
+                )
+
+    def get(self, scan_id: str) -> dict[str, Any] | None:
+        rows = self._db.query("SELECT * FROM scanner_runs WHERE scan_id = ?", (scan_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["markets"] = json.loads(row["markets"])
+        row["failure_summary"] = json.loads(row["failure_summary"])
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def candidates(
+        self,
+        scan_id: str,
+        *,
+        accepted_only: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be non-negative")
+        sql = (
+            "SELECT instrument_id, accepted, score, data_timestamp, quality_status, payload "
+            "FROM scanner_candidates WHERE scan_id = ?"
+        )
+        if accepted_only:
+            sql += " AND accepted = 1"
+        rows = self._db.query(
+            sql + " ORDER BY accepted DESC, score DESC, instrument_id LIMIT ? OFFSET ?",
+            (scan_id, limit, offset),
+        )
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+
 class ProposalSubmissionRepository(_Repository):
     """Durable, one-shot claim and outcome for an accepted research proposal."""
 
@@ -563,3 +645,4 @@ class Store:
         self.execution_records = ExecutionRecordRepository(db)
         self.order_audit = OrderAuditRepository(db)
         self.proposal_submissions = ProposalSubmissionRepository(db)
+        self.scanner_runs = ScannerRunRepository(db)

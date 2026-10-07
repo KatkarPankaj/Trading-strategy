@@ -29,6 +29,7 @@ from ..core.market_intelligence import (
 from ..core.models import Instrument
 from ..core.persistence import Store, to_json
 from ..core.recovery import RecoveryError
+from ..core.scanner import MarketScanner, ScanPersistenceError, UnknownUniverse
 from ..core.security import Secret
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
@@ -44,6 +45,7 @@ from .schemas import (
     ProposalSubmitBody,
     ResearchRunBody,
     ResumeBody,
+    ScannerRunBody,
 )
 
 
@@ -66,6 +68,7 @@ class ApiContext:
     research_pipeline: StrategyResearchPipeline | None = None
     research_sessions: Mapping[str, MarketSession] = field(default_factory=dict)
     market_intelligence: MarketIntelligenceOrchestrator | None = None
+    scanner: MarketScanner | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -182,6 +185,64 @@ def create_app(ctx: ApiContext) -> FastAPI:
     @app.get("/instruments", dependencies=[Depends(auth)])
     def instruments(market: str | None = Query(default=None, max_length=16)) -> list[dict[str, Any]]:
         return _plain(ctx.store.instruments.list(market.upper() if market else None))
+
+    @app.get("/universes", dependencies=[Depends(auth)])
+    def universes() -> list[dict[str, Any]]:
+        if ctx.scanner is None:
+            raise HTTPException(503, "market scanner is not configured")
+        output = []
+        for definition in ctx.scanner.list_universes():
+            _, instruments = ctx.scanner.get_universe(definition.universe_id)
+            output.append({
+                "universe": _plain(definition),
+                "instrument_count": len(instruments),
+            })
+        return output
+
+    @app.get("/universes/{universe_id}", dependencies=[Depends(auth)])
+    def universe(universe_id: str) -> dict[str, Any]:
+        if ctx.scanner is None:
+            raise HTTPException(503, "market scanner is not configured")
+        try:
+            definition, instruments = ctx.scanner.get_universe(universe_id)
+        except UnknownUniverse as exc:
+            raise HTTPException(404, f"unknown universe {universe_id!r}") from exc
+        return {"universe": _plain(definition), "instrument_count": len(instruments)}
+
+    @app.post("/scanner/scan", dependencies=[Depends(auth)])
+    def run_scan(body: ScannerRunBody) -> dict[str, Any]:
+        if ctx.scanner is None:
+            raise HTTPException(503, "market scanner is not configured")
+        try:
+            return _plain(ctx.scanner.scan(
+                body.universe_id, body.mode, top_n=body.top_n, as_of=body.as_of,
+            ))
+        except UnknownUniverse as exc:
+            raise HTTPException(404, f"unknown universe {body.universe_id!r}") from exc
+        except ScanPersistenceError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/scanner/runs/{scan_id}", dependencies=[Depends(auth)])
+    def scanner_run(scan_id: str) -> dict[str, Any]:
+        run = ctx.store.scanner_runs.get(scan_id)
+        if run is None:
+            raise HTTPException(404, f"unknown scan run {scan_id!r}")
+        return _plain(run)
+
+    @app.get("/scanner/candidates", dependencies=[Depends(auth)])
+    def scanner_candidates(
+        scan_id: str = Query(min_length=1, max_length=64),
+        accepted_only: bool = False,
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        if ctx.store.scanner_runs.get(scan_id) is None:
+            raise HTTPException(404, f"unknown scan run {scan_id!r}")
+        return _plain(ctx.store.scanner_runs.candidates(
+            scan_id, accepted_only=accepted_only, limit=limit, offset=offset,
+        ))
 
     @app.get("/signals", dependencies=[Depends(auth)])
     def signals(limit: int = Query(default=100, ge=1, le=1000)) -> list[dict[str, Any]]:

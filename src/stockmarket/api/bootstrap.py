@@ -31,6 +31,13 @@ from ..core.observability import AlertManager, StructuredLogger
 from ..core.live_readiness import LiveReadinessChecker
 from ..core.markets import MarketRegistry, default_markets
 from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
+from ..core.scanner import (
+    MarketScanner,
+    RegistryUniverseProvider,
+    StaticUniverseProvider,
+    parse_scanner_settings,
+    parse_universe_definitions,
+)
 from ..core.sizing import BrokerConstraints, SizingLimits
 from ..core.data.yahoo_fundamentals import YahooEarningsObservationProvider
 from ..core.data.nse_sector_indices import NSESectorIndexObservationProvider
@@ -54,7 +61,14 @@ def instrument_from_row(row: Mapping[str, Any]) -> Instrument:
                             for h in hours) if hours else None,
         price_precision=extra.get("price_precision", 2),
         minimum_order_quantity=extra.get("minimum_order_quantity", 1),
-        shortable=extra.get("shortable"), trading_status=TradingStatus(row["trading_status"]))
+        shortable=extra.get("shortable"), trading_status=TradingStatus(row["trading_status"]),
+        name=extra.get("name"), country=extra.get("country"), sector=extra.get("sector"),
+        industry=extra.get("industry"), isin=extra.get("isin"), figi=extra.get("figi"),
+        cusip=extra.get("cusip"), mic=extra.get("mic"),
+        exchange_symbol=extra.get("exchange_symbol"),
+        provider_symbol=extra.get("provider_symbol"),
+        active=extra.get("active", True), tradable=extra.get("tradable", True),
+        market_cap=extra.get("market_cap"))
 
 
 def _parse_time(value: str, name: str, errors: list[str]) -> time:
@@ -336,6 +350,19 @@ def build_context(
         raise ConfigurationError([str(exc)]) from exc
     instruments = {r["instrument_id"]: instrument_from_row(
         r) for r in store.instruments.list()}
+    scanner_settings = parse_scanner_settings(
+        (env.get("SCANNER_SETTINGS") or "").strip())
+    configured_universes = (env.get("SCANNER_UNIVERSES") or "").strip()
+    if configured_universes:
+        definitions = parse_universe_definitions(configured_universes)
+        for definition in definitions:
+            if not set(market.upper() for market in definition.markets).issubset(
+                    set(settings.markets)):
+                raise ValueError(
+                    f"universe {definition.universe_id!r} contains a market not enabled in MARKETS")
+        universe_provider = StaticUniverseProvider(definitions, instruments)
+    else:
+        universe_provider = RegistryUniverseProvider(instruments, settings.markets)
     fx_rates: dict[str, float] = {}
     for pair in (env.get("FX_RATES") or "").split(","):
         if "=" in pair:
@@ -365,6 +392,10 @@ def build_context(
             seconds=settings.max_market_data_age_seconds)),
         health=health,
         logger=logger,
+    )
+    scanner = MarketScanner(
+        market_data, universe_provider, registry, repository=store.scanner_runs,
+        settings=scanner_settings,
     )
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
@@ -434,7 +465,8 @@ def build_context(
                       kill_switch=kill_switch, monitor=monitor, market_data=market_data,
                       instruments=instruments, research_pipeline=research_pipeline,
                       research_sessions=research_sessions or {},
-                      market_intelligence=market_intelligence)
+                      market_intelligence=market_intelligence,
+                      scanner=scanner)
 
 
 def create_app_from_env() -> FastAPI:

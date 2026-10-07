@@ -15,6 +15,7 @@ class AssetClass(str, Enum):
     EQUITY = "EQUITY"
     ETF = "ETF"
     INDEX = "INDEX"
+    FX = "FX"
     FOREX = "FOREX"
     CRYPTO = "CRYPTO"
     FUTURE = "FUTURE"
@@ -142,6 +143,19 @@ class Instrument:
     minimum_order_quantity: int = 1
     shortable: bool | None = None
     trading_status: TradingStatus = TradingStatus.ACTIVE
+    name: str | None = None
+    country: str | None = None
+    sector: str | None = None
+    industry: str | None = None
+    isin: str | None = None
+    figi: str | None = None
+    cusip: str | None = None
+    mic: str | None = None
+    exchange_symbol: str | None = None
+    provider_symbol: str | None = None
+    active: bool = True
+    tradable: bool = True
+    market_cap: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument_id", "symbol", "exchange", "market", "currency"):
@@ -175,6 +189,17 @@ class Instrument:
             )
         if self.shortable is not None and not isinstance(self.shortable, bool):
             raise TypeError("shortable must be a bool or None")
+        for name in (
+            "name", "country", "sector", "industry", "isin", "figi", "cusip",
+            "mic", "exchange_symbol", "provider_symbol",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _require_text(value, name)
+        if not isinstance(self.active, bool) or not isinstance(self.tradable, bool):
+            raise TypeError("active and tradable must be bools")
+        if self.market_cap is not None:
+            _require_positive_number(self.market_cap, "market_cap")
         if not isinstance(self.timezone, str) or not self.timezone.strip():
             raise ValueError("timezone must be a valid IANA timezone name")
         try:

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,19 @@ from .sweep import run_parameter_sweep
 from .validation.robustness import default_parameter_variations, run_robustness_analysis
 from .validation.reports import write_validation_report
 from .validation.walk_forward import WalkForwardConfig, walk_forward_validate
+from .api.bootstrap import instrument_from_row
+from .core.data import DataPolicy, ResilientProvider, create_market_data_provider
+from .core.markets import default_markets
+from .core.persistence import open_store
+from .core.scanner import (
+    MarketScanner,
+    RegistryUniverseProvider,
+    ScanMode,
+    parse_scanner_settings,
+    parse_universe_definitions,
+    StaticUniverseProvider,
+)
+from .core.settings import Environment, load_settings
 
 
 def _market_now(cfg: TradingConfig) -> datetime:
@@ -173,6 +187,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--slippage-multipliers", default="0.5,1,1.5")
     validation_parser.add_argument("--max-scenarios", type=int, default=30)
     validation_parser.add_argument("--output-dir", default="outputs")
+
+    scan_parser = subparsers.add_parser(
+        "scan", help="Scan a configured instrument universe (research or paper candidates)")
+    scan_parser.add_argument("--universe", required=True)
+    scan_parser.add_argument("--mode", choices=["RESEARCH", "PAPER"], default="RESEARCH")
+    scan_parser.add_argument("--top", type=int, default=None)
 
     return parser
 
@@ -482,9 +502,74 @@ def _print_backtest_summary(result) -> None:
             print(f"- {key}: {value}")
 
 
+def cmd_scan(universe_id: str, mode: str, top_n: int | None) -> int:
+    settings = load_settings()
+    auto_migrate = (os.environ.get("AUTO_MIGRATE") or (
+        "false" if settings.environment in (Environment.STAGING, Environment.PRODUCTION)
+        else "true")).lower() == "true"
+    store = open_store(settings.database_url.reveal(), migrate_schema=auto_migrate)
+    market_data = None
+    try:
+        markets = default_markets()
+        instruments = {
+            row["instrument_id"]: instrument_from_row(row)
+            for row in store.instruments.list()
+        }
+        raw_provider = create_market_data_provider(
+            settings.data_provider, instruments, markets=markets)
+        market_data = ResilientProvider(
+            raw_provider,
+            policy=DataPolicy(
+                max_quote_age=timedelta(
+                    seconds=settings.max_market_data_age_seconds)),
+        )
+        raw_universes = (os.environ.get("SCANNER_UNIVERSES") or "").strip()
+        universe_provider = (
+            StaticUniverseProvider(parse_universe_definitions(raw_universes), instruments)
+            if raw_universes else RegistryUniverseProvider(instruments, settings.markets)
+        )
+        scanner = MarketScanner(
+            market_data, universe_provider, markets, repository=store.scanner_runs,
+            settings=parse_scanner_settings(os.environ.get("SCANNER_SETTINGS")),
+        )
+        result = scanner.scan(universe_id, ScanMode(mode), top_n=top_n)
+        print(f"Scan ID: {result.scan_id}")
+        print(f"Universe: {result.universe_id}")
+        print(f"Mode: {result.mode.value}")
+        print(f"Status: {result.status.value}")
+        print(f"Requested: {result.requested_count}")
+        print(f"Evaluated: {result.evaluated_count}")
+        print(f"Rejected: {result.rejected_count}")
+        print(f"Accepted: {result.accepted_count}")
+        print(f"Failed: {result.failed_count}")
+        print("\nTop Candidates:")
+        accepted = [candidate for candidate in result.candidates if not candidate.rejection_reasons]
+        for rank, candidate in enumerate(accepted[:top_n or 50], start=1):
+            print(
+                f"{rank}. {candidate.symbol} ({candidate.market}/{candidate.currency}) "
+                f"score={candidate.preliminary_score:.3f} "
+                f"price={candidate.reference_price} turnover={candidate.turnover} "
+                f"volatility={candidate.volatility} quality={candidate.data_quality.value} "
+                f"timestamp={candidate.data_timestamp}"
+            )
+            passed = ", ".join(
+                item.name for item in candidate.filter_results if item.passed)
+            print(f"   Passed filters: {passed or 'none'}")
+            print(f"   Score components: {candidate.score_components}")
+        if result.failure_summary:
+            print(f"\nProvider/data failures: {', '.join(result.failure_summary[:20])}")
+        return 0 if result.status.value == "COMPLETE" else 2
+    finally:
+        if market_data is not None:
+            market_data.close()
+        store.db.close()
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+    if args.command == "scan":
+        return cmd_scan(args.universe, args.mode, args.top)
     cfg = _load_config(args.config, getattr(args, "symbol", None))
 
     if args.command == "backtest":

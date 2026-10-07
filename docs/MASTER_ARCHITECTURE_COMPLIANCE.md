@@ -33,7 +33,7 @@ The platform API routes orders through `TradingService` and `RiskEngine`; both l
 | # | Architecture area | Rating | Score / 5 | Evidence and gap |
 |---:|---|---|---:|---|
 | 1 | Separation of domain, application and infrastructure concerns | PARTIAL | 2 | `core` contains useful service/domain boundaries, but root dashboards retain trading and persistence logic; platform and legacy paths are not consolidated. |
-| 2 | Instrument identity and trading constraints | MOSTLY COMPLETE | 4 | `Instrument` models market, MIC/exchange, currency, timezone, tick/lot/minimum quantity, shortability and status. Coverage of asset-specific contract multipliers and full broker constraints is not demonstrated. |
+| 2 | Instrument identity and trading constraints | MOSTLY COMPLETE | 4 | `Instrument` models market, exchange/MIC, currency, timezone, tick/lot/minimum quantity, shortability, status, active/tradable flags and optional name/country/sector/industry/provider identifiers. Asset-specific contract multipliers and full broker constraints remain future work. |
 | 3 | International market definitions | PARTIAL | 3 | Registry supports US, India and Germany/Xetra with explicit local currencies, timezones and MICs; only a small static market set and equity-focused assumptions are present. |
 | 4 | Exchange calendars and coverage | PARTIAL | 2 | Calendar abstraction handles holidays, early closes and pauses, and fails closed for uncovered years. Only US and DE 2026 files exist; India and subsequent years are uncovered. |
 | 5 | Timezone and point-in-time discipline | MOSTLY COMPLETE | 3 | Core research/proposal contracts validate aware timestamps and constrain evidence to `as_of`; backtest execution uses later-bar latency. Historical provider revision/correction controls and universal end-to-end timestamp lineage remain incomplete. |
@@ -47,7 +47,7 @@ The platform API routes orders through `TradingService` and `RiskEngine`; both l
 | 13 | Deterministic strategy contracts and selection | PARTIAL | 3 | Strategy protocol returns signals, ORB/VWAP is deterministic, and AI ranks only registered strategies. Registry governance is not integrated into a full paper-autonomous promotion loop. |
 | 14 | Signal aggregation and directional authority | PARTIAL | 3 | Aggregator is deterministic and the documented pipeline requires a matching technical signal; signal/freshness and identity are checked. Legacy callers and all historical/live-like evaluation paths are not uniformly migrated. |
 | 15 | Explainable `TradeProposal` contract | PARTIAL | 3 | Proposal records include rank, timestamps, signal, regime, research evidence and explanation; risk is explicitly `NOT_EVALUATED`. Submitted proposal payloads are persisted with acceptance state, but unaccepted proposal contexts are not reconstructable after restart and explanations are not independently assessed for completeness or usefulness. |
-| 16 | Cross-instrument opportunity ranking | FOUNDATION ONLY | 2 | Ranking is deterministic and tie-broken, but only up to 10 candidates are accepted and each is processed sequentially through a complete pipeline. Portfolio-level optimization, sector/correlation constraints across candidates and latency budgets are absent. |
+| 16 | Cross-instrument opportunity ranking | FOUNDATION ONLY | 2 | Phase 2A adds a bounded-concurrency universe scanner with deterministic cheap filters, currency-relative liquidity ranking, Top-N output, durable run/candidate records, and explicit partial/failure status. The later intelligence/proposal pipeline still accepts only small batches; portfolio-level candidate optimization, sector/correlation optimization and load-tested latency budgets are absent. |
 | 17 | Paper proposal acceptance | PARTIAL | 3 | Authenticated API acceptance defaults to automatic sizing, with explicit manual override, and routes the deterministic signal through `TradingService`; RiskEngine remains final gate. A durable one-shot claim blocks replay, while unaccepted context remains process-local and the declared actor is audit metadata rather than identity/RBAC. |
 | 18 | Paper-autonomous operation | MISSING | 0 | No scheduled autonomous proposal-to-order loop, durable queue, supervised rollout, automatic bounded sizing workflow, or completed unattended-paper acceptance evidence was found. |
 | 19 | Position sizing and order constraints | PARTIAL | 2 | `size_position()` implements stop-distance risk sizing and cash/notional/broker caps and is integrated into automatic proposal acceptance. Verified average daily volume is not wired for participation sizing, and the helper is not the policy for every manual API paper order. |
@@ -73,7 +73,7 @@ The platform API routes orders through `TradingService` and `RiskEngine`; both l
 | 39 | Secret/configuration and input security | MOSTLY COMPLETE | 3 | Secret wrapper/file support, config secret detection, redaction, HTTPS checks, bounded inputs and parameterized SQL are present. Threat modeling, identity/access policy, external penetration validation and operational secret rotation are not evidenced. |
 | 40 | CI, dependency/security scanning and test automation | PARTIAL | 3 | CI workflow runs unit tests, Bandit and pip-audit with pinned Python. Audit did not run CI; no evidence here of successful current GitHub run, integration environment, deployment gate, or reproducible broker/provider validation. |
 | 41 | Deployment, backup and recovery operations | PARTIAL | 3 | Docker/Compose uses non-root app, read-only filesystem, PostgreSQL, explicit migration, loopback binding and optional database backup. No deployed environment, off-host backup proof, restore drill, TLS proxy, high availability or rollback exercise was verified. |
-| 42 | Concurrency, throughput and horizontal scaling | FOUNDATION ONLY | 1 | Single-worker deployment is documented because state is process-local; opportunity limit is 10 and per-instrument processing is sequential. No durable distributed queue, shared gate/state coordination, load results or capacity limits were demonstrated. |
+| 42 | Concurrency, throughput and horizontal scaling | FOUNDATION ONLY | 1 | The scanner now has configurable bounded in-process concurrency and batch size for provider I/O. The deployed API remains single-worker because execution reservations are process-local; no distributed queue, cross-worker coordination, load results or capacity limits have been demonstrated. |
 | 43 | End-to-end operational readiness and evidence | FOUNDATION ONLY | 2 | A coherent local PAPER API stack and extensive unit coverage have been built, but no verified current CI/deployment, external-provider credentials, end-to-end recovery drill, autonomous-paper run, or live broker proof supports production readiness. |
 
 ### Score roll-up
@@ -122,30 +122,44 @@ All PAPER_AUTONOMOUS blockers are prerequisites. In addition:
 - **Portfolio coordination:** `TradingService` serializes its own submissions and reserves active-order notional/cash within one process. This is not a database-backed cross-process lock; multi-worker operation remains unsupported.
 - **Sizing integration:** proposal acceptance defaults to the existing `size_position()` helper using configured risk, portfolio, currency and broker quantity/notional constraints. Manual sizing requires explicit `MANUAL_OVERRIDE`; every resulting quantity is still evaluated by `RiskEngine`. Liquidity participation sizing is not enabled without a verified volume input.
 - **FX and market completeness:** FX uses configured rates without observed quote time/source/spread; the India calendar is uncovered, which correctly blocks the dates but prevents usable India-market automation.
+- **Market scanner:** `core/scanner.py` supplies a separate, non-executing market-aware scanner. Runs and selected Top-N/rejected candidates are persisted. The default universe source only indexes instruments already registered in the database; there is no bundled provider-backed global instrument master. Yahoo/mock remain research-only; halted state is only detected when registry data reports it. Scanner PAPER mode is candidate generation, not order placement or autonomous paper trading.
 - **Data and AI governance:** news/AI scoring and strategy selection remain advisory, with no calibration/evaluation history, prompt/model release approval, vendor data agreement record or continuous monitoring for performance/drift.
 - **Production runtime:** Compose is a hardened local/single-process starting point, not demonstrated deployment. Optional Redis is not used; no horizontal coordination or externally verified alert route is shown.
 - **Backtest-to-production consistency:** backtest engine and current strategy contract are not proven to be the same strategy implementation in an enforced research/approval pipeline; test-period results are not wired into config activation.
 
 ## Technically ordered implementation sequence
 
-1. **Execution-boundary inventory and regression coverage.** Legacy dashboard order mutators are isolated and the API remains PAPER/RiskEngine-gated. Maintain inventory and add tests proving all supported new-entry paths preserve that boundary.
-2. **Complete domain coverage and point-in-time provenance.** Obtain/version verified exchange calendars per enabled market; formalize FX quotes with timestamp, source and spread; retain data snapshots/references and policy/version identifiers needed to reproduce a decision.
-3. **Harden sizing and portfolio reservations.** Validate costs and market-specific sizing inputs, enable bounded participation sizing only with verified volume, and replace process-local reservation with cross-process coordination before multi-worker operation. RiskEngine remains the final independent gate.
-4. **Complete durable orchestration and recovery.** Persist unaccepted proposal contexts/run records and test crash windows between durable claim, order creation and recovery. Current submitted proposal records block replay safely but an ambiguous `SUBMITTING` record requires operator reconciliation.
-5. **Make paper automation explicit but disabled by default.** Add a supervised scheduler/worker with a strict PAPER-only configuration, per-cycle candidate budget, action limits, manual rollout switch, no-order dry run and hard dependency on fresh data, current calendar, healthy persistence and open safety gate.
-6. **Prove safety and recovery.** Test concurrency, duplicate/replay behavior, stale/future data, risk rejection, process crash around submission, broker disconnect, database failure, kill switch, restart/reconciliation, backup restore and risk-reducing exits. Observe successful CI and a prolonged unattended paper pilot before widening deployment.
-7. **Operationalize paper service.** Deploy to a controlled paper environment with real alert delivery, log/metrics retention, access controls, backup/restore drills, on-call ownership, capacity/load tests and rollback procedures. Keep evidence and a paper-autonomy review gate.
-8. **Only after paper acceptance, design live adapter and data contracts.** Select a broker and licensed data source; implement the broker adapter in isolation, verify instrument/account/market semantics and idempotency in sandbox, then integrate reconciliation/readiness against real state.
-9. **Require independent live authorization.** Add production identity/RBAC, credential lifecycle and network controls; run every live readiness check from measured system state; require separate approval and documented operational sign-off. Stage any live scope narrowly with monitoring, limits, kill-switch drills and rollback before considering broader autonomy.
+1. **Phase 2B — candidate research and market intelligence.** Consume the scanner’s timestamped, quality-gated Top-N output downstream; keep AI advisory and deterministic strategy/risk/execution authorities unchanged.
+2. **Execution-boundary inventory and regression coverage.** Legacy dashboard order mutators are isolated and the API remains PAPER/RiskEngine-gated. Maintain inventory and add tests proving all supported new-entry paths preserve that boundary.
+3. **Complete domain coverage and point-in-time provenance.** Obtain/version verified exchange calendars per enabled market; formalize FX quotes with timestamp, source and spread; retain data snapshots/references and policy/version identifiers needed to reproduce a decision.
+4. **Harden sizing and portfolio reservations.** Validate costs and market-specific sizing inputs, enable bounded participation sizing only with verified volume, and replace process-local reservation with cross-process coordination before multi-worker operation. RiskEngine remains the final independent gate.
+5. **Complete durable orchestration and recovery.** Persist unaccepted proposal contexts/run records and test crash windows between durable claim, order creation and recovery. Current submitted proposal records block replay safely but an ambiguous `SUBMITTING` record requires operator reconciliation.
+6. **Make paper automation explicit but disabled by default.** Add a supervised scheduler/worker with a strict PAPER-only configuration, per-cycle candidate budget, action limits, manual rollout switch, no-order dry run and hard dependency on fresh data, current calendar, healthy persistence and open safety gate.
+7. **Prove safety and recovery.** Test concurrency, duplicate/replay behavior, stale/future data, risk rejection, process crash around submission, broker disconnect, database failure, kill switch, restart/reconciliation, backup restore and risk-reducing exits. Observe successful CI and a prolonged unattended paper pilot before widening deployment.
+8. **Operationalize paper service.** Deploy to a controlled paper environment with real alert delivery, log/metrics retention, access controls, backup/restore drills, on-call ownership, capacity/load tests and rollback procedures. Keep evidence and a paper-autonomy review gate.
+9. **Only after paper acceptance, design live adapter and data contracts.** Select a broker and licensed data source; implement the broker adapter in isolation, verify instrument/account/market semantics and idempotency in sandbox, then integrate reconciliation/readiness against real state.
+10. **Require independent live authorization.** Add production identity/RBAC, credential lifecycle and network controls; run every live readiness check from measured system state; require separate approval and documented operational sign-off. Stage any live scope narrowly with monitoring, limits, kill-switch drills and rollback before considering broader autonomy.
 
 ## Evidence boundaries
 
-- Source inspected includes core models, market/calendar, data provider/quality/resilience, strategy/regime/research/orchestration, risk/sizing, trading service, paper/live executor contracts, order lifecycle, recovery, persistence, learning, backtesting, API/bootstrap, dashboards, CI, Docker/Compose and operations documentation.
+- Source inspected includes core models, market/calendar, data provider/quality/resilience, scanner/universe, strategy/regime/research/orchestration, risk/sizing, trading service, paper/live executor contracts, order lifecycle, recovery, persistence, learning, backtesting, API/bootstrap, dashboards, CI, Docker/Compose and operations documentation.
 - The audit did not inspect secrets, call any external provider, use a broker account, start Docker, deploy services, or establish the status of a fresh GitHub Actions run.
-- The 251-test result cited in prior session history was not rerun for this documentation-only audit. It is not evidence of live integration or unattended operational safety.
+- The original 251-test result cited in prior session history was not rerun for the original documentation-only audit. The later Phase 2A implementation validation ran 262 tests; neither result is evidence of live integration or unattended operational safety.
+- Phase 2A updates the implementation descriptions above; the historical Phase 0 score is retained and was not recalculated.
 - Assessment is a point-in-time architectural review, not a profitability assessment, security certification, legal/data-license determination, or production-readiness approval.
 
 FILES CHANGED:
+docs/ARCHITECTURE.md
 docs/MASTER_ARCHITECTURE_COMPLIANCE.md
+docs/MARKET_SCANNER.md
+src/stockmarket/api/app.py
+src/stockmarket/api/bootstrap.py
+src/stockmarket/api/schemas.py
+src/stockmarket/cli.py
+src/stockmarket/core/models.py
+src/stockmarket/core/persistence/migrations.py
+src/stockmarket/core/persistence/repositories.py
+src/stockmarket/core/scanner.py
+tests/test_market_scanner.py
 IMPLEMENTATION CHANGES:
-NONE
+PHASE 2A — GLOBAL INSTRUMENT UNIVERSE & MARKET SCANNER

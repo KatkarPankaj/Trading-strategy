@@ -118,10 +118,27 @@ _V5 = [
     "CREATE INDEX idx_proposal_submissions_state ON proposal_submissions (state)",
 ]
 
+_V6 = [
+    """CREATE TABLE scanner_runs (
+        scan_id TEXT PRIMARY KEY, universe_id TEXT NOT NULL, markets TEXT NOT NULL, mode TEXT NOT NULL,
+        started_at TEXT NOT NULL, completed_at TEXT NOT NULL, status TEXT NOT NULL,
+        requested_count INTEGER NOT NULL, evaluated_count INTEGER NOT NULL,
+        accepted_count INTEGER NOT NULL, rejected_count INTEGER NOT NULL,
+        failed_count INTEGER NOT NULL, failure_summary TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE scanner_candidates (
+        scan_id TEXT NOT NULL REFERENCES scanner_runs(scan_id),
+        instrument_id TEXT NOT NULL, accepted INTEGER NOT NULL, score DOUBLE PRECISION NOT NULL,
+        data_timestamp TEXT, quality_status TEXT NOT NULL, payload TEXT NOT NULL,
+        PRIMARY KEY (scan_id, instrument_id))""",
+    "CREATE INDEX idx_scanner_runs_universe_time ON scanner_runs (universe_id, started_at)",
+    "CREATE INDEX idx_scanner_candidates_scan_score ON scanner_candidates (scan_id, accepted, score)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
-    (4, "order_audit", _V4), (5, "proposal_submissions", _V5)]
+    (4, "order_audit", _V4), (5, "proposal_submissions", _V5),
+    (6, "market_scanner", _V6)]
 
 
 def applied_versions(db: Database) -> set[int]:
