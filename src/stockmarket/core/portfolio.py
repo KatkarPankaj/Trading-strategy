@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable, Mapping
 from math import isfinite
 from zoneinfo import ZoneInfo
 
@@ -100,6 +100,7 @@ class PortfolioManager:
         self._fx: dict[str, float] = {self.base_currency: 1.0}
         self._positions: dict[str, _Position] = {}
         self._fills: list[FillRecord] = []
+        self._fill_by_key: dict[tuple[str, int], FillRecord] = {}
         # e.g. persist each fill
         self.on_fill: Callable[[FillRecord], None] | None = None
         self._realized_base = 0.0
@@ -112,6 +113,47 @@ class PortfolioManager:
         self._month_key: object = None
         self._day_baseline = float(initial_cash)
         self._month_baseline = float(initial_cash)
+
+    def execution_checkpoint(self) -> dict[str, Any]:
+        """Capture mutable accounting state for rollback if a durable execution write fails."""
+        return {
+            "cash": dict(self._cash),
+            "positions": {
+                instrument_id: replace(position)
+                for instrument_id, position in self._positions.items()
+            },
+            "fills": list(self._fills),
+            "fill_by_key": dict(self._fill_by_key),
+            "realized_base": self._realized_base,
+            "fees_base": self._fees_base,
+            "slippage_base": self._slippage_base,
+            "initial_equity": self._initial_equity,
+            "peak_equity": self._peak_equity,
+            "last_equity": self._last_equity,
+            "day_key": self._day_key,
+            "month_key": self._month_key,
+            "day_baseline": self._day_baseline,
+            "month_baseline": self._month_baseline,
+        }
+
+    def restore_execution_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
+        self._cash = dict(checkpoint["cash"])
+        self._positions = {
+            instrument_id: replace(position)
+            for instrument_id, position in checkpoint["positions"].items()
+        }
+        self._fills = list(checkpoint["fills"])
+        self._fill_by_key = dict(checkpoint["fill_by_key"])
+        self._realized_base = checkpoint["realized_base"]
+        self._fees_base = checkpoint["fees_base"]
+        self._slippage_base = checkpoint["slippage_base"]
+        self._initial_equity = checkpoint["initial_equity"]
+        self._peak_equity = checkpoint["peak_equity"]
+        self._last_equity = checkpoint["last_equity"]
+        self._day_key = checkpoint["day_key"]
+        self._month_key = checkpoint["month_key"]
+        self._day_baseline = checkpoint["day_baseline"]
+        self._month_baseline = checkpoint["month_baseline"]
 
     # ---- configuration ----
     def set_fx_rate(self, currency: str, rate_to_base: float) -> None:
@@ -175,6 +217,24 @@ class PortfolioManager:
         if (client_order_id is None) != (fill_sequence is None):
             raise PortfolioError(
                 "client_order_id and fill_sequence must be supplied together")
+        fill_key = (
+            (client_order_id, fill_sequence)
+            if client_order_id is not None and fill_sequence is not None else None)
+        if fill_key is not None and fill_key in self._fill_by_key:
+            previous = self._fill_by_key[fill_key]
+            if (
+                previous.instrument_id != instrument.instrument_id
+                or previous.side is not side
+                or previous.quantity != quantity
+                or previous.price != price
+                or previous.fee != fee
+                or previous.slippage != slippage
+            ):
+                raise PortfolioError(
+                    f"fill identity {client_order_id}:{fill_sequence} was reused with different data")
+            if self.on_fill is not None:
+                self.on_fill(previous)
+            return previous
         ccy = instrument.currency.upper()
         rate = self._rate(ccy)
 
@@ -184,6 +244,7 @@ class PortfolioManager:
                 and not self._allow_negative_cash):
             raise PortfolioError(f"INSUFFICIENT_CASH in {ccy}")
 
+        checkpoint = self.execution_checkpoint()
         pos = self._positions.get(instrument.instrument_id)
         realized = 0.0
         if pos is None:
@@ -219,9 +280,15 @@ class PortfolioManager:
                             fee, slippage, ccy, realized, client_order_id,
                             fill_sequence)
         self._fills.append(record)
-        if self.on_fill is not None:
-            self.on_fill(record)
-        self._record_equity(timestamp)
+        if fill_key is not None:
+            self._fill_by_key[fill_key] = record
+        try:
+            if self.on_fill is not None:
+                self.on_fill(record)
+            self._record_equity(timestamp)
+        except BaseException:
+            self.restore_execution_checkpoint(checkpoint)
+            raise
         return record
 
     def mark(self, instrument_id: str, price: float, timestamp: datetime) -> None:

@@ -109,6 +109,70 @@ target instruments. Requests whose market-local date is outside the supplied
 exchange-calendar coverage fail closed with 503. AI output remains advisory
 and the endpoint does not submit orders.
 
+## Manual restart-safe PAPER cycle (Phase 2C-6/2C-7)
+
+The authenticated PAPER-cycle API and CLI compose configured research,
+deterministic signal generation, persisted risk approval, paper-order
+submission, and position-exit management. Use them only after applying
+migrations and confirming the research provider, market sessions/calendar,
+risk settings, database, and PAPER mode are ready. The cycle requires
+configured AI research; it is a bounded manual operation, not a scheduler or
+unattended trading service. Keep one API worker because portfolio/order
+reservations and portions of runtime state remain process-local.
+
+The API request requires `universe_id`, `idempotency_key`, and `operator`;
+`as_of` is optional but must be timezone-aware when supplied, and `top_n` is
+optional and bounded by the service's configured candidate cap (API maximum
+10). The cycle is PAPER-only; the strict request schema does not accept a mode
+override.
+
+```json
+{
+  "universe_id": "us-equities",
+  "idempotency_key": "manual-cycle-20261008-01",
+  "operator": "reviewer",
+  "top_n": 5
+}
+```
+
+Authenticated endpoints:
+
+- `POST /paper/cycles` runs one bounded cycle. Reusing an idempotency key with
+  a different request is rejected; replay of a completed request returns its
+  persisted result.
+- `GET /paper/cycles?unfinished_only=true` lists unfinished runs;
+  `GET /paper/cycles/{run_id}` returns its run, candidate checkpoints, and
+  events.
+- `POST /paper/cycles/{run_id}/recover` explicitly resumes an interrupted or
+  partial run after recovery checks and lease acquisition.
+- `POST /paper/positions/manage` explicitly evaluates current positions for
+  protective exits; no background polling is installed.
+- `POST /recovery/reconcile` reconciles persisted PAPER orders, executor state,
+  and fills. Review discrepancies and gate state before using the explicit
+  `/recovery/resume` workflow.
+
+CLI equivalents (run with the configured environment/database):
+
+```powershell
+python -m stockmarket paper-cycle --universe us-equities --idempotency-key manual-cycle-20261008-01 --operator reviewer --top 5
+python -m stockmarket paper-cycle-show --run-id <run-id>
+python -m stockmarket paper-cycle-recover --run-id <run-id>
+python -m stockmarket paper-recovery
+python -m stockmarket paper-positions
+python -m stockmarket paper-positions-manage
+python -m stockmarket paper-orders
+```
+
+Paper executor orders, execution attempts, and fill sequence are persisted
+(migrations V13/V14). Restart recovery reconciles these records with order and
+fill ledgers; an inconsistent or ambiguous state blocks new entries. A retry
+is allowed only when durable executor state proves that the stable client order
+was never accepted. Do not manually edit cycle, proposal, order, or fill rows
+to force a retry. A restored resting paper order needs a fresh quote update
+before it can fill. An expiring account-scope lease prevents concurrent cycle
+runs; expired runs still require explicit recovery rather than automatic
+takeover.
+
 ## Docker Compose
 
 The sample stack runs a single paper API process and PostgreSQL. Before startup:
@@ -171,6 +235,11 @@ restore in an isolated environment.
   recovery objective.
 - The API process keeps runtime order and gate state in memory and is limited to
   one worker.
+- PAPER cycle runs and executor/fill records are durable, but cycles and
+  position-exit evaluations are invoked manually. There is no scheduler,
+  unattended-operation evidence, or production-readiness claim. Active-order
+  reservations are process-local; multi-worker order submission remains
+  unsupported.
 - The repository does not bundle AI/Finnhub credentials/configuration, research-
   session policy, or NSE/Finnhub symbol mappings by default. The generic
   OpenAI-compatible adapter and Finnhub news adapter are opt-in. Yahoo's

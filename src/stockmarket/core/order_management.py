@@ -191,6 +191,7 @@ class OrderManager:
         self._orders: dict[str, ManagedOrder] = {}
         self._requests: dict[str, OrderRequest] = {}
         self._events: dict[str, list[OrderEvent]] = {}
+        self._safe_retry: set[str] = set()
         self._lock = RLock()
 
     # ---- queries ----
@@ -220,23 +221,31 @@ class OrderManager:
         """Idempotent by client_order_id; an order never reaches the gateway without APPROVED risk."""
         with self._lock:
             known = self._requests.get(request.client_order_id)
+            retry = (
+                known is not None
+                and request.client_order_id in self._safe_retry
+                and self._orders[request.client_order_id].status is OrderStatus.NEW
+            )
             if known is not None:
                 if known.fingerprint() != request.fingerprint():
                     raise IdempotencyConflict(
                         f"client_order_id {request.client_order_id} was used for a different request")
-                return SubmissionResult(self._orders[request.client_order_id], duplicate=True)
-
-            order = ManagedOrder(
-                client_order_id=request.client_order_id, broker_order_id=None,
-                instrument_id=request.instrument_id, symbol=request.symbol,
-                side=request.side, quantity=request.quantity, order_type=request.order_type,
-                limit_price=request.limit_price, stop_price=request.stop_price,
-                timestamp=request.timestamp, strategy=request.strategy,
-                signal_id=request.signal_id, risk_decision_id=None, status=OrderStatus.NEW)
-            self._requests[request.client_order_id] = request
-            self._orders[request.client_order_id] = order
-            self._events[request.client_order_id] = []
-            self._log(order, None, OrderStatus.NEW, "created")
+                if not retry:
+                    return SubmissionResult(self._orders[request.client_order_id], duplicate=True)
+                self._safe_retry.remove(request.client_order_id)
+                order = self._orders[request.client_order_id]
+            else:
+                order = ManagedOrder(
+                    client_order_id=request.client_order_id, broker_order_id=None,
+                    instrument_id=request.instrument_id, symbol=request.symbol,
+                    side=request.side, quantity=request.quantity, order_type=request.order_type,
+                    limit_price=request.limit_price, stop_price=request.stop_price,
+                    timestamp=request.timestamp, strategy=request.strategy,
+                    signal_id=request.signal_id, risk_decision_id=None, status=OrderStatus.NEW)
+                self._requests[request.client_order_id] = request
+                self._orders[request.client_order_id] = order
+                self._events[request.client_order_id] = []
+                self._log(order, None, OrderStatus.NEW, "created")
 
             problem = self._pre_trade_problem(request, risk_decision)
             if problem is not None:
@@ -375,6 +384,65 @@ class OrderManager:
                 symbol=order.symbol, side=order.side, quantity=order.quantity,
                 order_type=order.order_type, timestamp=order.timestamp, strategy=order.strategy,
                 signal_id=order.signal_id, limit_price=order.limit_price, stop_price=order.stop_price)
+
+    def authorize_safe_retry(self, client_order_id: str) -> ManagedOrder:
+        """Rewind only an unacknowledged order proven absent by a durable paper executor."""
+        with self._lock:
+            order = self.get(client_order_id)
+            if order.status not in {
+                OrderStatus.NEW, OrderStatus.VALIDATED, OrderStatus.SUBMITTED,
+                OrderStatus.FAILED,
+            } or order.broker_order_id is not None:
+                raise InvalidOrderTransition(
+                    "only an unacknowledged order can be safely retried")
+            updated = replace(
+                order, status=OrderStatus.NEW, risk_decision_id=None, error=None)
+            self._orders[client_order_id] = updated
+            self._safe_retry.add(client_order_id)
+            self._log(
+                updated, order.status, OrderStatus.NEW,
+                "recovery proved no paper execution exists; retry authorized")
+            return updated
+
+    def reconcile_execution(
+        self,
+        client_order_id: str,
+        *,
+        broker_order_id: str,
+        status: OrderStatus,
+        filled_quantity: int,
+        average_fill_price: float | None,
+        error: str | None,
+    ) -> ManagedOrder:
+        """Adopt executor state without applying fills already replayed from durable fill records."""
+        with self._lock:
+            order = self.get(client_order_id)
+            if filled_quantity < order.filled_quantity or filled_quantity > order.quantity:
+                raise OrderManagerError(
+                    "durable executor fill quantity conflicts with the stored order")
+            if order.broker_order_id not in (None, broker_order_id):
+                raise OrderManagerError(
+                    "durable executor broker identity conflicts with the stored order")
+            if order.status is not status or (
+                order.filled_quantity != filled_quantity
+                or order.average_fill_price != average_fill_price
+                or order.broker_order_id != broker_order_id
+                or order.error != error
+            ):
+                updated = replace(
+                    order,
+                    broker_order_id=broker_order_id,
+                    status=status,
+                    filled_quantity=filled_quantity,
+                    average_fill_price=average_fill_price,
+                    error=error,
+                )
+                self._orders[client_order_id] = updated
+                self._log(
+                    updated, order.status, status,
+                    "durable paper execution state reconciled")
+                return updated
+            return order
 
     def attach_broker_order(self, client_order_id: str, broker_order_id: str) -> ManagedOrder:
         """Record a broker id discovered during reconciliation for an order whose acknowledgement was lost."""

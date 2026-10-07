@@ -231,11 +231,16 @@ class FillRepository(_Repository):
             "fill_id": fill_id, "client_order_id": order_id, "instrument_id": f.instrument_id,
             "side": f.side.value, "quantity": f.quantity, "price": f.price, "fee": f.fee,
             "slippage": f.slippage, "currency": f.currency, "realized_pnl": f.realized_pnl,
-            "timestamp": ts(f.timestamp)})
+            "timestamp": ts(f.timestamp), "fill_sequence": sequence})
         return fill_id
 
     def all(self) -> list[dict[str, Any]]:
         return self._db.query("SELECT * FROM fills ORDER BY timestamp")
+
+    def for_order(self, client_order_id: str) -> list[dict[str, Any]]:
+        return self._db.query(
+            "SELECT * FROM fills WHERE client_order_id = ? ORDER BY fill_sequence, timestamp",
+            (client_order_id,))
 
 
 class PositionRepository(_Repository):
@@ -252,6 +257,96 @@ class PositionRepository(_Repository):
 
     def all(self) -> list[dict[str, Any]]:
         return self._db.query("SELECT * FROM positions ORDER BY instrument_id")
+
+
+class PaperExecutionRepository(_Repository):
+    """Durable local paper-executor state, keyed by the OrderManager client identity."""
+
+    def get_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM paper_execution_orders WHERE client_order_id = ?",
+            (client_order_id,))
+        if rows:
+            rows[0]["order_payload"] = json.loads(rows[0]["order_payload"])
+            return rows[0]
+        return None
+
+    def get_by_broker_order_id(self, broker_order_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM paper_execution_orders WHERE broker_order_id = ?",
+            (broker_order_id,))
+        if rows:
+            rows[0]["order_payload"] = json.loads(rows[0]["order_payload"])
+            return rows[0]
+        return None
+
+    def all(self) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT * FROM paper_execution_orders ORDER BY updated_at, client_order_id")
+        for row in rows:
+            row["order_payload"] = json.loads(row["order_payload"])
+        return rows
+
+    def save_order(
+        self,
+        *,
+        client_order_id: str,
+        broker_order_id: str,
+        instrument_id: str,
+        status: str,
+        quantity: int,
+        limit_price: float | None,
+        stop_price: float | None,
+        filled_quantity: int,
+        average_fill_price: float | None,
+        error: str | None,
+        fill_events: int,
+        order_payload: Mapping[str, Any],
+    ) -> None:
+        self._upsert("paper_execution_orders", "client_order_id", {
+            "client_order_id": client_order_id,
+            "broker_order_id": broker_order_id,
+            "instrument_id": instrument_id,
+            "status": status,
+            "quantity": quantity,
+            "limit_price": limit_price,
+            "stop_price": stop_price,
+            "filled_quantity": filled_quantity,
+            "average_fill_price": average_fill_price,
+            "error": error,
+            "fill_events": fill_events,
+            "order_payload": to_json(order_payload),
+            "updated_at": ts(datetime.now(timezone.utc)),
+        })
+
+    def save_attempt(
+        self,
+        *,
+        attempt_id: str,
+        client_order_id: str,
+        attempt_number: int,
+        state: str,
+        error: str | None = None,
+    ) -> None:
+        now = ts(datetime.now(timezone.utc))
+        self._upsert("paper_execution_attempts", "attempt_id", {
+            "attempt_id": attempt_id,
+            "client_order_id": client_order_id,
+            "attempt_number": attempt_number,
+            "state": state,
+            "error": error,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+    def attempts(self, client_order_id: str) -> list[dict[str, Any]]:
+        return self._db.query(
+            """SELECT * FROM paper_execution_attempts
+               WHERE client_order_id = ? ORDER BY attempt_number""",
+            (client_order_id,))
+
+    def transaction(self):
+        return self._db.transaction()
 
 
 class TradeRepository(_Repository):
@@ -798,6 +893,18 @@ class ProposalSubmissionRepository(_Repository):
             )
             return True
 
+    def retry(self, proposal_id: str) -> bool:
+        with self._db.transaction():
+            current = self.get(proposal_id)
+            if current is None or current["state"] != "RETRYABLE":
+                return False
+            self._db.execute(
+                """UPDATE proposal_submissions
+                   SET state = 'SUBMITTING', error = NULL, updated_at = ?
+                   WHERE proposal_id = ?""",
+                (ts(datetime.now(timezone.utc)), proposal_id))
+            return True
+
     def finish(
         self,
         proposal_id: str,
@@ -824,6 +931,28 @@ class ProposalSubmissionRepository(_Repository):
         row = rows[0]
         row["proposal_payload"] = json.loads(row["proposal_payload"])
         return row
+
+    def set_state(
+        self,
+        proposal_id: str,
+        *,
+        state: str,
+        error: str | None = None,
+    ) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """UPDATE proposal_submissions
+                   SET state = ?, error = ?, updated_at = ?
+                   WHERE proposal_id = ?""",
+                (state, error, ts(datetime.now(timezone.utc)), proposal_id))
+
+    def incomplete(self) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT * FROM proposal_submissions
+               WHERE state = 'SUBMITTING' ORDER BY created_at, proposal_id""")
+        for row in rows:
+            row["proposal_payload"] = json.loads(row["proposal_payload"])
+        return rows
 
 
 class AutonomousResearchRepository(_Repository):
@@ -1312,6 +1441,289 @@ class PositionExitProposalRepository(_Repository):
         return rows
 
 
+class AutonomousPaperCycleRepository(_Repository):
+    """Durable, idempotent cycle state, candidate checkpoints, and cycle leases."""
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM autonomous_paper_cycles WHERE run_id = ?", (run_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def get_by_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT run_id FROM autonomous_paper_cycles WHERE idempotency_key = ?",
+            (idempotency_key,))
+        return self.get_run(rows[0]["run_id"]) if rows else None
+
+    def create(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        request_hash: str,
+        universe_id: str,
+        market_scope: str,
+        account_id: str,
+        as_of: datetime,
+        payload: Mapping[str, Any],
+        owner_token: str,
+        lease_until: datetime,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        with self._db.transaction():
+            existing = self._db.query(
+                "SELECT run_id FROM autonomous_paper_cycle_locks WHERE scope_key = ?",
+                (market_scope,))
+            if existing:
+                raise ValueError(
+                    f"paper cycle {existing[0]['run_id']} already holds this execution scope")
+            self._db.execute(
+                """INSERT INTO autonomous_paper_cycles
+                   (run_id, idempotency_key, request_hash, mode, universe_id,
+                    market_scope, account_id, status, stage, created_at,
+                    updated_at, as_of, payload)
+                   VALUES (?, ?, ?, 'PAPER', ?, ?, ?, 'RUNNING', 'CREATED',
+                           ?, ?, ?, ?)""",
+                (run_id, idempotency_key, request_hash, universe_id, market_scope,
+                 account_id, ts(now), ts(now), ts(as_of), to_json(payload)))
+            self._db.execute(
+                """INSERT INTO autonomous_paper_cycle_locks
+                   (scope_key, run_id, owner_token, lease_until)
+                   VALUES (?, ?, ?, ?)""",
+                (market_scope, run_id, owner_token, ts(lease_until)))
+
+    def acquire_recovery(
+        self,
+        run_id: str,
+        *,
+        owner_token: str,
+        lease_until: datetime,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        with self._db.transaction():
+            run = self.get_run(run_id)
+            if run is None or run["status"] in {"COMPLETE", "FAILED"}:
+                return False
+            locks = self._db.query(
+                "SELECT * FROM autonomous_paper_cycle_locks WHERE scope_key = ?",
+                (run["market_scope"],))
+            if locks:
+                lock = locks[0]
+                if lock["run_id"] != run_id:
+                    raise ValueError(
+                        f"paper cycle {lock['run_id']} holds this execution scope")
+                lease_expiry = datetime.fromisoformat(lock["lease_until"])
+                if lease_expiry > now and lock["owner_token"] != owner_token:
+                    raise ValueError(
+                        f"paper cycle {run_id} still holds its execution lease")
+                self._db.execute(
+                    """UPDATE autonomous_paper_cycle_locks
+                       SET owner_token = ?, lease_until = ? WHERE scope_key = ?""",
+                    (owner_token, ts(lease_until), run["market_scope"]))
+            else:
+                self._db.execute(
+                    """INSERT INTO autonomous_paper_cycle_locks
+                       (scope_key, run_id, owner_token, lease_until)
+                       VALUES (?, ?, ?, ?)""",
+                    (run["market_scope"], run_id, owner_token, ts(lease_until)))
+            self._db.execute(
+                """UPDATE autonomous_paper_cycles
+                   SET status = 'RECOVERING', updated_at = ?
+                   WHERE run_id = ?""",
+                (ts(now), run_id))
+            return True
+
+    def renew_lock(
+        self,
+        run_id: str,
+        *,
+        owner_token: str,
+        lease_until: datetime,
+    ) -> bool:
+        with self._db.transaction():
+            rows = self._db.query(
+                """SELECT scope_key FROM autonomous_paper_cycle_locks
+                   WHERE run_id = ? AND owner_token = ?""",
+                (run_id, owner_token))
+            if not rows:
+                return False
+            self._db.execute(
+                """UPDATE autonomous_paper_cycle_locks
+                   SET lease_until = ? WHERE run_id = ? AND owner_token = ?""",
+                (ts(lease_until), run_id, owner_token))
+            return True
+
+    def update_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        stage: str,
+        payload: Mapping[str, Any],
+        owner_token: str | None = None,
+    ) -> None:
+        now = ts(datetime.now(timezone.utc))
+        with self._db.transaction():
+            if owner_token is not None:
+                owned = self._db.query(
+                    """SELECT 1 AS owned FROM autonomous_paper_cycle_locks
+                       WHERE run_id = ? AND owner_token = ?""",
+                    (run_id, owner_token))
+                if not owned:
+                    raise ValueError("paper cycle execution lease is not held")
+            self._db.execute(
+                """UPDATE autonomous_paper_cycles
+                   SET status = ?, stage = ?, updated_at = ?, payload = ?
+                   WHERE run_id = ?""",
+                (status, stage, now, to_json(payload), run_id))
+            if status in {"COMPLETE", "PARTIAL", "FAILED"}:
+                if owner_token is None:
+                    self._db.execute(
+                        "DELETE FROM autonomous_paper_cycle_locks WHERE run_id = ?",
+                        (run_id,))
+                else:
+                    self._db.execute(
+                        """DELETE FROM autonomous_paper_cycle_locks
+                           WHERE run_id = ? AND owner_token = ?""",
+                        (run_id, owner_token))
+
+    def candidates(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT * FROM autonomous_paper_cycle_candidates
+               WHERE run_id = ? ORDER BY candidate_id""",
+            (run_id,))
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+    def get_candidate(self, run_id: str, candidate_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT * FROM autonomous_paper_cycle_candidates
+               WHERE run_id = ? AND candidate_id = ?""",
+            (run_id, candidate_id))
+        if not rows:
+            return None
+        rows[0]["payload"] = json.loads(rows[0]["payload"])
+        return rows[0]
+
+    def save_candidate(
+        self,
+        run_id: str,
+        candidate_id: str,
+        *,
+        status: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        self._db.execute(
+            """INSERT INTO autonomous_paper_cycle_candidates
+               (run_id, candidate_id, status, updated_at, payload)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(run_id, candidate_id) DO UPDATE SET
+                 status = excluded.status, updated_at = excluded.updated_at,
+                 payload = excluded.payload""",
+            (run_id, candidate_id, status, ts(datetime.now(timezone.utc)),
+             to_json(payload)))
+
+    def record_event(
+        self,
+        *,
+        event_id: str,
+        run_id: str,
+        candidate_id: str | None,
+        event_type: str,
+        correlation_id: str,
+        payload: Mapping[str, Any],
+        timestamp: datetime | None = None,
+    ) -> None:
+        self._db.execute(
+            """INSERT INTO autonomous_paper_cycle_events
+               (event_id, run_id, candidate_id, event_type, timestamp,
+                correlation_id, payload)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(event_id) DO NOTHING""",
+            (event_id, run_id, candidate_id, event_type,
+             ts(timestamp or datetime.now(timezone.utc)), correlation_id,
+             to_json(payload)))
+
+    def events(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT * FROM autonomous_paper_cycle_events
+               WHERE run_id = ? ORDER BY timestamp, event_id""",
+            (run_id,))
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+    def unfinished(self) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT run_id FROM autonomous_paper_cycles
+               WHERE status IN ('RUNNING', 'RECOVERING', 'PARTIAL')
+               ORDER BY created_at, run_id""")
+        return [run for row in rows if (run := self.get_run(row["run_id"])) is not None]
+
+    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT run_id FROM autonomous_paper_cycles
+               ORDER BY created_at DESC, run_id DESC LIMIT ?""",
+            (limit,))
+        return [
+            run for row in rows
+            if (run := self.get_run(row["run_id"])) is not None
+        ]
+
+
+class PositionExitEvaluationRepository(_Repository):
+    """Records every deterministic position-monitoring decision once per quote."""
+
+    def get(self, entry_client_order_id: str, quote_timestamp: datetime) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT * FROM position_exit_evaluations
+               WHERE entry_client_order_id = ? AND quote_timestamp = ?""",
+            (entry_client_order_id, ts(quote_timestamp)))
+        if not rows:
+            return None
+        rows[0]["payload"] = json.loads(rows[0]["payload"])
+        return rows[0]
+
+    def save(
+        self,
+        *,
+        evaluation_id: str,
+        entry_client_order_id: str,
+        instrument_id: str,
+        quote_timestamp: datetime,
+        status: str,
+        trigger_reason: str | None,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        self._db.execute(
+            """INSERT INTO position_exit_evaluations
+               (evaluation_id, entry_client_order_id, instrument_id,
+                quote_timestamp, status, trigger_reason, payload, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(entry_client_order_id, quote_timestamp) DO NOTHING""",
+            (evaluation_id, entry_client_order_id, instrument_id,
+             ts(quote_timestamp), status, trigger_reason, to_json(payload),
+             ts(datetime.now(timezone.utc))))
+        row = self.get(entry_client_order_id, quote_timestamp)
+        if row is None:
+            raise RuntimeError("position exit evaluation was not persisted")
+        return row
+
+    def for_entry(self, entry_client_order_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT * FROM position_exit_evaluations
+               WHERE entry_client_order_id = ? ORDER BY quote_timestamp""",
+            (entry_client_order_id,))
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -1335,6 +1747,9 @@ class Store:
         self.order_audit = OrderAuditRepository(db)
         self.proposal_submissions = ProposalSubmissionRepository(db)
         self.position_exit_proposals = PositionExitProposalRepository(db)
+        self.position_exit_evaluations = PositionExitEvaluationRepository(db)
+        self.autonomous_paper_cycles = AutonomousPaperCycleRepository(db)
+        self.paper_execution = PaperExecutionRepository(db)
         self.scanner_runs = ScannerRunRepository(db)
         self.research_runs = CandidateResearchRepository(db)
         self.autonomous_research = AutonomousResearchRepository(db)

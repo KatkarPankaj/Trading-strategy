@@ -6,7 +6,7 @@ import hmac
 import json
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -35,6 +35,10 @@ from ..core.paper_lifecycle import (
     PaperPositionManager,
     PaperProposalExecutionService,
 )
+from ..core.autonomous_paper_trading import (
+    AutonomousPaperCycleError,
+    AutonomousPaperTradingService,
+)
 from ..core.market_session import MarketSession
 from ..core.market_intelligence import (
     MarketIntelligenceOrchestrator,
@@ -55,6 +59,7 @@ from ..core.trading_service import (
 )
 from .schemas import (
     CandidateResearchRunBody,
+    AutonomousPaperCycleBody,
     AutonomousResearchRunBody,
     KillResetBody,
     KillTriggerBody,
@@ -86,7 +91,8 @@ class ApiContext:
     market_data: Any = None
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
     research_pipeline: StrategyResearchPipeline | None = None
-    research_sessions: Mapping[str, MarketSession] = field(default_factory=dict)
+    research_sessions: Mapping[str, MarketSession] = field(
+        default_factory=dict)
     market_intelligence: MarketIntelligenceOrchestrator | None = None
     scanner: MarketScanner | None = None
     candidate_research: CandidateResearchService | None = None
@@ -96,6 +102,7 @@ class ApiContext:
     trade_proposals: TradeProposalService | None = None
     paper_proposal_execution: PaperProposalExecutionService | None = None
     paper_position_manager: PaperPositionManager | None = None
+    autonomous_paper_trading: AutonomousPaperTradingService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -112,7 +119,8 @@ def _plain(value: Any) -> Any:
 
 def create_app(ctx: ApiContext) -> FastAPI:
     app = FastAPI(title="Trading Platform API", version="0.1.0")
-    proposal_contexts: OrderedDict[str, ProposalSubmissionContext] = OrderedDict()
+    proposal_contexts: OrderedDict[str,
+                                   ProposalSubmissionContext] = OrderedDict()
     proposal_contexts_lock = RLock()
     if ctx.market_data is not None:
         app.add_event_handler("shutdown", ctx.market_data.close)
@@ -233,7 +241,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
         try:
             definition, instruments = ctx.scanner.get_universe(universe_id)
         except UnknownUniverse as exc:
-            raise HTTPException(404, f"unknown universe {universe_id!r}") from exc
+            raise HTTPException(
+                404, f"unknown universe {universe_id!r}") from exc
         return {"universe": _plain(definition), "instrument_count": len(instruments)}
 
     @app.post("/scanner/scan", dependencies=[Depends(auth)])
@@ -245,7 +254,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
                 body.universe_id, body.mode, top_n=body.top_n, as_of=body.as_of,
             ))
         except UnknownUniverse as exc:
-            raise HTTPException(404, f"unknown universe {body.universe_id!r}") from exc
+            raise HTTPException(
+                404, f"unknown universe {body.universe_id!r}") from exc
         except ScanPersistenceError as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
@@ -349,13 +359,15 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def get_research_signal(run_id: str, candidate_id: str) -> dict[str, Any]:
         if ctx.signal_generation is None:
             raise HTTPException(503, "signal generation is not configured")
-        candidate = ctx.store.autonomous_research.get_candidate(run_id, candidate_id)
+        candidate = ctx.store.autonomous_research.get_candidate(
+            run_id, candidate_id)
         if candidate is None:
             raise HTTPException(404, "unknown autonomous research candidate")
         result = ctx.store.signal_generations.latest_for_candidate(
             run_id, candidate["instrument_id"])
         if result is None:
-            raise HTTPException(404, "no signal generation result for candidate")
+            raise HTTPException(
+                404, "no signal generation result for candidate")
         return _plain(result["payload"])
 
     @app.post(
@@ -368,7 +380,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
         body: TradeProposalRiskBody,
     ) -> dict[str, Any]:
         if ctx.trade_proposals is None:
-            raise HTTPException(503, "trade proposal risk evaluation is not configured")
+            raise HTTPException(
+                503, "trade proposal risk evaluation is not configured")
         try:
             return _plain(ctx.trade_proposals.evaluate(
                 run_id, candidate_id,
@@ -388,14 +401,17 @@ def create_app(ctx: ApiContext) -> FastAPI:
         candidate_id: str,
     ) -> dict[str, Any]:
         if ctx.trade_proposals is None:
-            raise HTTPException(503, "trade proposal risk evaluation is not configured")
-        candidate = ctx.store.autonomous_research.get_candidate(run_id, candidate_id)
+            raise HTTPException(
+                503, "trade proposal risk evaluation is not configured")
+        candidate = ctx.store.autonomous_research.get_candidate(
+            run_id, candidate_id)
         if candidate is None:
             raise HTTPException(404, "unknown autonomous research candidate")
         result = ctx.trade_proposals.get_latest(
             run_id, candidate["instrument_id"])
         if result is None:
-            raise HTTPException(404, "no persisted risk evaluation for candidate")
+            raise HTTPException(
+                404, "no persisted risk evaluation for candidate")
         return _plain(result)
 
     @app.get("/research/runs/{run_id}", dependencies=[Depends(auth)])
@@ -431,7 +447,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
     @app.post("/research/assessments/{snapshot_id}", dependencies=[Depends(auth)])
     def assess_candidate_snapshot(snapshot_id: str) -> dict[str, Any]:
         if ctx.candidate_assessment is None:
-            raise HTTPException(503, "AI candidate assessment is not configured")
+            raise HTTPException(
+                503, "AI candidate assessment is not configured")
         try:
             opportunity = ctx.candidate_assessment.assess(snapshot_id)
         except KeyError as exc:
@@ -448,7 +465,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
     @app.get("/research/assessments/{assessment_id}", dependencies=[Depends(auth)])
     def get_candidate_assessment(assessment_id: str) -> dict[str, Any]:
         if ctx.candidate_assessment is None:
-            raise HTTPException(503, "AI candidate assessment is not configured")
+            raise HTTPException(
+                503, "AI candidate assessment is not configured")
         assessment = ctx.candidate_assessment.get_assessment(assessment_id)
         if assessment is None:
             raise HTTPException(404, "unknown AI research assessment")
@@ -460,7 +478,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
         if ctx.candidate_assessment is None:
-            raise HTTPException(503, "AI candidate assessment is not configured")
+            raise HTTPException(
+                503, "AI candidate assessment is not configured")
         return {
             "research_only": True,
             "execution": "NOT_SUBMITTED",
@@ -513,7 +532,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
     @app.post("/research", dependencies=[Depends(auth)])
     def run_research(body: ResearchRunBody) -> dict[str, Any]:
         if ctx.research_pipeline is None:
-            raise HTTPException(503, "strategy research pipeline is not configured")
+            raise HTTPException(
+                503, "strategy research pipeline is not configured")
         instrument = ctx.instruments.get(body.instrument_id)
         if instrument is None:
             raise HTTPException(404, "unknown instrument")
@@ -576,7 +596,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
     @app.post("/intelligence/opportunities", dependencies=[Depends(auth)])
     def rank_opportunities(body: OpportunityRunBody) -> dict[str, Any]:
         if ctx.market_intelligence is None:
-            raise HTTPException(503, "market intelligence service is not configured")
+            raise HTTPException(
+                503, "market intelligence service is not configured")
         if ctx.mode != TradingMode.PAPER.value:
             raise HTTPException(
                 403, "market-intelligence proposals are available only in PAPER mode")
@@ -588,7 +609,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
         for instrument_id in body.instrument_ids:
             instrument = ctx.instruments.get(instrument_id)
             if instrument is None:
-                raise HTTPException(404, f"unknown instrument {instrument_id!r}")
+                raise HTTPException(
+                    404, f"unknown instrument {instrument_id!r}")
             session = ctx.research_sessions.get(instrument.market)
             if session is None:
                 raise HTTPException(
@@ -642,7 +664,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def submit_proposal(proposal_id: str, body: ProposalSubmitBody) -> dict[str, Any]:
         executor = ctx.paper_proposal_execution
         if executor is None or ctx.mode != TradingMode.PAPER.value:
-            raise HTTPException(503, "persisted paper proposal submission is not configured")
+            raise HTTPException(
+                503, "persisted paper proposal submission is not configured")
         try:
             result = executor.submit(
                 proposal_id,
@@ -668,12 +691,74 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def manage_paper_positions() -> dict[str, Any]:
         manager = ctx.paper_position_manager
         if manager is None or ctx.mode != TradingMode.PAPER.value:
-            raise HTTPException(503, "paper position management is not configured")
+            raise HTTPException(
+                503, "paper position management is not configured")
         try:
             return _plain(manager.manage())
         except PaperLifecycleError as exc:
             raise HTTPException(409, str(exc)) from exc
         except InvalidOrderTransition as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/paper/cycles", dependencies=[Depends(auth)])
+    def run_paper_cycle(body: AutonomousPaperCycleBody) -> dict[str, Any]:
+        service = ctx.autonomous_paper_trading
+        if service is None or ctx.mode != TradingMode.PAPER.value:
+            raise HTTPException(
+                503, "autonomous paper trading is not configured")
+        try:
+            return _plain(service.run(
+                body.universe_id,
+                idempotency_key=body.idempotency_key,
+                operator=body.operator,
+                as_of=body.as_of,
+                top_n=body.top_n,
+            ))
+        except AutonomousPaperCycleError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/paper/cycles", dependencies=[Depends(auth)])
+    def paper_cycles(
+        limit: int = Query(default=50, ge=1, le=500),
+        unfinished_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        if ctx.autonomous_paper_trading is None:
+            raise HTTPException(
+                503, "autonomous paper trading is not configured")
+        rows = (
+            ctx.store.autonomous_paper_cycles.unfinished()
+            if unfinished_only
+            else ctx.store.autonomous_paper_cycles.recent(limit)
+        )
+        return _plain(rows[:limit])
+
+    @app.get("/paper/cycles/{run_id}", dependencies=[Depends(auth)])
+    def paper_cycle(run_id: str) -> dict[str, Any]:
+        if ctx.autonomous_paper_trading is None:
+            raise HTTPException(
+                503, "autonomous paper trading is not configured")
+        result = ctx.autonomous_paper_trading.get_run(run_id)
+        if result is None:
+            raise HTTPException(404, "unknown autonomous paper cycle")
+        return _plain(result)
+
+    @app.post("/paper/cycles/{run_id}/recover", dependencies=[Depends(auth)])
+    def recover_paper_cycle(run_id: str) -> dict[str, Any]:
+        service = ctx.autonomous_paper_trading
+        if service is None:
+            raise HTTPException(
+                503, "autonomous paper trading is not configured")
+        try:
+            return _plain(service.recover(run_id))
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except AutonomousPaperCycleError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/orders/{client_order_id}/audit", dependencies=[Depends(auth)])
@@ -736,6 +821,19 @@ def create_app(ctx: ApiContext) -> FastAPI:
         except RecoveryError as exc:
             raise HTTPException(409, str(exc)) from exc
         return _plain({"halted": ctx.gate.halted, "discrepancies": report.discrepancies})
+
+    @app.post("/recovery/reconcile", dependencies=[Depends(auth)])
+    def recovery_reconcile() -> dict[str, Any]:
+        if ctx.recovery is None:
+            raise HTTPException(404, "recovery is not configured")
+        report = ctx.recovery.reconcile()
+        return _plain({
+            "clean": report.clean,
+            "checked_at": report.checked_at,
+            "orders_restored": report.orders_restored,
+            "discrepancies": report.discrepancies,
+            "actions": report.actions,
+        })
 
     @app.post("/paper/orders", dependencies=[Depends(auth)])
     def paper_order(body: OrderBody) -> dict[str, Any]:

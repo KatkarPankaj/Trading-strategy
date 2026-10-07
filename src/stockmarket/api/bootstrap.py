@@ -30,6 +30,7 @@ from ..core.paper_lifecycle import (
     PaperPositionManager,
     PaperProposalExecutionService,
 )
+from ..core.autonomous_paper_trading import AutonomousPaperTradingService
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.recovery import RecoveryManager, rebuild_portfolio, reconcile_positions
@@ -422,7 +423,9 @@ def build_context(
 
     portfolio.on_fill = persist_paper_fill
     broker = PaperBroker(portfolio, instruments, market_status_fn=lambda m: registry.is_regular_session(
-        m, datetime.now(timezone.utc)))
+        m, datetime.now(timezone.utc)),
+        execution_repository=store.paper_execution,
+        fills_repository=store.fills)
     gate = TradingGate()
     order_manager = OrderManager(broker)
     strategies = StrategyConfigRegistry(store.strategy_configs)
@@ -556,6 +559,20 @@ def build_context(
         quotes=quotes,
         update_price=broker.update_price,
         max_age=max_execution_data_age,
+        evaluation_repository=store.position_exit_evaluations,
+    )
+    autonomous_paper_trading = (
+        AutonomousPaperTradingService(
+            repository=store.autonomous_paper_cycles,
+            research=autonomous_research,
+            signals=signal_generation,
+            proposals=trade_proposals,
+            execution=paper_proposal_execution,
+            positions=paper_position_manager,
+            gate=gate,
+            max_candidates=autonomous_research.settings.max_candidates,
+        )
+        if autonomous_research is not None else None
     )
     research_pipeline = None
     market_intelligence = None
@@ -622,7 +639,8 @@ def build_context(
                       signal_generation=signal_generation,
                       trade_proposals=trade_proposals,
                       paper_proposal_execution=paper_proposal_execution,
-                      paper_position_manager=paper_position_manager)
+                      paper_position_manager=paper_position_manager,
+                      autonomous_paper_trading=autonomous_paper_trading)
 
 
 def create_app_from_env() -> FastAPI:

@@ -112,6 +112,10 @@ from .paper_lifecycle import (
     PaperPositionManager,
     PaperProposalExecutionService,
 )
+from .autonomous_paper_trading import (
+    AutonomousPaperCycleError,
+    AutonomousPaperTradingService,
+)
 from .research import (
     FundamentalEvidenceProducer,
     NewsEvidenceCollection,
@@ -156,6 +160,8 @@ __all__ = [
     "PaperLifecycleError",
     "PaperPositionManager",
     "PaperProposalExecutionService",
+    "AutonomousPaperCycleError",
+    "AutonomousPaperTradingService",
     "ResearchEvidence",
     "ResearchObservation",
     "ResearchObservationProvider",

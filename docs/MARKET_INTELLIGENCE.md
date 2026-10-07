@@ -87,11 +87,38 @@ This is a terminal advisory artifact. The approved result includes the risk deci
 
 `POST /intelligence/proposals/{proposal_id}/submit` reloads the persisted V11 approval and verifies its PAPER run, candidate, generated-signal, registered strategy/version, proposal/signal identity, freshness, tradability and regular market session. It requires a current valid tick-grid quote. Automatic sizing is the default; manual quantity is an explicit override. Both paths call `TradingService`, which obtains a fresh quote and applies the final RiskEngine decision before `OrderManager` can submit to `PaperBroker`. The endpoint does not accept an in-memory market-intelligence proposal, create orders from research/AI output, or enable a live route. The deterministic client-order identity and durable one-shot submission claim mean a retry returns the existing order or blocks for recovery; it never creates a second order for the proposal.
 
-Paper fills are linked to their client order and assigned deterministic fill IDs, persisted before the portfolio snapshot is rewritten, and replayed to rebuild the account on restart. The broker's resting-order book is still in-memory. If recovery cannot reconcile a pending order, the trading gate stays closed for new entries; operators must reconcile rather than resubmit.
+Paper fills are linked to their client order and assigned deterministic fill IDs, persisted before the portfolio snapshot is rewritten, and replayed to rebuild the account on restart. Phase 2C-6 also persists PaperBroker orders and attempts for restart reconciliation. If recovery cannot reconcile a pending order, the trading gate stays closed for new entries; retry is permitted only when durable executor state proves that the client order was not accepted. A restored resting order waits for a fresh quote update.
 
 `POST /paper/positions/manage` evaluates only current open portfolio positions with a recoverable, fill-linked approved proposal. It checks that the fresh quote is on tick, not stale/future, later than the position open, and within a regular market session. Long/short stop-loss and take-profit triggers are deterministic; each exit is persisted as a V12 exit proposal and routed as `OrderIntent.EXIT` through the same `TradingService`, `RiskEngine`, `OrderManager` and paper broker. Exit quantity is capped at the current open position. Missing provenance or invalid protective levels fail closed. This is quote-triggered monitoring, not a persistent background scheduler or a claim of guaranteed stop execution; gaps, slippage, broker state and process uptime remain relevant.
 
 An exit-manager call is required to evaluate a position; no automatic polling job is configured. Execution remains simulated PAPER-only.
+
+## Phase 2C-6/2C-7: durable execution and manual PAPER cycle
+
+Migrations V13/V14 persist PaperBroker order attempts, accepted executor orders
+and deterministic fill sequencing, plus account-scope cycle lease ownership and
+expiry. Startup recovery compares durable executor state, order-manager state
+and fill ledgers; discrepancies block new entries. Recovery may retry an
+unacknowledged submission only when the durable executor proves that the
+stable client order was not accepted. Unclear states are not treated as
+successful or safe to resend. A restored resting order requires a fresh quote
+update before it can fill.
+
+`AutonomousPaperTradingService` composes the existing bounded research,
+deterministic signal, persisted proposal/RiskEngine, order, and position
+services. It is invoked manually, requires configured research, and remains
+PAPER-only. It persists a request hash/idempotency key, run state, per-candidate
+checkpoints and events; candidate errors are isolated. A lease limits
+simultaneous cycles for the configured PAPER account, and explicit recovery
+resumes eligible interrupted or partial work. Position exits are evaluated
+before and after candidate processing, including while entry execution is
+halted. New entries still require validated data and pass the RiskEngine via
+`TradingService`; AI does not create orders or bypass deterministic checks.
+
+This does not add a scheduler, background position monitor, unattended
+execution, multi-worker portfolio reservation, or live trading. Keep one API
+worker. Manual cycle completion is not a profitability or production-readiness
+claim.
 
 Authenticated API:
 
@@ -119,6 +146,9 @@ All endpoints require the configured bearer token:
 - `POST /research/autonomous/{run_id}/candidates/{candidate_id}/risk` and `GET` persist/retrieve the Phase 2C-3 risk proposal.
 - `POST /intelligence/proposals/{proposal_id}/submit` explicitly submits an eligible persisted Phase 2C-3 proposal in PAPER mode.
 - `POST /paper/positions/manage` evaluates fresh quotes and routes supported deterministic stop/target exits in PAPER mode.
+- `POST /paper/cycles` starts a bounded cycle with `universe_id`, `idempotency_key`, and `operator`; optional `as_of` must be timezone-aware and optional `top_n` is at most 10. The endpoint is fixed to PAPER and rejects a supplied mode override.
+- `GET /paper/cycles` lists recent cycles (or `?unfinished_only=true`); `GET /paper/cycles/{run_id}` inspects run/candidate/event state; `POST /paper/cycles/{run_id}/recover` explicitly resumes eligible interrupted work.
+- `POST /recovery/reconcile` checks order/executor/fill consistency before operator-directed recovery.
 
 Responses explicitly set `research_only: true`, `execution: "NOT_SUBMITTED"`, and `risk_status: "NOT_EVALUATED"`. Snapshot/research status is `COMPLETE`, `PARTIAL`, or `FAILED`. Autonomous-run status also includes `INTERRUPTED` while a failed stage awaits safe retry. Missing optional sources are not assigned neutral scores. Because macro and sentiment do not yet have providers, runs will normally be `PARTIAL`.
 
@@ -131,6 +161,11 @@ python -m stockmarket research-show --run-id <research-run-id>
 python -m stockmarket research-show --snapshot-id <snapshot-id>
 python -m stockmarket research-assess --snapshot-id <snapshot-id>
 python -m stockmarket research-assessment-show --assessment-id <assessment-id>
+python -m stockmarket paper-cycle --universe <universe-id> --idempotency-key <unique-key> --operator <operator> --top 5
+python -m stockmarket paper-cycle-show --run-id <run-id>
+python -m stockmarket paper-cycle-recover --run-id <run-id>
+python -m stockmarket paper-recovery
+python -m stockmarket paper-positions-manage
 ```
 
 The command uses the configured database, instrument registry, and market-data provider. Optional news/fundamental/sector adapters are currently wired in the API bootstrap; the CLI run uses the available market-data source and reports other components as missing. CLI output is JSON suitable for manual inspection. Exit code `0` means all requested snapshots completed with all components available; `2` indicates partial or failed coverage.
@@ -169,6 +204,6 @@ Values are validated and bounded. The in-process cache is keyed by instrument, e
 
 ## Validation and future work
 
-Focused tests cover snapshot persistence and inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, future evidence rejection, AI schema/citation and provider failures, registered-strategy validation, deterministic ranking, V8 persistence and authenticated assessment API behavior. Phase 2C-3 preserves deterministic strategy and research provenance and stops at a persisted advisory proposal; Phase 2C-4/2C-5 require an explicit PAPER submission/management request and route all orders through RiskEngine and OrderManager. Paper resting-order recovery remains fail-closed rather than restart-resumable.
+Focused tests cover snapshot persistence and inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, future evidence rejection, AI schema/citation and provider failures, registered-strategy validation, deterministic ranking, V8 persistence and authenticated assessment API behavior. Phase 2C-3 preserves deterministic strategy and research provenance and stops at a persisted advisory proposal; Phase 2C-4/2C-5 require explicit PAPER submission/management requests and route orders through RiskEngine and OrderManager. Phases 2C-6/2C-7 add durable executor reconciliation and explicit cycle recovery; these are manual operations, not background monitoring or unattended paper trading.
 
 Historical provider revisions, point-in-time fundamentals and news archives, macro/sentiment providers, source licensing, cache/load behavior at broad-universe scale, and independent calibration remain open work. Nothing in this phase establishes profitability, live readiness, or production suitability.

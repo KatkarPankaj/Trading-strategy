@@ -205,6 +205,44 @@ class ResearchApiTests(unittest.TestCase):
         )
         self.assertEqual(naive.status_code, 422)
 
+    def test_paper_cycle_route_is_authenticated_and_strictly_paper_only(self):
+        context, provider = make_context()
+        self.addCleanup(provider.close)
+        self.addCleanup(context.store.db.close)
+        cycle_service = Mock(return_value={
+            "run_id": "cycle-1",
+            "status": "COMPLETE",
+        })
+        context.autonomous_paper_trading = SimpleNamespace(run=cycle_service)
+        client = TestClient(create_app(context))
+        body = {
+            "universe_id": "us-equities",
+            "idempotency_key": "manual-cycle-1",
+            "operator": "reviewer",
+            "as_of": AS_OF.isoformat(),
+            "top_n": 3,
+        }
+
+        self.assertEqual(client.post("/paper/cycles", json=body).status_code, 401)
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        response = client.post("/paper/cycles", headers=headers, json=body)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "COMPLETE")
+        cycle_service.assert_called_once_with(
+            "us-equities",
+            idempotency_key="manual-cycle-1",
+            operator="reviewer",
+            as_of=AS_OF,
+            top_n=3,
+        )
+        invalid_mode = client.post(
+            "/paper/cycles",
+            headers=headers,
+            json={**body, "mode": "LIVE"},
+        )
+        self.assertEqual(invalid_mode.status_code, 422)
+
     def test_proposal_submission_does_not_accept_ephemeral_research_proposals(self):
         context, provider = make_context()
         self.addCleanup(provider.close)

@@ -256,6 +256,86 @@ _V12 = [
     "CREATE INDEX idx_position_exit_entry ON position_exit_proposals (entry_client_order_id, created_at)",
 ]
 
+_V13 = [
+    "ALTER TABLE fills ADD COLUMN fill_sequence INTEGER",
+    "UPDATE fills SET fill_sequence = 1 WHERE client_order_id IS NOT NULL AND fill_sequence IS NULL",
+    """CREATE TABLE paper_execution_orders (
+        client_order_id TEXT PRIMARY KEY,
+        broker_order_id TEXT NOT NULL UNIQUE,
+        instrument_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        quantity INTEGER NOT NULL,
+        limit_price DOUBLE PRECISION,
+        stop_price DOUBLE PRECISION,
+        filled_quantity INTEGER NOT NULL,
+        average_fill_price DOUBLE PRECISION,
+        error TEXT,
+        fill_events INTEGER NOT NULL,
+        order_payload TEXT NOT NULL,
+        updated_at TEXT NOT NULL)""",
+    """CREATE TABLE paper_execution_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        client_order_id TEXT NOT NULL REFERENCES paper_execution_orders(client_order_id),
+        attempt_number INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (client_order_id, attempt_number))""",
+    """CREATE TABLE autonomous_paper_cycles (
+        run_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        request_hash TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        universe_id TEXT NOT NULL,
+        market_scope TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        as_of TEXT NOT NULL,
+        payload TEXT NOT NULL)""",
+    """CREATE TABLE autonomous_paper_cycle_candidates (
+        run_id TEXT NOT NULL REFERENCES autonomous_paper_cycles(run_id),
+        candidate_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        PRIMARY KEY (run_id, candidate_id))""",
+    """CREATE TABLE autonomous_paper_cycle_events (
+        event_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES autonomous_paper_cycles(run_id),
+        candidate_id TEXT,
+        event_type TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        correlation_id TEXT NOT NULL,
+        payload TEXT NOT NULL)""",
+    """CREATE TABLE autonomous_paper_cycle_locks (
+        scope_key TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE REFERENCES autonomous_paper_cycles(run_id))""",
+    """CREATE TABLE position_exit_evaluations (
+        evaluation_id TEXT PRIMARY KEY,
+        entry_client_order_id TEXT NOT NULL,
+        instrument_id TEXT NOT NULL,
+        quote_timestamp TEXT NOT NULL,
+        status TEXT NOT NULL,
+        trigger_reason TEXT,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (entry_client_order_id, quote_timestamp))""",
+    "CREATE INDEX idx_paper_execution_status ON paper_execution_orders (status)",
+    "CREATE INDEX idx_autonomous_paper_cycles_status ON autonomous_paper_cycles (status, updated_at)",
+    "CREATE INDEX idx_autonomous_paper_events_run ON autonomous_paper_cycle_events (run_id, timestamp)",
+]
+
+_V14 = [
+    """ALTER TABLE autonomous_paper_cycle_locks
+       ADD COLUMN owner_token TEXT NOT NULL DEFAULT 'legacy'""",
+    """ALTER TABLE autonomous_paper_cycle_locks
+       ADD COLUMN lease_until TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -265,7 +345,9 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (9, "autonomous_research_orchestrator", _V9),
     (10, "deterministic_signal_generation", _V10),
     (11, "persisted_trade_proposal_risk_evaluation", _V11),
-    (12, "paper_position_exit_proposals", _V12)]
+    (12, "paper_position_exit_proposals", _V12),
+    (13, "durable_paper_execution_and_autonomous_cycles", _V13),
+    (14, "autonomous_paper_cycle_lock_leases", _V14)]
 
 
 def applied_versions(db: Database) -> set[int]:

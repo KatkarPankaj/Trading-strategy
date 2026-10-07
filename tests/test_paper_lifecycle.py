@@ -459,3 +459,133 @@ class PaperFillPersistenceTests(TestCase):
         self.assertEqual(store.fills.save(portfolio.fills[0]), fill_id)
         self.assertEqual(len(store.fills.all()), 1)
         self.assertEqual(broker.order_status(broker_order_id).status, OrderStatus.FILLED)
+
+    def test_durable_paper_order_and_fill_restore_after_restart(self):
+        database = SQLiteDatabase()
+        self.addCleanup(database.close)
+        migrate(database)
+        store = Store(database)
+
+        def make_portfolio():
+            portfolio = PortfolioManager("USD", 10_000.0)
+            portfolio.on_fill = lambda fill: (
+                store.fills.save(fill),
+                store.positions.replace_all(
+                    portfolio.positions().values(), fill.timestamp),
+            )
+            return portfolio
+
+        portfolio = make_portfolio()
+        broker = PaperBroker(
+            portfolio,
+            {INSTRUMENT.instrument_id: INSTRUMENT},
+            clock=lambda: NOW,
+            market_status_fn=lambda _: True,
+            execution_repository=store.paper_execution,
+            fills_repository=store.fills,
+        )
+        broker.connect()
+        broker.update_price(INSTRUMENT.instrument_id, 100.0, NOW)
+        order = ManagedOrder(
+            client_order_id="durable-paper-order",
+            broker_order_id=None,
+            instrument_id=INSTRUMENT.instrument_id,
+            symbol=INSTRUMENT.symbol,
+            side=OrderSide.BUY,
+            quantity=5,
+            order_type=OrderType.MARKET,
+            limit_price=None,
+            stop_price=None,
+            timestamp=NOW,
+            strategy="orb_vwap",
+            signal_id=None,
+            risk_decision_id=None,
+            status=OrderStatus.SUBMITTED,
+        )
+
+        broker_id = broker.submit_order(order)
+        self.assertEqual(store.paper_execution.get_by_client_order_id(
+            order.client_order_id)["status"], "FILLED")
+        self.assertEqual(len(store.fills.for_order(order.client_order_id)), 1)
+
+        restored_portfolio = PortfolioManager("USD", 10_000.0)
+        for fill in store.fills.all():
+            restored_portfolio.apply_fill(
+                INSTRUMENT, OrderSide(fill["side"]), fill["quantity"],
+                fill["price"], datetime.fromisoformat(fill["timestamp"]),
+                fee=fill["fee"], slippage=fill["slippage"],
+                client_order_id=fill["client_order_id"],
+                fill_sequence=fill["fill_sequence"])
+        restored = PaperBroker(
+            restored_portfolio,
+            {INSTRUMENT.instrument_id: INSTRUMENT},
+            clock=lambda: NOW,
+            market_status_fn=lambda _: True,
+            execution_repository=store.paper_execution,
+            fills_repository=store.fills,
+        )
+        restored.connect()
+
+        self.assertEqual(
+            restored.order_status_by_client_id(order.client_order_id).broker_order_id,
+            broker_id,
+        )
+        self.assertEqual(
+            restored.order_status_by_client_id(order.client_order_id).status,
+            OrderStatus.FILLED,
+        )
+        self.assertEqual(
+            restored.submit_order(order),
+            broker_id,
+            "duplicate client identity must resolve to the original paper order",
+        )
+        self.assertEqual(len(store.fills.for_order(order.client_order_id)), 1)
+
+    def test_failed_durable_fill_write_rolls_back_portfolio_and_order(self):
+        database = SQLiteDatabase()
+        self.addCleanup(database.close)
+        migrate(database)
+        store = Store(database)
+        portfolio = PortfolioManager("USD", 10_000.0)
+
+        def fail_persist(_fill):
+            assert _fill.client_order_id == "failed-paper-write"
+            raise RuntimeError("simulated durable fill write failure")
+
+        portfolio.on_fill = fail_persist
+        broker = PaperBroker(
+            portfolio,
+            {INSTRUMENT.instrument_id: INSTRUMENT},
+            clock=lambda: NOW,
+            market_status_fn=lambda _: True,
+            execution_repository=store.paper_execution,
+            fills_repository=store.fills,
+        )
+        broker.connect()
+        broker.update_price(INSTRUMENT.instrument_id, 100.0, NOW)
+        order = ManagedOrder(
+            client_order_id="failed-paper-write",
+            broker_order_id=None,
+            instrument_id=INSTRUMENT.instrument_id,
+            symbol=INSTRUMENT.symbol,
+            side=OrderSide.BUY,
+            quantity=5,
+            order_type=OrderType.MARKET,
+            limit_price=None,
+            stop_price=None,
+            timestamp=NOW,
+            strategy="orb_vwap",
+            signal_id=None,
+            risk_decision_id=None,
+            status=OrderStatus.SUBMITTED,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "simulated durable fill"):
+            broker.submit_order(order)
+
+        self.assertEqual(portfolio.positions(), {})
+        self.assertEqual(portfolio.cash["USD"], 10_000.0)
+        self.assertIsNone(
+            store.paper_execution.get_by_client_order_id(order.client_order_id))
+        self.assertIsNone(
+            broker.order_status_by_client_id(order.client_order_id))

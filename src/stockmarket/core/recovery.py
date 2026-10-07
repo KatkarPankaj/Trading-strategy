@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import isclose
 from typing import Any, Callable, Iterable, Mapping
 
 from .brokers import BrokerAdapter, BrokerError
@@ -88,7 +89,9 @@ def rebuild_portfolio(
                 f"fill references unknown instrument {row['instrument_id']}")
         portfolio.apply_fill(instrument, OrderSide(row["side"]), row["quantity"], row["price"],
                              datetime.fromisoformat(row["timestamp"]), fee=row["fee"],
-                             slippage=row["slippage"])
+                             slippage=row["slippage"],
+                             client_order_id=row.get("client_order_id"),
+                             fill_sequence=row.get("fill_sequence"))
     return portfolio
 
 
@@ -111,15 +114,110 @@ def reconcile_positions(portfolio: PortfolioManager, broker: BrokerAdapter) -> l
     return out
 
 
-def reconcile_orders(manager: OrderManager, broker: BrokerAdapter) -> tuple[list[Discrepancy], list[str]]:
+def reconcile_orders(
+    manager: OrderManager,
+    broker: BrokerAdapter,
+    *,
+    store: Any = None,
+) -> tuple[list[Discrepancy], list[str]]:
     discrepancies: list[Discrepancy] = []
     actions: list[str] = []
     try:
         broker_open = {o.client_order_id: o for o in broker.open_orders()}
     except BrokerError as exc:
         return [Discrepancy("ORDERS:BROKER_QUERY_FAILED", "BROKER_ERROR", "open_orders", "", "", str(exc))], actions
-    for order in manager.open_orders():
+    lookup = getattr(broker, "order_status_by_client_id", None)
+    orders = (
+        manager.orders()
+        if callable(lookup) and getattr(broker, "durable_execution", False)
+        else manager.open_orders()
+    )
+    for order in orders:
         cid = order.client_order_id
+        if callable(lookup) and getattr(broker, "durable_execution", False):
+            try:
+                durable = lookup(cid)
+            except BrokerError as exc:
+                discrepancies.append(Discrepancy(
+                    f"ORDER:{cid}:EXECUTOR_QUERY_FAILED",
+                    "BROKER_ERROR", cid, order.status.value, "", str(exc)))
+                continue
+            if durable is None:
+                if order.status in {
+                    OrderStatus.NEW, OrderStatus.VALIDATED, OrderStatus.SUBMITTED,
+                    OrderStatus.FAILED,
+                } and order.broker_order_id is None:
+                    try:
+                        manager.authorize_safe_retry(cid)
+                    except Exception as exc:
+                        discrepancies.append(Discrepancy(
+                            f"ORDER:{cid}:SAFE_RETRY_FAILED",
+                            "ORDER_STATE_UNKNOWN", cid, order.status.value,
+                            "no durable paper execution", str(exc)))
+                        continue
+                    submission = store.proposal_submissions.for_order(cid) if store else None
+                    if submission is not None:
+                        store.proposal_submissions.set_state(
+                            submission["proposal_id"], state="RETRYABLE",
+                            error="durable paper executor confirms order was not accepted")
+                    actions.append(f"{cid}: durable executor confirms safe retry")
+                    continue
+                if order.is_terminal:
+                    continue
+                discrepancies.append(Discrepancy(
+                    f"ORDER:{cid}:MISSING_FROM_EXECUTOR",
+                    "ORDER_MISSING", cid, order.status.value,
+                    "not found in durable paper execution state"))
+                continue
+
+            fill_rows = store.fills.for_order(cid) if store is not None else []
+            fill_quantity = sum(int(row["quantity"]) for row in fill_rows)
+            weighted_price = sum(
+                float(row["price"]) * int(row["quantity"]) for row in fill_rows)
+            if fill_quantity != durable.filled_quantity or (
+                fill_quantity > 0
+                and (
+                    durable.average_fill_price is None
+                    or not isclose(
+                        weighted_price / fill_quantity,
+                        durable.average_fill_price,
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
+                    )
+                )
+            ):
+                discrepancies.append(Discrepancy(
+                    f"ORDER:{cid}:FILL_LEDGER_MISMATCH",
+                    "FILL_MISMATCH", cid, str(fill_quantity),
+                    str(durable.filled_quantity),
+                    "paper executor and durable fill ledger disagree"))
+                continue
+            try:
+                manager.reconcile_execution(
+                    cid,
+                    broker_order_id=durable.broker_order_id,
+                    status=durable.status,
+                    filled_quantity=durable.filled_quantity,
+                    average_fill_price=durable.average_fill_price,
+                    error=durable.error,
+                )
+            except Exception as exc:
+                discrepancies.append(Discrepancy(
+                    f"ORDER:{cid}:RECONCILIATION_FAILED",
+                    "ORDER_STATE_UNKNOWN", cid, order.status.value,
+                    durable.status.value, str(exc)))
+                continue
+            submission = store.proposal_submissions.for_order(cid) if store else None
+            if submission is not None and submission["state"] == "SUBMITTING":
+                store.proposal_submissions.set_state(
+                    submission["proposal_id"],
+                    state=f"ORDER_{durable.status.value}",
+                    error=durable.error)
+            actions.append(
+                f"{cid}: adopted durable paper state {durable.status.value}")
+            continue
+        if order.is_terminal:
+            continue
         if order.status in (OrderStatus.NEW, OrderStatus.VALIDATED):
             manager.mark_failed(
                 cid, "interrupted before submission by restart")
@@ -219,13 +317,51 @@ class RecoveryManager:
     def _reconcile(self, restored: int) -> ReconciliationReport:
         try:
             order_issues, actions = reconcile_orders(
-                self._orders, self._broker)
+                self._orders, self._broker, store=self._store)
+            actions.extend(self._reconcile_submission_claims())
+            actions.extend(
+                f"paper cycle {run['run_id']} is {run['status']} at "
+                f"{run['stage']}; explicit recovery is available"
+                for run in self._store.autonomous_paper_cycles.unfinished()
+            )
             position_issues = reconcile_positions(
                 self._portfolio, self._broker)
         except BrokerError as exc:
             return ReconciliationReport(_now(), (Discrepancy(
                 "BROKER:QUERY_FAILED", "BROKER_ERROR", "broker", "", "", str(exc)),), restored)
         return ReconciliationReport(_now(), tuple(order_issues + position_issues), restored, tuple(actions))
+
+    def _reconcile_submission_claims(self) -> list[str]:
+        actions: list[str] = []
+        for claim in self._store.proposal_submissions.incomplete():
+            client_order_id = claim["client_order_id"]
+            execution = self._store.paper_execution.get_by_client_order_id(
+                client_order_id)
+            order_row = self._store.orders.get(client_order_id)
+            if execution is not None:
+                state = f"ORDER_{execution['status']}"
+                error = execution.get("error")
+            elif order_row is None:
+                state = "RETRYABLE"
+                error = "no order or paper execution was persisted"
+            else:
+                try:
+                    order = self._orders.get(client_order_id)
+                except Exception:
+                    continue
+                if order.status is OrderStatus.NEW:
+                    state = "RETRYABLE"
+                    error = "recovery proved no paper execution exists"
+                elif order.is_terminal:
+                    state = f"ORDER_{order.status.value}"
+                    error = order.error
+                else:
+                    continue
+            self._store.proposal_submissions.set_state(
+                claim["proposal_id"], state=state, error=error)
+            actions.append(
+                f"{client_order_id}: reconciled proposal claim as {state}")
+        return actions
 
     def _conclude(self, report: ReconciliationReport, action: str) -> None:
         ids = [d.id for d in report.discrepancies]

@@ -18,6 +18,7 @@ from .core.candidate_research import (
     parse_candidate_research_settings,
 )
 from .core.autonomous_research import AutonomousResearchError
+from .core.autonomous_paper_trading import AutonomousPaperCycleError
 from .data import fetch_intraday_data, latest_bars
 from .strategy import add_strategy_columns
 from .sweep import run_parameter_sweep
@@ -269,6 +270,35 @@ def _build_parser() -> argparse.ArgumentParser:
         "--as-of", type=_aware_datetime, default=None,
         help="Optional timezone-aware risk evaluation timestamp",
     )
+
+    paper_cycle_parser = subparsers.add_parser(
+        "paper-cycle",
+        help="Run one bounded, restart-safe PAPER research and execution cycle",
+    )
+    paper_cycle_parser.add_argument("--universe", required=True)
+    paper_cycle_parser.add_argument("--idempotency-key", required=True)
+    paper_cycle_parser.add_argument("--operator", required=True)
+    paper_cycle_parser.add_argument("--as-of", type=_aware_datetime, default=None)
+    paper_cycle_parser.add_argument("--top", type=int, choices=range(1, 11), default=None)
+
+    paper_cycle_show_parser = subparsers.add_parser(
+        "paper-cycle-show", help="Inspect a persisted PAPER cycle")
+    paper_cycle_show_parser.add_argument("--run-id", required=True)
+
+    paper_cycle_recover_parser = subparsers.add_parser(
+        "paper-cycle-recover", help="Resume an interrupted or partial PAPER cycle")
+    paper_cycle_recover_parser.add_argument("--run-id", required=True)
+
+    subparsers.add_parser(
+        "paper-positions", help="Show current PAPER positions")
+    subparsers.add_parser(
+        "paper-positions-manage",
+        help="Evaluate protective exits for current PAPER positions",
+    )
+    subparsers.add_parser(
+        "paper-orders", help="Show persisted PAPER orders")
+    subparsers.add_parser(
+        "paper-recovery", help="Reconcile persisted PAPER orders and fills")
 
     return parser
 
@@ -880,6 +910,116 @@ def cmd_research_risk(
         context.store.db.close()
 
 
+def _close_context(context) -> None:
+    if context.market_data is not None:
+        context.market_data.close()
+    context.store.db.close()
+
+
+def cmd_paper_cycle(
+    universe_id: str,
+    idempotency_key: str,
+    operator: str,
+    as_of: datetime | None,
+    top_n: int | None,
+) -> int:
+    context = build_context(load_settings())
+    try:
+        service = context.autonomous_paper_trading
+        if service is None:
+            print("Autonomous PAPER trading requires configured AI research")
+            return 2
+        try:
+            result = service.run(
+                universe_id,
+                idempotency_key=idempotency_key,
+                operator=operator,
+                as_of=as_of,
+                top_n=top_n,
+            )
+        except (AutonomousPaperCycleError, ValueError, KeyError) as exc:
+            print(f"PAPER cycle refused: {exc}")
+            return 2
+        print(to_json(result))
+        return 0 if result["status"] == "COMPLETE" else 2
+    finally:
+        _close_context(context)
+
+
+def cmd_paper_cycle_show(run_id: str) -> int:
+    settings = load_settings()
+    auto_migrate = (os.environ.get("AUTO_MIGRATE") or (
+        "false" if settings.environment in (Environment.STAGING, Environment.PRODUCTION)
+        else "true")).lower() == "true"
+    store = open_store(settings.database_url.reveal(), migrate_schema=auto_migrate)
+    try:
+        run = store.autonomous_paper_cycles.get_run(run_id)
+        if run is None:
+            print(f"Unknown PAPER cycle: {run_id}")
+            return 2
+        print(to_json({
+            "run": run,
+            "candidates": store.autonomous_paper_cycles.candidates(run_id),
+            "events": store.autonomous_paper_cycles.events(run_id),
+        }))
+        return 0
+    finally:
+        store.db.close()
+
+
+def cmd_paper_cycle_recover(run_id: str) -> int:
+    context = build_context(load_settings())
+    try:
+        service = context.autonomous_paper_trading
+        if service is None:
+            print("Autonomous PAPER trading requires configured AI research")
+            return 2
+        try:
+            result = service.recover(run_id)
+        except (AutonomousPaperCycleError, ValueError, KeyError) as exc:
+            print(f"PAPER cycle recovery refused: {exc}")
+            return 2
+        print(to_json(result))
+        return 0 if result["status"] == "COMPLETE" else 2
+    finally:
+        _close_context(context)
+
+
+def cmd_paper_state(command: str) -> int:
+    context = build_context(load_settings())
+    try:
+        if command == "paper-positions":
+            result = {
+                "trading_mode": context.mode,
+                "positions": list(context.paper.portfolio.positions().values()),
+            }
+        elif command == "paper-positions-manage":
+            if context.paper_position_manager is None:
+                print("PAPER position manager is unavailable")
+                return 2
+            result = context.paper_position_manager.manage()
+        elif command == "paper-orders":
+            result = {
+                "trading_mode": context.mode,
+                "orders": list(context.paper.order_manager.orders()),
+            }
+        else:
+            report = context.recovery.reconcile()
+            result = {
+                "trading_mode": context.mode,
+                "clean": report.clean,
+                "checked_at": report.checked_at,
+                "discrepancies": report.discrepancies,
+                "actions": report.actions,
+            }
+        print(to_json(result))
+        if command == "paper-recovery":
+            return 0 if result["clean"] else 2
+        return 0
+    finally:
+        _close_context(context)
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -903,6 +1043,19 @@ def main() -> int:
             args.run_id, args.candidate_id, args.as_of)
     if args.command == "research-risk":
         return cmd_research_risk(args.run_id, args.candidate_id, args.as_of)
+    if args.command == "paper-cycle":
+        return cmd_paper_cycle(
+            args.universe, args.idempotency_key, args.operator,
+            args.as_of, args.top)
+    if args.command == "paper-cycle-show":
+        return cmd_paper_cycle_show(args.run_id)
+    if args.command == "paper-cycle-recover":
+        return cmd_paper_cycle_recover(args.run_id)
+    if args.command in {
+        "paper-positions", "paper-positions-manage", "paper-orders",
+        "paper-recovery",
+    }:
+        return cmd_paper_state(args.command)
     cfg = _load_config(args.config, getattr(args, "symbol", None))
 
     if args.command == "backtest":

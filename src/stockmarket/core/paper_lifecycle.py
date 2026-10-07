@@ -86,6 +86,7 @@ class PaperProposalExecutionService:
 
         client_order_id = _proposal_order_id(proposal_id)
         prior = self.store.proposal_submissions.get(proposal_id)
+        retry = False
         if prior is not None:
             if prior["client_order_id"] != client_order_id:
                 raise PaperLifecycleError(
@@ -106,8 +107,18 @@ class PaperProposalExecutionService:
             if prior["state"] == "REJECTED_BEFORE_ORDER":
                 raise PaperLifecycleError(
                     f"proposal was rejected before order creation: {prior['error']}")
-            raise PaperLifecycleError(
-                "proposal submission is already claimed; reconcile before retrying")
+            if prior["state"] == "RETRYABLE":
+                if (
+                    prior["operator"] != operator
+                    or prior["sizing_mode"] != sizing_mode
+                    or prior["quantity"] != quantity
+                ):
+                    raise PaperLifecycleError(
+                        "safe retry must use the original operator and sizing parameters")
+                retry = True
+            else:
+                raise PaperLifecycleError(
+                    "proposal submission is already claimed; reconcile before retrying")
 
         record = self.store.trade_proposals.get_by_id(proposal_id)
         if record is None:
@@ -148,17 +159,21 @@ class PaperProposalExecutionService:
         _validate_quote(instrument, price, timestamp, now, self.max_age)
         self.update_price(instrument.instrument_id, price, timestamp)
 
-        claimed = self.store.proposal_submissions.begin(
-            proposal_id=proposal_id,
-            client_order_id=client_order_id,
-            operator=operator,
-            sizing_mode=sizing_mode,
-            quantity=quantity,
-            proposal_as_of=proposal_at,
-            generated_at=_parse_aware(
-                proposal.get("provenance", {}).get("evaluation_as_of", proposal_at),
-                "proposal evaluation timestamp"),
-            proposal_payload=proposal,
+        claimed = (
+            self.store.proposal_submissions.retry(proposal_id)
+            if retry else self.store.proposal_submissions.begin(
+                proposal_id=proposal_id,
+                client_order_id=client_order_id,
+                operator=operator,
+                sizing_mode=sizing_mode,
+                quantity=quantity,
+                proposal_as_of=proposal_at,
+                generated_at=_parse_aware(
+                    proposal.get("provenance", {}).get(
+                        "evaluation_as_of", proposal_at),
+                    "proposal evaluation timestamp"),
+                proposal_payload=proposal,
+            )
         )
         if not claimed:
             raise PaperLifecycleError(
@@ -313,6 +328,7 @@ class PaperPositionManager:
         update_price: PriceUpdate,
         max_age: timedelta,
         clock: Callable[[], datetime] | None = None,
+        evaluation_repository: Any = None,
     ) -> None:
         if trading.mode is not TradingMode.PAPER:
             raise ValueError("position management requires PAPER mode")
@@ -326,6 +342,7 @@ class PaperPositionManager:
         self.update_price = update_price
         self.max_age = max_age
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.evaluation_repository = evaluation_repository
 
     def manage(self) -> dict[str, Any]:
         now = self._now()
@@ -370,6 +387,9 @@ class PaperPositionManager:
                 raise PaperLifecycleError(
                     f"quote predates the open position for {instrument.instrument_id}")
             if not self.markets.is_regular_session(instrument.market, now):
+                self._record_evaluation(
+                    position, entry, timestamp, "SESSION_CLOSED", None,
+                    price=price, stop=stop, target=target)
                 evaluated.append({
                     "instrument_id": instrument.instrument_id,
                     "status": "SESSION_CLOSED",
@@ -398,6 +418,17 @@ class PaperPositionManager:
             position = self.trading.portfolio.positions().get(
                 instrument.instrument_id)
             if position is None:
+                self._record_evaluation(
+                    position=None,
+                    entry=entry,
+                    timestamp=timestamp,
+                    status="CLOSED_DURING_MARKET_UPDATE",
+                    reason=None,
+                    price=price,
+                    stop=stop,
+                    target=target,
+                    instrument_id=instrument.instrument_id,
+                )
                 evaluated.append({
                     "instrument_id": instrument.instrument_id,
                     "status": "CLOSED_DURING_MARKET_UPDATE",
@@ -407,6 +438,9 @@ class PaperPositionManager:
                 continue
             reason = _exit_trigger(position.side, price, stop, target)
             if reason is None:
+                self._record_evaluation(
+                    position, entry, timestamp, "MONITORED", None,
+                    price=price, stop=stop, target=target)
                 evaluated.append({
                     "instrument_id": instrument.instrument_id,
                     "status": "MONITORED",
@@ -414,15 +448,62 @@ class PaperPositionManager:
                     "quote_timestamp": timestamp,
                 })
                 continue
-            evaluated.append(self._submit_exit(
+            outcome = self._submit_exit(
                 position=position,
                 instrument=instrument,
                 entry=entry,
                 price=price,
                 timestamp=timestamp,
                 reason=reason,
-            ))
+            )
+            self._record_evaluation(
+                position, entry, timestamp, str(outcome["status"]), reason,
+                price=price, stop=stop, target=target,
+                exit_proposal_id=outcome.get("proposal_id"),
+                exit_client_order_id=outcome.get("client_order_id"),
+            )
+            evaluated.append(outcome)
         return {"trading_mode": TradingMode.PAPER.value, "positions": evaluated}
+
+    def _record_evaluation(
+        self,
+        position: Any,
+        entry: Mapping[str, Any],
+        timestamp: datetime,
+        status: str,
+        reason: str | None,
+        *,
+        price: float,
+        stop: float,
+        target: float | None,
+        instrument_id: str | None = None,
+        **details: Any,
+    ) -> None:
+        if self.evaluation_repository is None:
+            return
+        entry_client_order_id = str(entry["client_order_id"])
+        actual_instrument_id = (
+            instrument_id if instrument_id is not None else position.instrument_id)
+        evaluation_id = str(uuid5(
+            NAMESPACE_URL,
+            f"position-exit-evaluation:{entry_client_order_id}:{timestamp.isoformat()}",
+        ))
+        self.evaluation_repository.save(
+            evaluation_id=evaluation_id,
+            entry_client_order_id=entry_client_order_id,
+            instrument_id=actual_instrument_id,
+            quote_timestamp=timestamp,
+            status=status,
+            trigger_reason=reason,
+            payload={
+                "quote_price": price,
+                "stop_price": stop,
+                "target_price": target,
+                "position_side": position.side.value if position is not None else None,
+                "position_quantity": position.quantity if position is not None else None,
+                **details,
+            },
+        )
 
     def _submit_exit(
         self,
