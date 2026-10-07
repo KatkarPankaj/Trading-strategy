@@ -176,12 +176,28 @@ _V8 = [
     "CREATE INDEX idx_research_opportunities_rank ON research_opportunities (state, ranking_score)",
 ]
 
+_V9 = [
+    """CREATE TABLE autonomous_research_runs (
+        run_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+        request_hash TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        as_of TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE autonomous_research_candidates (
+        run_id TEXT NOT NULL REFERENCES autonomous_research_runs(run_id),
+        instrument_id TEXT NOT NULL, stage TEXT NOT NULL, snapshot_id TEXT,
+        opportunity_id TEXT, error TEXT, updated_at TEXT NOT NULL, payload TEXT NOT NULL,
+        PRIMARY KEY (run_id, instrument_id))""",
+    "CREATE INDEX idx_autonomous_runs_status ON autonomous_research_runs (status, updated_at)",
+    "CREATE INDEX idx_autonomous_candidates_stage ON autonomous_research_candidates (run_id, stage)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
     (4, "order_audit", _V4), (5, "proposal_submissions", _V5),
     (6, "market_scanner", _V6), (7, "candidate_research", _V7),
-    (8, "ai_research_assessment", _V8)]
+    (8, "ai_research_assessment", _V8),
+    (9, "autonomous_research_orchestrator", _V9)]
 
 
 def applied_versions(db: Database) -> set[int]:

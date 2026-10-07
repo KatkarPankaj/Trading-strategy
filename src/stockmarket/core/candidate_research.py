@@ -118,6 +118,7 @@ class CandidateResearchRun:
     failed_count: int
     snapshot_ids: tuple[str, ...]
     failure_summary: tuple[str, ...] = ()
+    configuration_fingerprint: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +229,8 @@ class CandidateResearchService:
         *,
         as_of: datetime | None = None,
         limit: int = 50,
+        run_id: str | None = None,
+        max_concurrency: int | None = None,
     ) -> tuple[CandidateResearchRun, tuple[ResearchSnapshot, ...]]:
         if not isinstance(scan_id, str) or not scan_id.strip():
             raise ValueError("scan_id must be a non-empty string")
@@ -235,6 +238,19 @@ class CandidateResearchService:
                 or not 1 <= limit <= self.settings.max_candidates:
             raise ValueError(
                 f"limit must be between 1 and {self.settings.max_candidates}")
+        if run_id is not None and (
+            not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 64
+            or any(not (ch.isascii() and (ch.isalnum() or ch in "_-"))
+                   for ch in run_id)
+        ):
+            raise ValueError("run_id must be a non-empty safe identifier")
+        workers = self.settings.max_concurrency if max_concurrency is None \
+            else max_concurrency
+        if isinstance(workers, bool) or not isinstance(workers, int) \
+                or not 1 <= workers <= self.settings.max_concurrency:
+            raise ValueError(
+                f"max_concurrency must be between 1 and "
+                f"{self.settings.max_concurrency}")
         now = self._now()
         timestamp = now if as_of is None else as_of
         self._validate_as_of(timestamp, now)
@@ -259,13 +275,13 @@ class CandidateResearchService:
             for rank, row in enumerate(rows, start=1)
             if row["instrument_id"] in self.instruments
         ]
-        run_id = str(uuid4())
+        run_id = run_id or str(uuid4())
         snapshots: list[ResearchSnapshot] = []
         failures = [
             f"{row['instrument_id']}:UNKNOWN_INSTRUMENT"
             for row in rows if row["instrument_id"] not in self.instruments
         ]
-        with ThreadPoolExecutor(max_workers=self.settings.max_concurrency) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
                     self._research_one, instrument, timestamp, run_id, rank, score
@@ -296,6 +312,7 @@ class CandidateResearchService:
             failed_count=len(failures),
             snapshot_ids=tuple(snapshot.snapshot_id for snapshot in snapshots),
             failure_summary=tuple(failures),
+            configuration_fingerprint=self.configuration_fingerprint,
         )
         self.research_runs.save_run(run, snapshots)
         return run, tuple(snapshots)
@@ -670,6 +687,10 @@ class CandidateResearchService:
             getattr(self.sector_provider, "name", ""),
             repr(self.settings),
         ))
+
+    @property
+    def configuration_fingerprint(self) -> str:
+        return self._fingerprint()
 
     def _cached(self, key: tuple[str, str, str]) -> tuple[Any, ...] | None:
         if self.settings.cache_ttl_seconds == 0:

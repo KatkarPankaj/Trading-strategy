@@ -17,13 +17,18 @@ from .core.candidate_research import (
     CandidateResearchService,
     parse_candidate_research_settings,
 )
+from .core.autonomous_research import AutonomousResearchError
 from .data import fetch_intraday_data, latest_bars
 from .strategy import add_strategy_columns
 from .sweep import run_parameter_sweep
 from .validation.robustness import default_parameter_variations, run_robustness_analysis
 from .validation.reports import write_validation_report
 from .validation.walk_forward import WalkForwardConfig, walk_forward_validate
-from .api.bootstrap import create_candidate_assessment_service, instrument_from_row
+from .api.bootstrap import (
+    build_context,
+    create_candidate_assessment_service,
+    instrument_from_row,
+)
 from .core.data import DataPolicy, ResilientProvider, create_market_data_provider
 from .core.markets import default_markets
 from .core.persistence import open_store, to_json
@@ -229,6 +234,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "research-assessment-show",
         help="Inspect a persisted AI research assessment")
     assessment_show_parser.add_argument("--assessment-id", required=True)
+
+    autonomous_parser = subparsers.add_parser(
+        "research-autonomous",
+        help="Run or resume the bounded PAPER-only opportunity orchestrator")
+    autonomous_parser.add_argument("--universe", required=True)
+    autonomous_parser.add_argument("--idempotency-key", required=True)
+    autonomous_parser.add_argument("--mode", choices=["PAPER", "LIVE"], default="PAPER")
+    autonomous_parser.add_argument("--as-of", type=_aware_datetime, default=None)
+    autonomous_parser.add_argument("--top", type=int, choices=range(1, 11), default=None)
+
+    autonomous_show_parser = subparsers.add_parser(
+        "research-autonomous-show", help="Inspect a persisted autonomous research run")
+    autonomous_show_parser.add_argument("--run-id", required=True)
 
     return parser
 
@@ -728,6 +746,53 @@ def cmd_candidate_assessment_show(assessment_id: str) -> int:
         store.db.close()
 
 
+def cmd_autonomous_research(
+    universe_id: str, idempotency_key: str, mode: str,
+    as_of: datetime | None, top_n: int | None,
+) -> int:
+    settings = load_settings()
+    context = build_context(settings)
+    try:
+        service = context.autonomous_research
+        if service is None:
+            print("Autonomous research requires configured AI candidate assessment")
+            return 2
+        try:
+            result = service.run(
+                universe_id, idempotency_key=idempotency_key, mode=mode,
+                as_of=as_of, top_n=top_n,
+            )
+        except (AutonomousResearchError, ValueError, KeyError) as exc:
+            print(f"Autonomous research refused: {exc}")
+            return 2
+        print(to_json(result))
+        return 0 if result["status"] == "COMPLETE" else 2
+    finally:
+        if context.market_data is not None:
+            context.market_data.close()
+        context.store.db.close()
+
+
+def cmd_autonomous_research_show(run_id: str) -> int:
+    settings = load_settings()
+    auto_migrate = (os.environ.get("AUTO_MIGRATE") or (
+        "false" if settings.environment in (Environment.STAGING, Environment.PRODUCTION)
+        else "true")).lower() == "true"
+    store = open_store(settings.database_url.reveal(), migrate_schema=auto_migrate)
+    try:
+        run = store.autonomous_research.get_run(run_id)
+        if run is None:
+            print(f"Unknown autonomous research run: {run_id}")
+            return 2
+        print(to_json({
+            "run": run,
+            "candidates": store.autonomous_research.candidates(run_id),
+        }))
+        return 0
+    finally:
+        store.db.close()
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -741,6 +806,11 @@ def main() -> int:
         return cmd_candidate_assess(args.snapshot_id)
     if args.command == "research-assessment-show":
         return cmd_candidate_assessment_show(args.assessment_id)
+    if args.command == "research-autonomous":
+        return cmd_autonomous_research(
+            args.universe, args.idempotency_key, args.mode, args.as_of, args.top)
+    if args.command == "research-autonomous-show":
+        return cmd_autonomous_research_show(args.run_id)
     cfg = _load_config(args.config, getattr(args, "symbol", None))
 
     if args.command == "backtest":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
@@ -411,6 +412,13 @@ class ScanResultRepository(Protocol):
         candidates: Sequence[ScannerCandidate],
     ) -> None: ...
 
+    def get(self, scan_id: str) -> Mapping[str, object] | None: ...
+
+    def candidates(
+        self, scan_id: str, *, accepted_only: bool = False,
+        selected_only: bool = False, limit: int = 100, offset: int = 0,
+    ) -> list[Mapping[str, object]]: ...
+
 
 def _market_status(markets: MarketRegistry, instrument: Instrument, at: datetime) -> MarketSessionStatus:
     try:
@@ -458,6 +466,18 @@ class MarketScanner:
     def get_universe(self, universe_id: str) -> tuple[UniverseDefinition, tuple[Instrument, ...]]:
         return self._universes.get_universe(universe_id)
 
+    @property
+    def max_concurrency(self) -> int:
+        return self._settings.max_concurrency
+
+    @property
+    def configuration_fingerprint(self) -> str:
+        return hashlib.sha256(repr(self._settings).encode("utf-8")).hexdigest()
+
+    @property
+    def repository(self) -> ScanResultRepository | None:
+        return self._repository
+
     def scan(
         self,
         universe_id: str,
@@ -465,6 +485,10 @@ class MarketScanner:
         *,
         top_n: int | None = None,
         as_of: datetime | None = None,
+        scan_id: str | None = None,
+        allowed_markets: Sequence[str] | None = None,
+        allowed_asset_classes: Sequence[AssetClass] | None = None,
+        max_concurrency: int | None = None,
     ) -> ScanResult:
         try:
             selected_mode = ScanMode(mode)
@@ -482,7 +506,47 @@ class MarketScanner:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise ValueError("top_n must be between 1 and 1000")
         definition, instruments = self._universes.get_universe(universe_id)
-        scan_id = str(uuid4())
+        selected_markets = definition.markets
+        if scan_id is not None and (
+            not isinstance(scan_id, str) or not scan_id.strip()
+            or len(scan_id) > 64
+            or any(not (ch.isascii() and (ch.isalnum() or ch in "_-"))
+                   for ch in scan_id)
+        ):
+            raise ValueError("scan_id must be a non-empty safe identifier")
+        if allowed_markets is not None:
+            if not isinstance(allowed_markets, Sequence) or isinstance(
+                    allowed_markets, (str, bytes)) or not allowed_markets:
+                raise ValueError("allowed_markets must be a non-empty sequence")
+            normalized_markets = {code.strip().upper() for code in allowed_markets
+                                  if isinstance(code, str) and code.strip()}
+            if len(normalized_markets) != len(allowed_markets):
+                raise ValueError("allowed_markets must contain unique non-empty codes")
+            if not normalized_markets.issubset(
+                    {code.upper() for code in definition.markets}):
+                raise ValueError("allowed_markets must be a subset of the universe markets")
+            selected_markets = tuple(sorted(normalized_markets))
+            instruments = tuple(item for item in instruments
+                                if item.market.upper() in normalized_markets)
+        if allowed_asset_classes is not None:
+            if not isinstance(allowed_asset_classes, Sequence) or isinstance(
+                    allowed_asset_classes, (str, bytes)) or not allowed_asset_classes \
+                    or any(not isinstance(item, AssetClass)
+                           for item in allowed_asset_classes):
+                raise ValueError("allowed_asset_classes must contain supported asset classes")
+            if len(set(allowed_asset_classes)) != len(allowed_asset_classes):
+                raise ValueError("allowed_asset_classes must not contain duplicates")
+            if not set(allowed_asset_classes).issubset(set(definition.asset_classes)):
+                raise ValueError(
+                    "allowed_asset_classes must be a subset of the universe asset classes")
+            instruments = tuple(item for item in instruments
+                                if item.asset_class in allowed_asset_classes)
+        workers = self._settings.max_concurrency if max_concurrency is None else max_concurrency
+        if isinstance(workers, bool) or not isinstance(workers, int) \
+                or not 1 <= workers <= self._settings.max_concurrency:
+            raise ValueError(
+                f"max_concurrency must be between 1 and {self._settings.max_concurrency}")
+        scan_id = scan_id or str(uuid4())
         started = now
         logger.info(
             "market scan started",
@@ -490,7 +554,7 @@ class MarketScanner:
                    "mode": selected_mode.value, "requested_count": len(instruments)},
         )
         outcomes: list[tuple[ScannerCandidate, bool]] = []
-        with ThreadPoolExecutor(max_workers=self._settings.max_concurrency) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             for offset in range(0, len(instruments), self._settings.batch_size):
                 batch = instruments[offset:offset + self._settings.batch_size]
                 outcomes.extend(pool.map(
@@ -513,7 +577,7 @@ class MarketScanner:
         completed = self._clock()
         result = ScanResult(
             scan_id=scan_id, universe_id=definition.universe_id,
-            markets=definition.markets, mode=selected_mode,
+            markets=selected_markets, mode=selected_mode,
             started_at=started, completed_at=completed, status=status,
             requested_count=len(instruments), evaluated_count=evaluated_count,
             accepted_count=len(accepted), rejected_count=len(instruments) - len(accepted),

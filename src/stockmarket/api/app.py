@@ -21,6 +21,11 @@ from ..core.ai.candidate_assessment import (
     CandidateAssessmentError,
     CandidateAssessmentService,
 )
+from ..core.autonomous_research import (
+    AutonomousResearchError,
+    AutonomousResearchService,
+    IdempotencyConflict,
+)
 from ..core.executors import LIVE_CONFIRMATION_PHRASE, LiveTradingRefused, TradingMode
 from ..core.kill_switch import KillSwitchError
 from ..core.markets import UnknownMarket
@@ -44,6 +49,7 @@ from ..core.trading_service import (
 )
 from .schemas import (
     CandidateResearchRunBody,
+    AutonomousResearchRunBody,
     KillResetBody,
     KillTriggerBody,
     OpportunityRunBody,
@@ -77,6 +83,7 @@ class ApiContext:
     scanner: MarketScanner | None = None
     candidate_research: CandidateResearchService | None = None
     candidate_assessment: CandidateAssessmentService | None = None
+    autonomous_research: AutonomousResearchService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -270,6 +277,38 @@ def create_app(ctx: ApiContext) -> FastAPI:
             "run": _plain(run),
             "snapshots": [_plain(snapshot) for snapshot in snapshots],
         }
+
+    @app.post("/research/autonomous", dependencies=[Depends(auth)])
+    def run_autonomous_research(body: AutonomousResearchRunBody) -> dict[str, Any]:
+        if ctx.autonomous_research is None:
+            raise HTTPException(503, "autonomous research is not configured")
+        try:
+            return ctx.autonomous_research.run(
+                body.universe_id,
+                idempotency_key=body.idempotency_key,
+                mode=body.mode,
+                as_of=body.as_of,
+                top_n=body.top_n,
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except AutonomousResearchError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.get("/research/autonomous/{run_id}", dependencies=[Depends(auth)])
+    def get_autonomous_research(run_id: str) -> dict[str, Any]:
+        if ctx.autonomous_research is None:
+            raise HTTPException(503, "autonomous research is not configured")
+        result = ctx.autonomous_research.get_run(run_id)
+        if result is None:
+            raise HTTPException(404, "unknown autonomous research run")
+        return result
 
     @app.get("/research/runs/{run_id}", dependencies=[Depends(auth)])
     def get_candidate_research_run(run_id: str) -> dict[str, Any]:

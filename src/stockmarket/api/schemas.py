@@ -119,6 +119,24 @@ class CandidateResearchRunBody(BaseModel):
         return value
 
 
+class AutonomousResearchRunBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    universe_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    idempotency_key: str = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    mode: Literal["PAPER", "LIVE"] = "PAPER"
+    as_of: datetime | None = None
+    top_n: int | None = Field(default=None, ge=1, le=10, strict=True)
+
+    @field_validator("as_of")
+    @classmethod
+    def require_aware_as_of(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("as_of must be timezone-aware")
+        return value
+
+
 class OpportunityRunBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

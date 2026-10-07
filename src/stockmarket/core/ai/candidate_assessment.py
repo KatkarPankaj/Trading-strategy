@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -202,6 +203,8 @@ class CandidateAssessmentRepository(Protocol):
 
     def get_assessment(self, assessment_id: str) -> dict[str, Any] | None: ...
 
+    def opportunity_for_snapshot(self, snapshot_id: str) -> dict[str, Any] | None: ...
+
     def list_opportunities(
         self, *, limit: int = 100, offset: int = 0,
     ) -> list[dict[str, Any]]: ...
@@ -237,13 +240,52 @@ class CandidateAssessmentService:
         self.ranking_config = ranking
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def assess(self, snapshot_id: str) -> AIResearchOpportunity:
+    @property
+    def configuration_fingerprint(self) -> str:
+        catalog = [
+            {
+                "name": name,
+                "implementation": type(strategy).__name__,
+                "version": str(getattr(strategy, "version", "unspecified"))[:128],
+            }
+            for name, strategy in self.strategies.items()
+        ]
+        configuration = {
+            "provider": self.analyst.provider_name,
+            "model_version": self.model_version,
+            "max_input_chars": self.analyst.max_input_chars,
+            "prompt_version": PROMPT_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "ranking": self.ranking_config,
+            "catalog": catalog,
+        }
+        text = json.dumps(configuration, sort_keys=True, separators=(",", ":"),
+                          default=str)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def assess(
+        self,
+        snapshot_id: str,
+        *,
+        strategy_allowlist: tuple[str, ...] | None = None,
+    ) -> AIResearchOpportunity:
         if not isinstance(snapshot_id, str) or not snapshot_id.strip():
             raise ValueError("snapshot_id must be a non-empty string")
+        strategies = self.strategies
+        if strategy_allowlist is not None:
+            if not isinstance(strategy_allowlist, tuple) or any(
+                not isinstance(name, str) or name not in self.strategies
+                for name in strategy_allowlist
+            ) or len(set(strategy_allowlist)) != len(strategy_allowlist):
+                raise ValueError(
+                    "strategy_allowlist must contain unique registered strategy names")
+            strategies = {
+                name: self.strategies[name] for name in strategy_allowlist
+            }
         row = self.repository.get_snapshot(snapshot_id)
         if row is None:
             raise KeyError(f"unknown research snapshot {snapshot_id!r}")
-        context = self._context(row)
+        context = self._context(row, strategies)
         request_text = json.dumps(
             context.as_mapping(), sort_keys=True, separators=(",", ":"))
         if len(request_text) > self.analyst.max_input_chars:
@@ -313,9 +355,11 @@ class CandidateAssessmentService:
         selection_error = None
         selection_result = None
         selection = None
-        if self.strategies and bias is not DirectionalBias.INSUFFICIENT_EVIDENCE:
+        if strategies and bias is not DirectionalBias.INSUFFICIENT_EVIDENCE:
             selection_context = {
                 **context.as_mapping(),
+                "registered_strategies": [
+                    dict(item) for item in context.registered_strategies],
                 "ai_assessment": {
                     "directional_bias": bias.value,
                     "confidence": output.confidence,
@@ -327,7 +371,7 @@ class CandidateAssessmentService:
                 },
             }
             selection_request = json.dumps({
-                "available_strategies": tuple(self.strategies),
+                "available_strategies": tuple(strategies),
                 "research": selection_context,
             }, sort_keys=True, default=str)
             if len(selection_request) > self.analyst.max_input_chars:
@@ -337,7 +381,7 @@ class CandidateAssessmentService:
                 selection_result, selection = self.analyst.select_strategies(
                     instrument_id=context.instrument_id,
                     as_of=context.as_of,
-                    available_strategies=tuple(self.strategies),
+                    available_strategies=tuple(strategies),
                     research_context=selection_context,
                 )
                 if selection_result.ok and not self._result_time_is_valid(
@@ -396,7 +440,9 @@ class CandidateAssessmentService:
                 selection_result.response_hash if selection_result is not None else None),
             error=error,
         )
-        ranking = self.rank(assessment, context) if assessment.opportunity_score is not None else None
+        ranking = self.rank(
+            assessment, context, strategy_names=frozenset(strategies)
+        ) if assessment.opportunity_score is not None else None
         return self._persist(self._opportunity(assessment, state, ranking, assessed_at))
 
     def get_assessment(self, assessment_id: str) -> dict[str, Any] | None:
@@ -406,7 +452,11 @@ class CandidateAssessmentService:
         return self.repository.list_opportunities(limit=limit, offset=offset)
 
     def rank(
-        self, assessment: AIResearchAssessment, context: AIResearchContext | None = None,
+        self,
+        assessment: AIResearchAssessment,
+        context: AIResearchContext | None = None,
+        *,
+        strategy_names: frozenset[str] | None = None,
     ) -> OpportunityRanking:
         context = context or assessment.input_context
         components = {str(item["name"]): str(item["status"])
@@ -427,7 +477,8 @@ class CandidateAssessmentService:
         )
         ai_score = (assessment.opportunity_score or 0.0) / 100.0
         confidence = assessment.confidence or 0.0
-        strategy = 1.0 if assessment.recommended_strategy in self.strategies else 0.0
+        catalog = strategy_names if strategy_names is not None else frozenset(self.strategies)
+        strategy = 1.0 if assessment.recommended_strategy in catalog else 0.0
         parts = {
             "evidence_completeness": completeness,
             "data_quality": quality,
@@ -458,7 +509,9 @@ class CandidateAssessmentService:
         )
         return OpportunityRanking(score, parts, penalty, explanation)
 
-    def _context(self, row: Mapping[str, Any]) -> AIResearchContext:
+    def _context(
+        self, row: Mapping[str, Any], strategies: Mapping[str, Strategy],
+    ) -> AIResearchContext:
         payload = row["payload"]
         if not isinstance(payload, Mapping):
             raise CandidateAssessmentError("persisted snapshot payload is invalid")
@@ -643,7 +696,7 @@ class CandidateAssessmentService:
                     "implementation": type(strategy).__name__,
                     "version": str(getattr(strategy, "version", "unspecified"))[:128],
                 }
-                for name, strategy in self.strategies.items()
+                for name, strategy in strategies.items()
             ),
             missing_evidence=tuple(missing),
             warnings=tuple(str(x) for x in payload.get("warnings", [])),

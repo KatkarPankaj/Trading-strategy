@@ -36,6 +36,26 @@ The final opportunity score is deterministic and bounded to 0–100: evidence co
 
 Successful/rejected assessment records persist the complete input context, assessment time, snapshot link, provider, configured model name (`AI_MODEL`, or `unspecified`), prompt/schema versions, prompt/response hashes, registered strategy names and implementation/version metadata (the current strategy contract does not define a version, so it is recorded as `unspecified`), strategy validation, lifecycle and ranking. Migration V8 adds the assessment/opportunity records. The successful lifecycle ends at `STRATEGY_SELECTED`; failures end at `REJECTED`. Neither state creates a signal, a `TradeProposal`, a risk decision, an order, a broker call or an execution event. Phase 2C begins after this boundary.
 
+## Phase 2C-1: autonomous PAPER opportunity orchestration
+
+`AutonomousResearchService` composes the persisted scanner, candidate-research and assessment services into a bounded manually triggered run. It always invokes the scanner in `RESEARCH` mode; `LIVE` is rejected. The service filters the requested universe to configured market and asset-class allowlists, rejects uncovered market calendars and non-trading dates, and passes an explicit maximum concurrency and Top-N cap. Assessment is restricted to the configured registered-strategy allowlist. It does not call `Strategy.evaluate()`, create a signal or `TradeProposal`, or call sizing, risk, order, broker, executor or portfolio services.
+
+Migration V9 persists an idempotency key, canonical request hash, run stage and timestamps, plus per-instrument snapshot/opportunity outcomes. Scanner and research stage IDs are deterministic from the autonomous run ID. Repeating a completed key returns the stored result; a different request with the same key is rejected. Interrupted runs reuse persisted scan/research snapshots and previously stored assessments when their as-of and strategy catalog match. Candidate assessment errors are isolated and persisted as `FAILED`, allowing later retry; the run otherwise stops at `STRATEGY_SELECTED` with candidate-level `STRATEGY_SELECTED` or `REJECTED` outcomes. Every response explicitly reports `execution: "NOT_SUBMITTED"` and `risk_status: "NOT_EVALUATED"`. This is orchestration of research, not unattended trading or evidence of strategy profitability.
+
+Authenticated API:
+
+- `POST /research/autonomous` accepts `universe_id`, `idempotency_key`, optional PAPER-only `mode`, optional aware `as_of`, and `top_n` (maximum 10).
+- `GET /research/autonomous/{run_id}` returns the persisted checkpoint and candidate outcomes.
+
+CLI:
+
+```powershell
+python -m stockmarket research-autonomous --universe <universe-id> --idempotency-key <stable-run-key> --top 5
+python -m stockmarket research-autonomous-show --run-id <run-id>
+```
+
+`AUTONOMOUS_RESEARCH_SETTINGS` optionally bounds `max_candidates` (1–10), `max_concurrency` (1–4 and no greater than scanner/research limits), `allowed_markets`, `allowed_asset_classes`, and `strategy_allowlist`. Defaults inherit enabled markets, supported asset classes, and registered research strategies. This feature requires configured AI assessment and is not an order automation path. It is not Phase 2C-2.
+
 ## API
 
 All endpoints require the configured bearer token:
@@ -47,7 +67,7 @@ All endpoints require the configured bearer token:
 - `GET /research/assessments/{assessment_id}` returns the persisted assessment and associated opportunity.
 - `GET /research/opportunities?limit=100&offset=0` lists persisted opportunities in deterministic rank order.
 
-Responses explicitly set `research_only: true`, `execution: "NOT_SUBMITTED"`, and `risk_status: "NOT_EVALUATED"`. Run/snapshot status is `COMPLETE`, `PARTIAL`, or `FAILED`. Missing optional sources are not assigned neutral scores. Because macro and sentiment do not yet have providers, runs will normally be `PARTIAL`.
+Responses explicitly set `research_only: true`, `execution: "NOT_SUBMITTED"`, and `risk_status: "NOT_EVALUATED"`. Snapshot/research status is `COMPLETE`, `PARTIAL`, or `FAILED`. Autonomous-run status also includes `INTERRUPTED` while a failed stage awaits safe retry. Missing optional sources are not assigned neutral scores. Because macro and sentiment do not yet have providers, runs will normally be `PARTIAL`.
 
 ## CLI
 

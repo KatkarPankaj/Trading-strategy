@@ -17,6 +17,10 @@ from ..core.order_management import OrderManager
 from ..core.market_session import MarketSession
 from ..core.ai import AIAnalyst
 from ..core.ai.candidate_assessment import CandidateAssessmentService
+from ..core.autonomous_research import (
+    AutonomousResearchService,
+    parse_autonomous_research_settings,
+)
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.portfolio import PortfolioManager
@@ -463,6 +467,18 @@ def build_context(
         )
         if research_analyst is not None else None
     )
+    autonomous_research = None
+    if candidate_assessment is not None:
+        autonomous_settings = parse_autonomous_research_settings(
+            (env.get("AUTONOMOUS_RESEARCH_SETTINGS") or "").strip(),
+            default_markets=settings.markets,
+            default_asset_classes=tuple(AssetClass),
+            default_strategies=tuple(registered_research_strategies),
+        )
+        autonomous_research = AutonomousResearchService(
+            scanner, candidate_research, candidate_assessment,
+            store.autonomous_research, registry, autonomous_settings,
+        )
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
@@ -533,7 +549,8 @@ def build_context(
                       market_intelligence=market_intelligence,
                       scanner=scanner,
                       candidate_research=candidate_research,
-                      candidate_assessment=candidate_assessment)
+                      candidate_assessment=candidate_assessment,
+                      autonomous_research=autonomous_research)
 
 
 def create_app_from_env() -> FastAPI:

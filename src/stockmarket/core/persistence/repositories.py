@@ -629,6 +629,15 @@ class CandidateResearchRepository(_Repository):
         row["payload"] = json.loads(row["payload"])
         return row
 
+    def snapshot_for_instrument(
+        self, run_id: str, instrument_id: str,
+    ) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT snapshot_id FROM research_snapshots
+               WHERE run_id = ? AND instrument_id = ?""",
+            (run_id, instrument_id))
+        return self.get_snapshot(rows[0]["snapshot_id"]) if rows else None
+
     def snapshots(self, run_id: str) -> list[dict[str, Any]]:
         rows = self._db.query(
             "SELECT snapshot_id, instrument_id, scanner_rank, scanner_score, "
@@ -700,6 +709,17 @@ class CandidateResearchRepository(_Repository):
             opportunity["payload"] = json.loads(opportunity["payload"])
             row["opportunity"] = opportunity
         return row
+
+    def opportunity_for_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT o.payload
+               FROM research_opportunities o
+               JOIN ai_research_assessments a ON a.assessment_id = o.assessment_id
+               WHERE a.snapshot_id = ?
+               ORDER BY a.assessed_at DESC, a.assessment_id DESC
+               LIMIT 1""",
+            (snapshot_id,))
+        return json.loads(rows[0]["payload"]) if rows else None
 
     def get_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
         rows = self._db.query(
@@ -790,6 +810,76 @@ class ProposalSubmissionRepository(_Repository):
             )
 
 
+class AutonomousResearchRepository(_Repository):
+    """Durable idempotency and per-candidate checkpoints for research-only runs."""
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM autonomous_research_runs WHERE run_id = ?", (run_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def get_by_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM autonomous_research_runs WHERE idempotency_key = ?",
+            (idempotency_key,))
+        if not rows:
+            return None
+        return self.get_run(rows[0]["run_id"])
+
+    def create_run(
+        self, *, run_id: str, idempotency_key: str, request_hash: str,
+        as_of: datetime, now: datetime, payload: Mapping[str, Any],
+    ) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """INSERT INTO autonomous_research_runs
+                   (run_id, idempotency_key, request_hash, status, stage,
+                    created_at, updated_at, as_of, payload)
+                   VALUES (?, ?, ?, 'RUNNING', 'CREATED', ?, ?, ?, ?)""",
+                (run_id, idempotency_key, request_hash, ts(now), ts(now),
+                 ts(as_of), to_json(payload)))
+
+    def update_run(
+        self, run_id: str, *, status: str, stage: str, now: datetime,
+        payload: Mapping[str, Any],
+    ) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """UPDATE autonomous_research_runs
+                   SET status = ?, stage = ?, updated_at = ?, payload = ?
+                   WHERE run_id = ?""",
+                (status, stage, ts(now), to_json(payload), run_id))
+
+    def save_candidate(
+        self, run_id: str, instrument_id: str, *, stage: str,
+        now: datetime, payload: Mapping[str, Any], snapshot_id: str | None = None,
+        opportunity_id: str | None = None, error: str | None = None,
+    ) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """DELETE FROM autonomous_research_candidates
+                   WHERE run_id = ? AND instrument_id = ?""",
+                (run_id, instrument_id))
+            self._db.execute(
+                """INSERT INTO autonomous_research_candidates
+                   (run_id, instrument_id, stage, snapshot_id, opportunity_id,
+                    error, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, instrument_id, stage, snapshot_id, opportunity_id,
+                 error, ts(now), to_json(payload)))
+
+    def candidates(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT * FROM autonomous_research_candidates
+               WHERE run_id = ? ORDER BY instrument_id""", (run_id,))
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -814,3 +904,4 @@ class Store:
         self.proposal_submissions = ProposalSubmissionRepository(db)
         self.scanner_runs = ScannerRunRepository(db)
         self.research_runs = CandidateResearchRepository(db)
+        self.autonomous_research = AutonomousResearchRepository(db)
