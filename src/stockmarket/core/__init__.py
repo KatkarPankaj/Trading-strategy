@@ -102,6 +102,10 @@ from .market_intelligence import (
     OpportunityAssessment,
     TradeProposal,
 )
+from .signal_generation import (
+    SignalGenerationService,
+    SignalGenerationSettings,
+)
 from .research import (
     FundamentalEvidenceProducer,
     NewsEvidenceCollection,
@@ -139,6 +143,8 @@ __all__ = [
     "MarketIntelligenceResult",
     "OpportunityAssessment",
     "TradeProposal",
+    "SignalGenerationService",
+    "SignalGenerationSettings",
     "ResearchEvidence",
     "ResearchObservation",
     "ResearchObservationProvider",

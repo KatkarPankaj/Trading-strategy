@@ -34,7 +34,7 @@ The strict `candidate_assessment` schema requires snapshot/instrument identity, 
 
 The final opportunity score is deterministic and bounded to 0–100: evidence completeness 20%, data quality 15%, technical alignment 20%, regime compatibility 15%, AI opportunity score 15%, AI-reported confidence 5%, and registered-strategy availability 10%; each AI risk flag subtracts 5 points up to a 25-point cap. The component contributions and penalty are persisted in the explanation. This is an advisory ranking, not a probability, forecast, trade recommendation, risk approval or profitability claim.
 
-Successful/rejected assessment records persist the complete input context, assessment time, snapshot link, provider, configured model name (`AI_MODEL`, or `unspecified`), prompt/schema versions, prompt/response hashes, registered strategy names and implementation/version metadata (the current strategy contract does not define a version, so it is recorded as `unspecified`), strategy validation, lifecycle and ranking. Migration V8 adds the assessment/opportunity records. The successful lifecycle ends at `STRATEGY_SELECTED`; failures end at `REJECTED`. Neither state creates a signal, a `TradeProposal`, a risk decision, an order, a broker call or an execution event. Phase 2C begins after this boundary.
+Successful/rejected assessment records persist the complete input context, assessment time, snapshot link, provider, configured model name (`AI_MODEL`, or `unspecified`), prompt/schema versions, prompt/response hashes, registered strategy names and implementation/version metadata, strategy validation, lifecycle and ranking. The current ORB/VWAP implementation declares version `1.0.0`; older persisted assessments with an unspecified version are not silently upgraded for signal generation. Migration V8 adds the assessment/opportunity records. The successful lifecycle ends at `STRATEGY_SELECTED`; failures end at `REJECTED`. Neither state creates a signal, a `TradeProposal`, a risk decision, an order, a broker call or an execution event. Phase 2C begins after this boundary.
 
 ## Phase 2C-1: autonomous PAPER opportunity orchestration
 
@@ -54,7 +54,26 @@ python -m stockmarket research-autonomous --universe <universe-id> --idempotency
 python -m stockmarket research-autonomous-show --run-id <run-id>
 ```
 
-`AUTONOMOUS_RESEARCH_SETTINGS` optionally bounds `max_candidates` (1–10), `max_concurrency` (1–4 and no greater than scanner/research limits), `allowed_markets`, `allowed_asset_classes`, and `strategy_allowlist`. Defaults inherit enabled markets, supported asset classes, and registered research strategies. This feature requires configured AI assessment and is not an order automation path. It is not Phase 2C-2.
+`AUTONOMOUS_RESEARCH_SETTINGS` optionally bounds `max_candidates` (1–10), `max_concurrency` (1–4 and no greater than scanner/research limits), `allowed_markets`, `allowed_asset_classes`, and `strategy_allowlist`. Defaults inherit enabled markets, supported asset classes, and registered research strategies. This feature requires configured AI assessment and is not an order automation path.
+
+## Phase 2C-2: deterministic signal generation
+
+`SignalGenerationService` is a separate, explicit next step consuming persisted `STRATEGY_SELECTED` candidate, opportunity, and snapshot records. It checks the persisted identities, strategy implementation/version, market/asset compatibility, configured market session and calendar coverage, timestamp ordering/age, and provider OHLCV quality before invoking the already-registered strategy's existing `evaluate()` contract. It does not add another strategy engine or call AI during evaluation. Unknown strategy versions, absent session configuration, stale/future/invalid data, invalid candidate state, and strategy failures fail closed with an explicit rejection.
+
+Migration V10 stores generated results and provenance with database-backed idempotency. A successful result changes that candidate's terminal research checkpoint to `SIGNAL_GENERATED`; `HOLD` remains the domain `SignalSide.HOLD` and is surfaced as `NO_SIGNAL`. Failures are retained as rejected attempts when their persisted opportunity and snapshot references are valid. Results include the opportunity/snapshot/run identifiers, strategy/version/config, evaluation and market-data timestamps, provider, data quality, and input fingerprint. The service has no `RiskEngine`, sizing, order, broker, executor, or portfolio dependency. Every result explicitly says `execution: "NOT_SUBMITTED"` and `risk_status: "NOT_EVALUATED"`; deterministic risk remains the final gate in any separately authorized later workflow.
+
+Authenticated API:
+
+- `POST /research/autonomous/{run_id}/candidates/{candidate_id}/signal` accepts a required timezone-aware `evaluation_as_of`.
+- `GET /research/autonomous/{run_id}/candidates/{candidate_id}/signal` reads the latest persisted result. `candidate_id` may be the instrument ID or its selected opportunity ID.
+
+CLI:
+
+```powershell
+python -m stockmarket research-signal --run-id <run-id> --candidate-id <instrument-or-opportunity-id> --as-of 2026-10-05T13:50:00Z
+```
+
+`SIGNAL_GENERATION_SETTINGS` optionally sets positive `max_opportunity_age_seconds` and `max_market_data_age_seconds`, each capped at seven days (defaults: five minutes). Evaluation does not occur automatically after opportunity selection. Historical evaluation also cannot establish that a mutable third-party data source is point-in-time immutable. This phase generates observations only: it does not create proposals, approve risk, size or submit paper orders, or establish profitability/live readiness.
 
 ## API
 

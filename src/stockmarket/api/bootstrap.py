@@ -21,6 +21,10 @@ from ..core.autonomous_research import (
     AutonomousResearchService,
     parse_autonomous_research_settings,
 )
+from ..core.signal_generation import (
+    SignalGenerationService,
+    parse_signal_generation_settings,
+)
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.portfolio import PortfolioManager
@@ -479,6 +483,19 @@ def build_context(
             scanner, candidate_research, candidate_assessment,
             store.autonomous_research, registry, autonomous_settings,
         )
+    signal_generation = SignalGenerationService(
+        market_data,
+        store.autonomous_research,
+        store.research_runs,
+        store.research_runs,
+        store.signal_generations,
+        instruments,
+        registry,
+        registered_research_strategies,
+        research_sessions,
+        settings=parse_signal_generation_settings(
+            env.get("SIGNAL_GENERATION_SETTINGS")),
+    )
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
@@ -550,7 +567,8 @@ def build_context(
                       scanner=scanner,
                       candidate_research=candidate_research,
                       candidate_assessment=candidate_assessment,
-                      autonomous_research=autonomous_research)
+                      autonomous_research=autonomous_research,
+                      signal_generation=signal_generation)
 
 
 def create_app_from_env() -> FastAPI:

@@ -82,12 +82,12 @@ Continue incrementally from the existing October platform layer:
 
 1. Phase 2A establishes global instrument/universe scanning; Phase 2B persists timestamped source evidence for accepted RESEARCH candidates.
 2. Phase 2B-F adds snapshot-only AI assessment, deterministic opportunity ranking and selection from registered strategies, stopping before signal generation and execution.
-3. Phase 2C-1 makes the existing RESEARCH-to-strategy-selection workflow resumable and idempotent under bounded PAPER-only orchestration; it does not implement Phase 2C-2 or autonomous paper orders.
-3. Phase 2C may continue from `STRATEGY_SELECTED`; it must preserve deterministic signal controls and RiskEngine as the final gate.
-3. Migrate legacy ORB/VWAP backtest/dashboard callers deliberately, preserving their existing behavior behind a compatibility adapter and regression tests.
-4. Add and validate real provider adapters and source-to-instrument/sector mappings for the new sector/fundamental producer contracts; the core does not supply vendor data.
-5. Configure an approved OpenAI-compatible endpoint and explicit session definitions for the API research endpoint; keep it advisory and do not couple research requests to order submission.
-6. Continue evolving the API-backed dashboard carefully; proposal acceptance is now explicit and RiskEngine-gated, while legacy dashboard workflows and local state remain separate.
-7. Expand service/integration tests, then CI and deployment validation.
+3. Phase 2C-1 makes the existing RESEARCH-to-strategy-selection workflow resumable and idempotent under bounded PAPER-only orchestration.
+4. Phase 2C-2 separately generates timestamped deterministic signals from persisted selections. It reuses the registered strategy contract and persists provenance/idempotency in V10; it fails closed on stale/future inputs, unknown strategy versions, unavailable sessions/calendars and invalid market data. It does not create proposals or autonomous paper orders; RiskEngine remains the final gate in downstream workflows.
+5. Migrate legacy ORB/VWAP backtest/dashboard callers deliberately, preserving their existing behavior behind a compatibility adapter and regression tests.
+6. Add and validate real provider adapters and source-to-instrument/sector mappings for the new sector/fundamental producer contracts; the core does not supply vendor data.
+7. Configure an approved OpenAI-compatible endpoint and explicit session definitions for the API research endpoint; keep it advisory and do not couple research requests to order submission.
+8. Continue evolving the API-backed dashboard carefully; proposal acceptance is now explicit and RiskEngine-gated, while legacy dashboard workflows and local state remain separate.
+9. Expand service/integration tests, then CI and deployment validation.
 
 Do not implement the full pipeline as one rewrite. Do not enable live trading or claim production readiness as a result of architecture scaffolding alone.

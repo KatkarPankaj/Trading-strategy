@@ -12,7 +12,8 @@ import pandas as pd
 from ..data import DataQualityError, validate_bars
 from ..data.provider import interval_delta
 from ..market_session import MarketSession
-from ..models import Instrument, Signal, SignalSide
+from ..models import AssetClass, Instrument, Signal, SignalSide
+from .base import StrategyMetadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,13 @@ class OrbVwapConfig:
 
 class OrbVwapStrategy:
     """Produce one deterministic Signal for the most recent eligible bar."""
+
+    version = "1.0.0"
+    metadata = StrategyMetadata(
+        version="1.0.0",
+        supported_markets=frozenset({"*"}),
+        supported_asset_classes=frozenset({AssetClass.EQUITY, AssetClass.ETF}),
+    )
 
     def __init__(self, config: OrbVwapConfig | None = None) -> None:
         self.config = config or OrbVwapConfig()

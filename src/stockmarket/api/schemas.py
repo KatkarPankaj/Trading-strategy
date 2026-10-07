@@ -137,6 +137,19 @@ class AutonomousResearchRunBody(BaseModel):
         return value
 
 
+class SignalGenerationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evaluation_as_of: datetime
+
+    @field_validator("evaluation_as_of")
+    @classmethod
+    def require_aware_evaluation_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("evaluation_as_of must be timezone-aware")
+        return value
+
+
 class OpportunityRunBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

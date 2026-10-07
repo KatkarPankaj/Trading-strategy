@@ -248,6 +248,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "research-autonomous-show", help="Inspect a persisted autonomous research run")
     autonomous_show_parser.add_argument("--run-id", required=True)
 
+    signal_generation_parser = subparsers.add_parser(
+        "research-signal",
+        help="Generate a deterministic signal from a selected research opportunity",
+    )
+    signal_generation_parser.add_argument("--run-id", required=True)
+    signal_generation_parser.add_argument("--candidate-id", required=True)
+    signal_generation_parser.add_argument(
+        "--as-of", type=_aware_datetime, required=True,
+        help="Timezone-aware evaluation timestamp",
+    )
+
     return parser
 
 
@@ -793,6 +804,29 @@ def cmd_autonomous_research_show(run_id: str) -> int:
         store.db.close()
 
 
+def cmd_signal_generation(
+    run_id: str, candidate_id: str, evaluation_as_of: datetime,
+) -> int:
+    context = build_context(load_settings())
+    try:
+        service = context.signal_generation
+        if service is None:
+            print("Signal generation service is unavailable")
+            return 2
+        try:
+            result = service.generate(
+                run_id, candidate_id, evaluation_as_of=evaluation_as_of)
+        except (KeyError, ValueError, RuntimeError) as exc:
+            print(f"Signal generation refused: {exc}")
+            return 2
+        print(to_json(result))
+        return 0 if result["status"] == "SIGNAL_GENERATED" else 2
+    finally:
+        if context.market_data is not None:
+            context.market_data.close()
+        context.store.db.close()
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -811,6 +845,9 @@ def main() -> int:
             args.universe, args.idempotency_key, args.mode, args.as_of, args.top)
     if args.command == "research-autonomous-show":
         return cmd_autonomous_research_show(args.run_id)
+    if args.command == "research-signal":
+        return cmd_signal_generation(
+            args.run_id, args.candidate_id, args.as_of)
     cfg = _load_config(args.config, getattr(args, "symbol", None))
 
     if args.command == "backtest":

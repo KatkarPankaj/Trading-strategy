@@ -879,6 +879,161 @@ class AutonomousResearchRepository(_Repository):
             row["payload"] = json.loads(row["payload"])
         return rows
 
+    def get_candidate(
+        self, run_id: str, candidate_id: str,
+    ) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT * FROM autonomous_research_candidates
+               WHERE run_id = ? AND (instrument_id = ? OR opportunity_id = ?)""",
+            (run_id, candidate_id, candidate_id))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+
+class SignalGenerationRepository(_Repository):
+    """Persist deterministic signal results and provenance with database idempotency."""
+
+    def get_by_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM generated_strategy_signals WHERE idempotency_key = ?",
+            (idempotency_key,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def latest_for_candidate(
+        self, run_id: str, candidate_id: str,
+    ) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT * FROM generated_strategy_signals
+               WHERE run_id = ? AND candidate_id = ?
+               ORDER BY generated_at DESC, generation_id DESC LIMIT 1""",
+            (run_id, candidate_id))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def save_result(
+        self,
+        *,
+        generation_id: str,
+        idempotency_key: str,
+        run_id: str,
+        candidate_id: str,
+        opportunity_id: str,
+        snapshot_id: str,
+        instrument_id: str,
+        strategy_name: str,
+        strategy_version: str,
+        evaluation_as_of: datetime,
+        data_timestamp: datetime | None,
+        input_fingerprint: str,
+        status: str,
+        reason: str | None,
+        signal: Any | None,
+        generated_at: datetime,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        with self._db.transaction():
+            if status not in {"SIGNAL_GENERATED", "REJECTED"}:
+                raise ValueError("unsupported signal generation status")
+            existing = self.get_by_key(idempotency_key)
+            if existing is not None:
+                existing["payload"]["duplicate"] = True
+                return existing
+            if status == "SIGNAL_GENERATED":
+                if signal is None:
+                    raise ValueError("SIGNAL_GENERATED requires a domain signal")
+                candidate_rows = self._db.query(
+                    """SELECT payload, stage FROM autonomous_research_candidates
+                       WHERE run_id = ? AND instrument_id = ?""",
+                    (run_id, candidate_id))
+                if not candidate_rows or candidate_rows[0]["stage"] != "STRATEGY_SELECTED":
+                    raise RuntimeError(
+                        "signal generation requires a STRATEGY_SELECTED candidate")
+                candidate_payload = json.loads(candidate_rows[0]["payload"])
+                candidate_payload["stage"] = "SIGNAL_GENERATED"
+                candidate_payload["signal_generation"] = payload
+                self._db.execute(
+                    """UPDATE autonomous_research_candidates
+                       SET stage = 'SIGNAL_GENERATED', updated_at = ?, payload = ?
+                       WHERE run_id = ? AND instrument_id = ?
+                         AND stage = 'STRATEGY_SELECTED'""",
+                    (ts(generated_at), to_json(candidate_payload),
+                     run_id, candidate_id))
+                claimed_candidate = self._db.query(
+                    """SELECT payload, stage FROM autonomous_research_candidates
+                       WHERE run_id = ? AND instrument_id = ?""",
+                    (run_id, candidate_id))
+                if not claimed_candidate or claimed_candidate[0]["stage"] != "SIGNAL_GENERATED" \
+                        or json.loads(claimed_candidate[0]["payload"]).get(
+                            "signal_generation", {}).get("generation_id") \
+                        != payload.get("generation_id"):
+                    existing = self.get_by_key(idempotency_key)
+                    if existing is not None:
+                        existing["payload"]["duplicate"] = True
+                        return existing
+                    raise RuntimeError(
+                        "candidate was claimed by a different signal evaluation")
+                self._upsert("signals", "signal_id", {
+                    "signal_id": str(signal.signal_id),
+                    "instrument_id": signal.instrument_id,
+                    "symbol": signal.symbol,
+                    "timestamp": ts(signal.timestamp),
+                    "strategy": signal.strategy,
+                    "side": signal.side.value,
+                    "confidence": signal.confidence,
+                    "payload": to_json({
+                        "entry_price": signal.entry_price,
+                        "stop_loss": signal.stop_loss,
+                        "take_profit": signal.take_profit,
+                        "reward_risk": signal.reward_risk,
+                        "expected_edge": signal.expected_edge,
+                        "regime": signal.regime,
+                        "reasons": signal.reasons,
+                        "invalidation_conditions": signal.invalidation_conditions,
+                    }),
+                })
+            elif signal is not None:
+                raise ValueError("REJECTED signal generation cannot include a signal")
+            self._db.execute(
+                """INSERT INTO generated_strategy_signals
+                   (generation_id, idempotency_key, run_id, candidate_id,
+                    opportunity_id, snapshot_id, instrument_id, strategy_name,
+                    strategy_version, evaluation_as_of, data_timestamp,
+                    input_fingerprint, status, reason, signal_id, generated_at,
+                    payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(idempotency_key) DO NOTHING""",
+                (generation_id, idempotency_key, run_id, candidate_id,
+                 opportunity_id, snapshot_id, instrument_id, strategy_name,
+                 strategy_version, ts(evaluation_as_of), ts(data_timestamp),
+                 input_fingerprint, status, reason,
+                 str(signal.signal_id) if signal is not None else None,
+                 ts(generated_at), to_json(payload)))
+            persisted = self.get_by_key(idempotency_key)
+            if persisted is None:
+                raise RuntimeError("signal generation result was not persisted")
+            return persisted
+
+    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) \
+                or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        rows = self._db.query(
+            """SELECT * FROM generated_strategy_signals
+               ORDER BY generated_at DESC, generation_id DESC LIMIT ?""", (limit,))
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
 
 class Store:
     """One handle to every repository; migrations must already have been applied."""
@@ -905,3 +1060,4 @@ class Store:
         self.scanner_runs = ScannerRunRepository(db)
         self.research_runs = CandidateResearchRepository(db)
         self.autonomous_research = AutonomousResearchRepository(db)
+        self.signal_generations = SignalGenerationRepository(db)
