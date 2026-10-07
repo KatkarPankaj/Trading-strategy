@@ -13,6 +13,10 @@ import pandas as pd
 from .backtest import run_backtest
 from .config import TradingConfig
 from .core.market_session import MarketSession
+from .core.candidate_research import (
+    CandidateResearchService,
+    parse_candidate_research_settings,
+)
 from .data import fetch_intraday_data, latest_bars
 from .strategy import add_strategy_columns
 from .sweep import run_parameter_sweep
@@ -22,7 +26,7 @@ from .validation.walk_forward import WalkForwardConfig, walk_forward_validate
 from .api.bootstrap import instrument_from_row
 from .core.data import DataPolicy, ResilientProvider, create_market_data_provider
 from .core.markets import default_markets
-from .core.persistence import open_store
+from .core.persistence import open_store, to_json
 from .core.scanner import (
     MarketScanner,
     RegistryUniverseProvider,
@@ -36,6 +40,16 @@ from .core.settings import Environment, load_settings
 
 def _market_now(cfg: TradingConfig) -> datetime:
     return datetime.now(ZoneInfo(cfg.market_timezone))
+
+
+def _aware_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timestamp must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise argparse.ArgumentTypeError("timestamp must include a timezone")
+    return parsed
 
 
 def _summarize_observed_data(df: pd.DataFrame, cfg: TradingConfig) -> dict[str, object]:
@@ -193,6 +207,18 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--universe", required=True)
     scan_parser.add_argument("--mode", choices=["RESEARCH", "PAPER"], default="RESEARCH")
     scan_parser.add_argument("--top", type=int, default=None)
+
+    research_parser = subparsers.add_parser(
+        "research", help="Create timestamped research snapshots for a scanner run")
+    research_parser.add_argument("--scan-id", required=True)
+    research_parser.add_argument("--limit", type=int, default=50)
+    research_parser.add_argument("--as-of", type=_aware_datetime, default=None)
+
+    research_show_parser = subparsers.add_parser(
+        "research-show", help="Inspect a persisted research run or snapshot")
+    research_show_target = research_show_parser.add_mutually_exclusive_group(required=True)
+    research_show_target.add_argument("--run-id")
+    research_show_target.add_argument("--snapshot-id")
 
     return parser
 
@@ -565,11 +591,93 @@ def cmd_scan(universe_id: str, mode: str, top_n: int | None) -> int:
         store.db.close()
 
 
+def cmd_candidate_research(
+    scan_id: str, limit: int, as_of: datetime | None
+) -> int:
+    settings = load_settings()
+    auto_migrate = (os.environ.get("AUTO_MIGRATE") or (
+        "false" if settings.environment in (Environment.STAGING, Environment.PRODUCTION)
+        else "true")).lower() == "true"
+    store = open_store(settings.database_url.reveal(), migrate_schema=auto_migrate)
+    market_data = None
+    try:
+        markets = default_markets()
+        instruments = {
+            row["instrument_id"]: instrument_from_row(row)
+            for row in store.instruments.list()
+        }
+        raw_provider = create_market_data_provider(
+            settings.data_provider, instruments, markets=markets)
+        market_data = ResilientProvider(
+            raw_provider,
+            policy=DataPolicy(
+                max_quote_age=timedelta(
+                    seconds=settings.max_market_data_age_seconds)),
+        )
+        service = CandidateResearchService(
+            market_data,
+            store.scanner_runs,
+            store.research_runs,
+            instruments,
+            settings=parse_candidate_research_settings(
+                os.environ.get("CANDIDATE_RESEARCH_SETTINGS")),
+        )
+        run, snapshots = service.run_scan(scan_id, as_of=as_of, limit=limit)
+        print(to_json({"research_only": True, "execution": "NOT_SUBMITTED",
+                       "risk_status": "NOT_EVALUATED",
+                       "run": run, "snapshots": snapshots}))
+        return 0 if run.status == "COMPLETE" else 2
+    finally:
+        if market_data is not None:
+            market_data.close()
+        store.db.close()
+
+
+def cmd_candidate_research_show(
+    run_id: str | None, snapshot_id: str | None
+) -> int:
+    settings = load_settings()
+    auto_migrate = (os.environ.get("AUTO_MIGRATE") or (
+        "false" if settings.environment in (Environment.STAGING, Environment.PRODUCTION)
+        else "true")).lower() == "true"
+    store = open_store(settings.database_url.reveal(), migrate_schema=auto_migrate)
+    try:
+        if run_id is not None:
+            run = store.research_runs.get_run(run_id)
+            if run is None:
+                print(f"Unknown research run: {run_id}")
+                return 2
+            payload = {
+                "run": run["payload"],
+                "snapshots": [
+                    item["payload"]
+                    for item in store.research_runs.snapshots(run_id)
+                ],
+            }
+        else:
+            snapshot = store.research_runs.get_snapshot(snapshot_id or "")
+            if snapshot is None:
+                print(f"Unknown research snapshot: {snapshot_id}")
+                return 2
+            payload = {
+                "snapshot": snapshot["payload"],
+                "evidence": store.research_runs.evidence(snapshot_id or ""),
+            }
+        print(to_json(payload))
+        return 0
+    finally:
+        store.db.close()
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
     if args.command == "scan":
         return cmd_scan(args.universe, args.mode, args.top)
+    if args.command == "research":
+        return cmd_candidate_research(args.scan_id, args.limit, args.as_of)
+    if args.command == "research-show":
+        return cmd_candidate_research_show(args.run_id, args.snapshot_id)
     cfg = _load_config(args.config, getattr(args, "symbol", None))
 
     if args.command == "backtest":

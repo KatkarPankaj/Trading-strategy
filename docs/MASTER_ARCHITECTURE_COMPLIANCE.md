@@ -2,6 +2,8 @@
 
 > **Phase 1 status update:** the execution-boundary, sizing and proposal-submission changes below supersede the older findings where noted. The 50.2/100 score is the previous audit's score and has not been recalculated; no autonomous or live readiness is implied.
 
+> **Phase 2B status update:** a separate candidate-research service now persists timestamped snapshots for accepted candidates from RESEARCH scanner runs. It reuses deterministic regime analysis and records source-attributed evidence without invoking AI, generating signals, or entering execution. The historical audit score below has not been recalculated; this addition does not change the NOT READY verdict for autonomous or live trading.
+
 ## Executive verdict
 
 **Verdict: NOT READY for autonomous trading. Suitable only for constrained, manually supervised PAPER research and order workflows through the platform API. Not suitable for live trading.**
@@ -129,7 +131,7 @@ All PAPER_AUTONOMOUS blockers are prerequisites. In addition:
 
 ## Technically ordered implementation sequence
 
-1. **Phase 2B — candidate research and market intelligence.** Consume the scanner’s timestamped, quality-gated Top-N output downstream; keep AI advisory and deterministic strategy/risk/execution authorities unchanged.
+1. **Phase 2C — AI opportunity research and strategy selection.** Consume the persisted Phase 2B evidence snapshots with a strict AI input/output contract; keep AI advisory and deterministic strategy/risk/execution authorities unchanged.
 2. **Execution-boundary inventory and regression coverage.** Legacy dashboard order mutators are isolated and the API remains PAPER/RiskEngine-gated. Maintain inventory and add tests proving all supported new-entry paths preserve that boundary.
 3. **Complete domain coverage and point-in-time provenance.** Obtain/version verified exchange calendars per enabled market; formalize FX quotes with timestamp, source and spread; retain data snapshots/references and policy/version identifiers needed to reproduce a decision.
 4. **Harden sizing and portfolio reservations.** Validate costs and market-specific sizing inputs, enable bounded participation sizing only with verified volume, and replace process-local reservation with cross-process coordination before multi-worker operation. RiskEngine remains the final independent gate.

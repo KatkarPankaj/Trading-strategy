@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..core.audit_trail import AuditContext, reconstruct
+from ..core.candidate_research import CandidateResearchService
 from ..core.executors import LIVE_CONFIRMATION_PHRASE, LiveTradingRefused, TradingMode
 from ..core.kill_switch import KillSwitchError
 from ..core.markets import UnknownMarket
@@ -38,6 +39,7 @@ from ..core.trading_service import (
     summarize_trades,
 )
 from .schemas import (
+    CandidateResearchRunBody,
     KillResetBody,
     KillTriggerBody,
     OpportunityRunBody,
@@ -69,6 +71,7 @@ class ApiContext:
     research_sessions: Mapping[str, MarketSession] = field(default_factory=dict)
     market_intelligence: MarketIntelligenceOrchestrator | None = None
     scanner: MarketScanner | None = None
+    candidate_research: CandidateResearchService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -243,6 +246,55 @@ def create_app(ctx: ApiContext) -> FastAPI:
         return _plain(ctx.store.scanner_runs.candidates(
             scan_id, accepted_only=accepted_only, limit=limit, offset=offset,
         ))
+
+    @app.post("/research/candidates", dependencies=[Depends(auth)])
+    def run_candidate_research(body: CandidateResearchRunBody) -> dict[str, Any]:
+        if ctx.candidate_research is None:
+            raise HTTPException(503, "candidate research is not configured")
+        try:
+            run, snapshots = ctx.candidate_research.run_scan(
+                body.scan_id, as_of=body.as_of, limit=body.limit)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {
+            "research_only": True,
+            "execution": "NOT_SUBMITTED",
+            "risk_status": "NOT_EVALUATED",
+            "run": _plain(run),
+            "snapshots": [_plain(snapshot) for snapshot in snapshots],
+        }
+
+    @app.get("/research/runs/{run_id}", dependencies=[Depends(auth)])
+    def get_candidate_research_run(run_id: str) -> dict[str, Any]:
+        if ctx.candidate_research is None:
+            raise HTTPException(503, "candidate research is not configured")
+        row = ctx.store.research_runs.get_run(run_id)
+        if row is None:
+            raise HTTPException(404, "unknown research run")
+        return {
+            "run": row["payload"],
+            "snapshots": [
+                item["payload"]
+                for item in ctx.store.research_runs.snapshots(run_id)
+            ],
+        }
+
+    @app.get("/research/snapshots/{snapshot_id}", dependencies=[Depends(auth)])
+    def get_candidate_research_snapshot(snapshot_id: str) -> dict[str, Any]:
+        if ctx.candidate_research is None:
+            raise HTTPException(503, "candidate research is not configured")
+        row = ctx.store.research_runs.get_snapshot(snapshot_id)
+        if row is None:
+            raise HTTPException(404, "unknown research snapshot")
+        return {
+            "snapshot": row["payload"],
+            "evidence": [
+                item["payload"]
+                for item in ctx.store.research_runs.evidence(snapshot_id)
+            ],
+        }
 
     @app.get("/signals", dependencies=[Depends(auth)])
     def signals(limit: int = Query(default=100, ge=1, le=1000)) -> list[dict[str, Any]]:

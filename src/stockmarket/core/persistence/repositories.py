@@ -501,8 +501,8 @@ class ScannerRunRepository(_Repository):
                 """INSERT INTO scanner_runs
                    (scan_id, universe_id, markets, mode, started_at, completed_at, status,
                     requested_count, evaluated_count, accepted_count, rejected_count,
-                    failed_count, failure_summary, payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    failed_count, failure_summary, payload, as_of)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     result.scan_id, result.universe_id, to_json(result.markets),
                     result.mode.value,
@@ -511,21 +511,24 @@ class ScannerRunRepository(_Repository):
                     result.rejected_count, result.failed_count, to_json(result.failure_summary),
                     to_json({"scan_id": result.scan_id, "universe_id": result.universe_id,
                              "mode": result.mode, "status": result.status}),
+                    ts(result.as_of or result.started_at),
                 ),
             )
             accepted_ids = {
                 candidate.instrument_id for candidate in candidate_rows
                 if not candidate.rejection_reasons and not candidate.evaluation_failed
             }
+            selected_ids = {candidate.instrument_id for candidate in result.candidates}
             for candidate in candidate_rows:
                 self._db.execute(
                     """INSERT INTO scanner_candidates
-                       (scan_id, instrument_id, accepted, score, data_timestamp,
+                       (scan_id, instrument_id, accepted, selected, score, data_timestamp,
                         quality_status, payload)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         result.scan_id, candidate.instrument_id,
                         1 if candidate.instrument_id in accepted_ids else 0,
+                        1 if candidate.instrument_id in selected_ids else 0,
                         candidate.preliminary_score, ts(candidate.data_timestamp),
                         candidate.data_quality.value, to_json(candidate),
                     ),
@@ -546,6 +549,7 @@ class ScannerRunRepository(_Repository):
         scan_id: str,
         *,
         accepted_only: bool = False,
+        selected_only: bool = False,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -554,15 +558,93 @@ class ScannerRunRepository(_Repository):
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError("offset must be non-negative")
         sql = (
-            "SELECT instrument_id, accepted, score, data_timestamp, quality_status, payload "
+            "SELECT instrument_id, accepted, selected, score, data_timestamp, quality_status, payload "
             "FROM scanner_candidates WHERE scan_id = ?"
         )
         if accepted_only:
             sql += " AND accepted = 1"
+        if selected_only:
+            sql += " AND selected = 1"
         rows = self._db.query(
-            sql + " ORDER BY accepted DESC, score DESC, instrument_id LIMIT ? OFFSET ?",
+            sql + " ORDER BY selected DESC, accepted DESC, score DESC, instrument_id LIMIT ? OFFSET ?",
             (scan_id, limit, offset),
         )
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+
+class CandidateResearchRepository(_Repository):
+    """Persist source evidence separately from scanner and execution records."""
+
+    def save_run(self, run: Any, snapshots: Iterable[Any]) -> None:
+        snapshots = tuple(snapshots)
+        with self._db.transaction():
+            self._db.execute(
+                """INSERT INTO research_runs
+                   (run_id, scan_id, as_of, created_at, status, requested_count,
+                    completed_count, failed_count, failure_summary, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run.run_id, run.scan_id, ts(run.as_of), ts(run.created_at), run.status,
+                 run.requested_count, run.completed_count, run.failed_count,
+                 to_json(run.failure_summary), to_json(run)),
+            )
+            for snapshot in snapshots:
+                self._db.execute(
+                    """INSERT INTO research_snapshots
+                       (snapshot_id, run_id, instrument_id, scanner_rank, scanner_score,
+                        as_of, status, payload)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (snapshot.snapshot_id, snapshot.run_id, snapshot.instrument_id,
+                     snapshot.scanner_rank, snapshot.scanner_score, ts(snapshot.as_of),
+                     snapshot.status, to_json(snapshot)),
+                )
+                for item in snapshot.evidence:
+                    self._db.execute(
+                        """INSERT INTO research_evidence
+                           (evidence_id, snapshot_id, component, observed_at,
+                            retrieved_at, source, quality, payload)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (item.evidence_id, snapshot.snapshot_id, item.component,
+                         ts(item.observed_at), ts(item.retrieved_at), item.source,
+                         item.quality.value, to_json(item)),
+                    )
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM research_runs WHERE run_id = ?", (run_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        for name in ("failure_summary", "payload"):
+            row[name] = json.loads(row[name])
+        return row
+
+    def get_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM research_snapshots WHERE snapshot_id = ?", (snapshot_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def snapshots(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT snapshot_id, instrument_id, scanner_rank, scanner_score, "
+            "as_of, status, payload FROM research_snapshots "
+            "WHERE run_id = ? ORDER BY scanner_rank",
+            (run_id,))
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+    def evidence(self, snapshot_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT evidence_id, component, observed_at, retrieved_at, source, "
+            "quality, payload FROM research_evidence WHERE snapshot_id = ? "
+            "ORDER BY component, observed_at",
+            (snapshot_id,))
         for row in rows:
             row["payload"] = json.loads(row["payload"])
         return rows
@@ -646,3 +728,4 @@ class Store:
         self.order_audit = OrderAuditRepository(db)
         self.proposal_submissions = ProposalSubmissionRepository(db)
         self.scanner_runs = ScannerRunRepository(db)
+        self.research_runs = CandidateResearchRepository(db)

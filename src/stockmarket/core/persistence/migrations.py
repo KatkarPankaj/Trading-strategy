@@ -134,11 +134,35 @@ _V6 = [
     "CREATE INDEX idx_scanner_candidates_scan_score ON scanner_candidates (scan_id, accepted, score)",
 ]
 
+_V7 = [
+    "ALTER TABLE scanner_runs ADD COLUMN as_of TEXT",
+    "ALTER TABLE scanner_candidates ADD COLUMN selected INTEGER NOT NULL DEFAULT 0",
+    """CREATE TABLE research_runs (
+        run_id TEXT PRIMARY KEY, scan_id TEXT NOT NULL REFERENCES scanner_runs(scan_id),
+        as_of TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL,
+        requested_count INTEGER NOT NULL, completed_count INTEGER NOT NULL,
+        failed_count INTEGER NOT NULL, failure_summary TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE research_snapshots (
+        snapshot_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES research_runs(run_id),
+        instrument_id TEXT NOT NULL, scanner_rank INTEGER NOT NULL,
+        scanner_score DOUBLE PRECISION NOT NULL,
+        as_of TEXT NOT NULL, status TEXT NOT NULL,
+        payload TEXT NOT NULL)""",
+    """CREATE TABLE research_evidence (
+        evidence_id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL REFERENCES research_snapshots(snapshot_id),
+        component TEXT NOT NULL, observed_at TEXT, retrieved_at TEXT NOT NULL,
+        source TEXT NOT NULL, quality TEXT NOT NULL, payload TEXT NOT NULL)""",
+    "CREATE INDEX idx_research_runs_scan_time ON research_runs (scan_id, created_at)",
+    "CREATE INDEX idx_research_snapshots_run ON research_snapshots (run_id, scanner_rank)",
+    "CREATE INDEX idx_research_evidence_snapshot ON research_evidence (snapshot_id, component)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
     (4, "order_audit", _V4), (5, "proposal_submissions", _V5),
-    (6, "market_scanner", _V6)]
+    (6, "market_scanner", _V6), (7, "candidate_research", _V7)]
 
 
 def applied_versions(db: Database) -> set[int]:

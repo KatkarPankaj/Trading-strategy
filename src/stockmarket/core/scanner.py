@@ -400,6 +400,7 @@ class ScanResult:
     failed_count: int
     candidates: tuple[ScannerCandidate, ...]
     failure_summary: tuple[str, ...] = ()
+    as_of: datetime | None = None
 
 
 class ScanResultRepository(Protocol):
@@ -518,6 +519,7 @@ class MarketScanner:
             accepted_count=len(accepted), rejected_count=len(instruments) - len(accepted),
             failed_count=failed_count,
             candidates=tuple(accepted[:limit]),
+            as_of=scan_at,
             failure_summary=(
                 ("EMPTY_UNIVERSE",) if not instruments else tuple(
                     f"{c.instrument_id}:{c.provider_status}"

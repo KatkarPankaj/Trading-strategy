@@ -25,6 +25,10 @@ from ..core.learning import StrategyConfigRegistry
 from ..core.strategies import OrbVwapStrategy, Strategy
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.market_intelligence import MarketIntelligenceOrchestrator
+from ..core.candidate_research import (
+    CandidateResearchService,
+    parse_candidate_research_settings,
+)
 from ..core.research import FundamentalEvidenceProducer, SectorEvidenceProducer
 from ..core.kill_switch import AutoTriggerMonitor, AutoTriggerPolicy, KillSwitch
 from ..core.observability import AlertManager, StructuredLogger
@@ -393,9 +397,29 @@ def build_context(
         health=health,
         logger=logger,
     )
+    fundamental_observation_provider = (
+        YahooEarningsObservationProvider()
+        if fundamental_provider_name == "yahoo" else None)
+    sector_observation_provider = (
+        NSESectorIndexObservationProvider(sector_map)
+        if sector_provider_name == "nse" and sector_map else None)
+    raw_news_provider = (
+        FinnhubNewsProvider(finnhub_api_key.reveal(), symbol_map=finnhub_symbol_map)
+        if news_provider_name == "finnhub" and finnhub_api_key is not None else None)
     scanner = MarketScanner(
         market_data, universe_provider, registry, repository=store.scanner_runs,
         settings=scanner_settings,
+    )
+    candidate_research = CandidateResearchService(
+        market_data,
+        store.scanner_runs,
+        store.research_runs,
+        instruments,
+        news_provider=raw_news_provider,
+        fundamental_provider=fundamental_observation_provider,
+        sector_provider=sector_observation_provider,
+        settings=parse_candidate_research_settings(
+            (env.get("CANDIDATE_RESEARCH_SETTINGS") or "").strip()),
     )
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
@@ -411,17 +435,16 @@ def build_context(
     market_intelligence = None
     if research_analyst is not None:
         research_evidence_producers = []
-        if fundamental_provider_name == "yahoo":
-            research_evidence_producers.append(
-                FundamentalEvidenceProducer(YahooEarningsObservationProvider()))
-        if sector_provider_name == "nse" and sector_map:
+        if fundamental_observation_provider is not None:
+            research_evidence_producers.append(FundamentalEvidenceProducer(
+                fundamental_observation_provider))
+        if sector_observation_provider is not None:
             research_evidence_producers.append(SectorEvidenceProducer(
-                NSESectorIndexObservationProvider(sector_map)))
+                sector_observation_provider))
         news_evidence_producer = None
-        if news_provider_name == "finnhub" and finnhub_api_key is not None:
+        if raw_news_provider is not None:
             news_evidence_producer = NewsEvidenceProducer(
-                FinnhubNewsProvider(
-                    finnhub_api_key.reveal(), symbol_map=finnhub_symbol_map),
+                raw_news_provider,
                 limit=5,
             )
         research_pipeline = StrategyResearchPipeline(
@@ -466,7 +489,8 @@ def build_context(
                       instruments=instruments, research_pipeline=research_pipeline,
                       research_sessions=research_sessions or {},
                       market_intelligence=market_intelligence,
-                      scanner=scanner)
+                      scanner=scanner,
+                      candidate_research=candidate_research)
 
 
 def create_app_from_env() -> FastAPI:

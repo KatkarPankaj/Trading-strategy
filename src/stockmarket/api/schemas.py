@@ -61,7 +61,8 @@ class OrderBody(BaseModel):
 class ResearchEvidenceBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    component: Literal["volume", "momentum", "sector", "news", "fundamental", "history"]
+    component: Literal[
+        "volume", "momentum", "sector", "news", "fundamental", "history", "regime"]
     score: float = Field(ge=-1, le=1, allow_inf_nan=False)
     observed_at: datetime
     source: str = Field(min_length=1, max_length=256)
@@ -94,6 +95,21 @@ class ResearchRunBody(BaseModel):
     instrument_id: str = Field(min_length=1, max_length=64, pattern=_ID)
     as_of: datetime | None = None
     evidence: list[ResearchEvidenceBody] = Field(default_factory=list, max_length=8)
+
+    @field_validator("as_of")
+    @classmethod
+    def require_aware_as_of(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("as_of must be timezone-aware")
+        return value
+
+
+class CandidateResearchRunBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scan_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    as_of: datetime | None = None
+    limit: int = Field(default=50, ge=1, le=50, strict=True)
 
     @field_validator("as_of")
     @classmethod

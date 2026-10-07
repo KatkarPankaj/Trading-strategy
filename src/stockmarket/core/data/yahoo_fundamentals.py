@@ -35,6 +35,7 @@ class YahooEarningsObservationProvider:
     """Expose reported EPS events; do not treat undated Yahoo profile fields as fresh."""
 
     name = "yahoo_finance_earnings"
+    supports_point_in_time = False
 
     def __init__(self, ticker_factory: TickerFactory = _default_ticker_factory) -> None:
         self._ticker_factory = ticker_factory

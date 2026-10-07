@@ -94,13 +94,17 @@ python -m stockmarket scan --universe US_ALL --mode RESEARCH --top 20
 
 The command uses the existing configured database, instrument registry, market-data provider, and optional `SCANNER_UNIVERSES` / `SCANNER_SETTINGS`. The selected universe must already have registered instruments. Yahoo and mock data are research/scanning only, not production or execution feeds.
 
+## Phase 2B hand-off
+
+Phase 2B consumes selected Top-N candidates from persisted `RESEARCH` scanner runs. Migration V7 records the scanner run's `as_of` and selected-candidate membership; older runs without this point-in-time metadata are deliberately ineligible. Research uses a configured candidate limit in ranked order; `PAPER` scanner runs are not valid inputs. Research snapshots are a separate service and do not extend the scanner into AI analysis, strategy signals, risk approval, or order submission. See [MARKET_INTELLIGENCE.md](./MARKET_INTELLIGENCE.md) for its API/CLI and evidence contract.
+
 ## FUTURE
 
 - A maintained, licensed global instrument master and provider-backed registry ingestion.
 - Additional verified exchange calendars, including India and future-year coverage.
 - Provider-specific halt detection, corporate-action normalization, verified average-volume definitions, and execution-grade source provenance.
 - Cross-currency normalization only through an explicit timestamped FX service.
-- Portfolio-aware candidate diversification, advanced ranking calibration, scheduler integration, and downstream Phase 2B research/market intelligence.
+- Portfolio-aware candidate diversification, advanced ranking calibration, and scheduler integration.
 - Load testing and provider-specific quota policy verification at thousands-instrument scale.
 
-AI remains outside the scanner core. The next phase is **Phase 2B — Candidate Research / Market Intelligence**; it is not implemented here.
+AI remains outside the scanner core. Candidate research is downstream in Phase 2B; AI opportunity ranking and strategy selection remain a later Phase 2C.

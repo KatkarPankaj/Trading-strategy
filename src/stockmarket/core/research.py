@@ -21,6 +21,7 @@ RESEARCH_COMPONENTS = frozenset({
     "news",
     "fundamental",
     "history",
+    "regime",
 })
 
 
@@ -188,11 +189,11 @@ class NewsEvidenceProducer:
 
 @dataclass(frozen=True, slots=True)
 class ResearchObservation:
-    """Source-supplied sector or fundamental facts for one instrument and observation time."""
+    """Source-supplied facts for one instrument and observation time."""
 
     instrument_id: str
     market: str
-    component: Literal["sector", "fundamental"]
+    component: Literal["sector", "fundamental", "macro", "sentiment"]
     subject: str
     content: str
     observed_at: datetime
@@ -204,8 +205,9 @@ class ResearchObservation:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
-        if self.component not in ("sector", "fundamental"):
-            raise ValueError("component must be 'sector' or 'fundamental'")
+        if self.component not in ("sector", "fundamental", "macro", "sentiment"):
+            raise ValueError(
+                "component must be sector, fundamental, macro, or sentiment")
         if len(self.content) > 6000:
             raise ValueError("content must not exceed 6000 characters")
         if not isinstance(self.observed_at, datetime) \
@@ -225,7 +227,7 @@ class ResearchObservationProvider(Protocol):
         self,
         instrument: Instrument,
         *,
-        component: Literal["sector", "fundamental"],
+        component: Literal["sector", "fundamental", "macro", "sentiment"],
         as_of: datetime,
         max_age: timedelta,
     ) -> ResearchObservation | None:

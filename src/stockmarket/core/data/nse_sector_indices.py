@@ -66,6 +66,7 @@ class NSESectorIndexObservationProvider:
     """Resolve an explicitly configured NSE symbol→index map against NSE live indices."""
 
     name = "nse_sector_indices"
+    supports_point_in_time = False
 
     def __init__(
         self,
