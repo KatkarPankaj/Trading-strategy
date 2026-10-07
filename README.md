@@ -61,6 +61,19 @@ $env:PYTHONPATH = "src"
 
 Then open the local URL shown in terminal (usually http://localhost:8501).
 
+## Launch API-backed read-only monitor
+This separate Streamlit page reads data from the platform API and includes an advisory-only Research tab. It has no order-submission controls.
+
+The API must be running and `API_TOKEN` must match its configured bearer token. `API_BASE_URL` defaults to `http://127.0.0.1:8000` for local use; non-loopback API URLs must use HTTPS. The research endpoint additionally requires the server to be initialized with an AI analyst, registered strategies, and explicit market sessions. If those are not configured, research returns 503; the dashboard does not supply or invent them.
+
+```powershell
+$env:PYTHONPATH = "src"
+# Set API_TOKEN using your approved local secret-handling method.
+.\.venv\Scripts\python.exe -m streamlit run src/stockmarket/dashboard/app.py
+```
+
+The research form accepts optional operator-entered evidence scores. Enter only scores backed by evidence you have verified; the UI labels these as operator input, not vendor data. AI strategy rankings and model-reported confidence are advisory and are not calibrated forecasts.
+
 ## Launch advanced scanner + dummy trading app
 This app includes:
 - Top 5 intraday candidates scanner

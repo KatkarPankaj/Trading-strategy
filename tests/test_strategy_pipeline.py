@@ -14,6 +14,8 @@ from stockmarket.core import (
     StrategyResearchPipeline,
 )
 from stockmarket.core.ai import AIAnalyst
+from stockmarket.core.audit_trail import reconstruct
+from stockmarket.core.recovery import RecoveryManager, rebuild_portfolio
 from stockmarket.core.data import (
     DataPolicy,
     MockProvider,
@@ -22,10 +24,26 @@ from stockmarket.core.data import (
 from stockmarket.core.markets import default_markets
 from stockmarket.core.models import AssetClass, RiskDecisionStatus
 from stockmarket.core.resilience import RetryPolicy
+from stockmarket.core.brokers import PaperBroker
 from stockmarket.core.executors import TradingMode
+from stockmarket.core.order_management import OrderManager
 from stockmarket.core.portfolio import PortfolioManager
+from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
 from stockmarket.core.risk import RiskEngine, RiskLimits
+from stockmarket.core.research import NewsEvidenceProducer
+from stockmarket.core.research import (
+    FundamentalEvidenceProducer,
+    ResearchObservation,
+    SectorEvidenceProducer,
+)
+from stockmarket.core.trading_gate import TradingGate
 from stockmarket.core.trading_service import TradingService
+from stockmarket.news import (
+    MarketImpact,
+    NewsEvent,
+    NewsEventType,
+    NewsSentiment,
+)
 
 
 ZONE = "America/New_York"
@@ -97,7 +115,41 @@ class StaticAIProvider:
 
     def complete(self, system, user):
         self.calls += 1
+        if '"directional_score"' in system:
+            return json.dumps({
+                "summary": "The cited observation is supportive.",
+                "directional_score": 0.8,
+                "confidence": 0.75,
+                "risks": [],
+                "data_gaps": [],
+            })
         return self.response
+
+
+class StaticResearchProvider:
+    name = "research-test"
+
+    def __init__(self, component):
+        self.component = component
+
+    def get_observation(self, instrument, *, component, as_of, max_age):
+        return ResearchObservation(
+            instrument_id=instrument.instrument_id,
+            market=instrument.market,
+            component=self.component,
+            subject="Technology" if component == "sector" else "FY2026 results",
+            content="Validated research facts from the configured test source.",
+            observed_at=as_of - timedelta(minutes=1),
+            source="research-test",
+        )
+
+
+class StaticNewsProvider:
+    def __init__(self, events):
+        self.events = events
+
+    def get_news(self, query):
+        return self.events
 
 
 class CapturingOrderManager:
@@ -137,7 +189,8 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         )
         self.addCleanup(self.provider.close)
 
-    def pipeline(self, response=None, *, trading_service=None):
+    def pipeline(self, response=None, *, trading_service=None,
+                 research_evidence_producers=()):
         ai_provider = StaticAIProvider(response or selection_response())
         analyst = AIAnalyst(
             ai_provider,
@@ -148,6 +201,7 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             analyst,
             {"orb_vwap": OrbVwapStrategy()},
             trading_service=trading_service,
+            research_evidence_producers=research_evidence_producers,
         )
         return pipeline, ai_provider
 
@@ -255,6 +309,91 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         self.assertEqual(result.decision.explanation["inputs"]["volume"], 0.9)
         self.assertEqual(result.decision.explanation["inputs"]["momentum"], 0.8)
 
+    def test_news_producer_contributes_to_pipeline_aggregation(self):
+        event = NewsEvent(
+            timestamp=AS_OF - timedelta(minutes=30),
+            source="exchange",
+            headline="Company announces a major contract",
+            event_type=NewsEventType.CONTRACT,
+            sentiment=NewsSentiment.UNKNOWN,
+            sentiment_confidence=0.0,
+            market_impact=MarketImpact.HIGH,
+            relevance=0.9,
+            symbol=self.instrument.symbol,
+            affected_market=self.instrument.market,
+        )
+        news_analyst = AIAnalyst(
+            StaticAIProvider(json.dumps({
+                "summary": "A positive contract announcement.",
+                "event_type": "contract",
+                "sentiment": "positive",
+                "sentiment_confidence": 0.9,
+                "market_impact": "high",
+                "relevance": 0.8,
+                "key_points": ["Contract announced"],
+                "risks": [],
+            })),
+            clock=lambda: AS_OF.astimezone(timezone.utc),
+        )
+        producer = NewsEvidenceProducer(
+            StaticNewsProvider([event]),
+            news_analyst,
+            max_age=timedelta(hours=1),
+        )
+        pipeline, _ = self.pipeline()
+        pipeline.news_evidence_producer = producer
+
+        result = pipeline.run(self.instrument, make_session(), as_of=AS_OF)
+
+        self.assertIs(result.status, PipelineStatus.COMPLETE)
+        self.assertAlmostEqual(result.decision.explanation["inputs"]["news"], 0.72)
+        provenance = result.decision.explanation["inputs"]["research_provenance"]["news"]
+        self.assertEqual(provenance["observed_at"], event.timestamp.isoformat())
+        self.assertTrue(provenance["source"].startswith("ai_news:"))
+        self.assertIs(result.decision.action, AggregatedAction.BUY)
+
+    def test_sector_and_fundamental_producers_contribute_to_selection_and_aggregation(self):
+        ai_provider = StaticAIProvider(selection_response())
+        analyst = AIAnalyst(
+            ai_provider,
+            clock=lambda: AS_OF.astimezone(timezone.utc),
+        )
+        sector = SectorEvidenceProducer(
+            StaticResearchProvider("sector"),
+            analyst,
+            max_age=timedelta(days=1),
+        )
+        fundamental = FundamentalEvidenceProducer(
+            StaticResearchProvider("fundamental"),
+            analyst,
+            max_age=timedelta(days=90),
+        )
+        pipeline = StrategyResearchPipeline(
+            self.provider,
+            analyst,
+            {"orb_vwap": OrbVwapStrategy()},
+            research_evidence_producers=(sector, fundamental),
+        )
+
+        result = pipeline.run(
+            self.instrument,
+            make_session(),
+            as_of=AS_OF,
+            research_evidence=(
+                self.evidence("volume", 0.9),
+                self.evidence("momentum", 0.8),
+            ),
+        )
+
+        self.assertIs(result.status, PipelineStatus.COMPLETE)
+        self.assertEqual(
+            {item.component for item in result.research_evidence},
+            {"volume", "momentum", "sector", "fundamental"},
+        )
+        self.assertEqual(ai_provider.calls, 3)
+        self.assertIs(result.decision.action, AggregatedAction.BUY)
+        self.assertEqual(result.research_warnings, ())
+
     def test_mismatched_stale_future_and_duplicate_research_fail_closed(self):
         pipeline, ai_provider = self.pipeline()
         scenarios = (
@@ -314,6 +453,43 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             clock=lambda: AS_OF,
         )
 
+    def make_real_paper_service(self, starting_cash, store=None):
+        portfolio = PortfolioManager("USD", starting_cash, timezone=ZONE)
+        if store is not None:
+            portfolio.on_fill = store.fills.save
+        broker = PaperBroker(
+            portfolio,
+            {self.instrument.instrument_id: self.instrument},
+            clock=lambda: AS_OF,
+            market_status_fn=lambda _: True,
+        )
+        broker.connect()
+        broker.update_price(
+            self.instrument.instrument_id,
+            float(make_bars()["close"].iloc[-1]),
+            AS_OF - timedelta(minutes=1),
+        )
+        risk_engine = RiskEngine(RiskLimits(
+            max_position_quantity=100,
+            max_order_notional=20_000,
+            max_open_positions=3,
+            max_trades_per_day=10,
+            cash_requirement_rate=1.0,
+            market_session=make_session(),
+        ))
+        order_manager = OrderManager(broker, clock=lambda: AS_OF)
+        service = TradingService(
+            mode=TradingMode.PAPER,
+            risk_engine=risk_engine,
+            order_manager=order_manager,
+            portfolio=portfolio,
+            instruments={self.instrument.instrument_id: self.instrument},
+            quotes=lambda iid: broker.last_quote(iid),
+            store=store,
+            clock=lambda: AS_OF,
+        )
+        return service, broker, portfolio, order_manager
+
     def test_actionable_result_routes_through_paper_service_and_risk_engine(self):
         order_manager = CapturingOrderManager()
         # The quote is a fresh independent input to the RiskEngine, not the AI ranking.
@@ -361,6 +537,134 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only BUY or SELL"):
             no_evidence.submit_decision(skipped, 1)
         self.assertEqual(len(order_manager.requests), before)
+
+    def test_actionable_pipeline_fills_through_real_paper_broker(self):
+        service, broker, portfolio, order_manager = self.make_real_paper_service(50_000)
+        pipeline, _ = self.pipeline(trading_service=service)
+        result = pipeline.run(
+            self.instrument,
+            make_session(),
+            as_of=AS_OF,
+            research_evidence=(
+                self.evidence("volume", 0.9),
+                self.evidence("momentum", 0.8),
+            ),
+        )
+        self.assertIs(result.decision.action, AggregatedAction.BUY)
+
+        submitted = pipeline.submit_decision(result, 1, actor="pipeline-integration-test")
+
+        self.assertIs(submitted.risk.status, RiskDecisionStatus.APPROVED)
+        self.assertEqual(submitted.order.status.value, "FILLED")
+        self.assertEqual(submitted.order.filled_quantity, 1)
+        self.assertEqual(len(portfolio.fills), 1)
+        self.assertEqual(portfolio.positions()[self.instrument.instrument_id].quantity, 1)
+        self.assertEqual(broker.positions()[0].quantity, 1)
+        self.assertEqual(order_manager.events(submitted.order.client_order_id)[-1].to_status.value, "FILLED")
+
+    def test_real_paper_broker_is_not_reached_when_risk_rejects(self):
+        service, broker, portfolio, order_manager = self.make_real_paper_service(0)
+        pipeline, _ = self.pipeline(trading_service=service)
+        result = pipeline.run(
+            self.instrument,
+            make_session(),
+            as_of=AS_OF,
+            research_evidence=(
+                self.evidence("volume", 0.9),
+                self.evidence("momentum", 0.8),
+            ),
+        )
+
+        submitted = pipeline.submit_decision(result, 1)
+
+        self.assertIs(submitted.risk.status, RiskDecisionStatus.REJECTED)
+        self.assertIn("INSUFFICIENT_CASH_OR_MARGIN", submitted.risk.reason)
+        self.assertEqual(submitted.order.status.value, "REJECTED")
+        self.assertEqual(portfolio.fills, ())
+        self.assertEqual(portfolio.positions(), {})
+        self.assertEqual(broker.open_orders(), ())
+        self.assertEqual(order_manager.open_orders(), ())
+
+    def test_pipeline_submission_persists_audit_and_recovers_filled_portfolio(self):
+        database = SQLiteDatabase()
+        migrate(database)
+        store = Store(database)
+        self.addCleanup(store.db.close)
+        store.instruments.save(self.instrument)
+        service, _, portfolio, _ = self.make_real_paper_service(50_000, store)
+        pipeline, _ = self.pipeline(trading_service=service)
+        result = pipeline.run(
+            self.instrument,
+            make_session(),
+            as_of=AS_OF,
+            research_evidence=(
+                self.evidence("volume", 0.9),
+                self.evidence("momentum", 0.8),
+            ),
+        )
+
+        submitted = pipeline.submit_decision(
+            result, 1, actor="pipeline-persistence-test")
+        trail = reconstruct(store, submitted.order.client_order_id)
+
+        self.assertIsNotNone(trail)
+        self.assertEqual(
+            trail["strategy_decision"]["decision_id"],
+            str(result.decision.decision_id),
+        )
+        self.assertEqual(trail["signal"]["signal_id"], str(result.strategy_signal.signal_id))
+        self.assertEqual(
+            trail["technical_signals"]["research_evidence"]["volume"]["score"],
+            0.9,
+        )
+        self.assertEqual(
+            trail["technical_signals"]["research_evidence"]["momentum"]["source"],
+            "test-research",
+        )
+        self.assertEqual(
+            trail["technical_signals"]["ai_strategy_selection"]["response_hash"],
+            result.selection.response_hash,
+        )
+        self.assertIn("market_data", trail)
+        self.assertEqual(trail["position_sizing"]["quantity"], 1)
+        self.assertTrue(all(trail["completeness"][key] for key in (
+            "strategy_decision",
+            "risk_decision",
+            "final_order",
+            "broker_response",
+            "fills",
+            "execution_record",
+        )))
+        self.assertEqual(store.audit.verify_chain(), [])
+        self.assertEqual(len(portfolio.fills), 1)
+
+        recovered = rebuild_portfolio(
+            store,
+            {self.instrument.instrument_id: self.instrument},
+            "USD",
+            50_000,
+        )
+        self.assertEqual(
+            recovered.positions()[self.instrument.instrument_id].quantity,
+            portfolio.positions()[self.instrument.instrument_id].quantity,
+        )
+        recovery_broker = PaperBroker(
+            recovered,
+            {self.instrument.instrument_id: self.instrument},
+            clock=lambda: AS_OF,
+            market_status_fn=lambda _: True,
+        )
+        recovery_gate = TradingGate(clock=lambda: AS_OF)
+        report = RecoveryManager(
+            store=store,
+            order_manager=OrderManager(recovery_broker, clock=lambda: AS_OF),
+            portfolio=recovered,
+            broker=recovery_broker,
+            gate=recovery_gate,
+        ).recover()
+        self.assertTrue(report.clean, report.discrepancies)
+        self.assertEqual(report.orders_restored, 1)
+        self.assertFalse(recovery_gate.halted)
 
     def test_pipeline_submission_refuses_live_mode(self):
         order_manager = CapturingOrderManager()

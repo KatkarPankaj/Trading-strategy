@@ -15,6 +15,7 @@ from .aggregation import (
     SignalAggregator,
     SignalInputs,
 )
+from .audit_trail import AuditContext
 from .ai.analyst import AIAnalyst, AIResult, StrategySelection
 from .data.provider import DataProviderError, interval_delta
 from .data.resilient import ResilientProvider
@@ -28,7 +29,13 @@ from .regime import (
     RegimeUnavailable,
     regime_score,
 )
-from .research import ResearchEvidence
+from .research import (
+    NewsEvidenceProducer,
+    NewsResearchUnavailable,
+    ResearchEvidence,
+    ResearchEvidenceSource,
+    ResearchEvidenceUnavailable,
+)
 from .strategies.base import Strategy
 from .trading_service import TicketResult, TradingService
 
@@ -64,8 +71,10 @@ class StrategyPipelineResult:
     regime: RegimeAssessment | None = None
     ai_result: AIResult | None = None
     selection: StrategySelection | None = None
+    research_warnings: tuple[str, ...] = ()
     strategy_signal: Signal | None = None
     decision: AggregatedDecision | None = None
+    research_evidence: tuple[ResearchEvidence, ...] = ()
 
 
 class StrategyResearchPipeline:
@@ -85,6 +94,8 @@ class StrategyResearchPipeline:
         regime_evaluator: MarketRegimeEvaluator | None = None,
         aggregator: SignalAggregator | None = None,
         trading_service: TradingService | None = None,
+        news_evidence_producer: NewsEvidenceProducer | None = None,
+        research_evidence_producers: Sequence[ResearchEvidenceSource] = (),
     ) -> None:
         self.config = config or StrategyPipelineConfig()
         self.regime_evaluator = regime_evaluator or MarketRegimeEvaluator(
@@ -94,6 +105,9 @@ class StrategyResearchPipeline:
             ))
         if self.regime_evaluator.config.interval != self.config.interval:
             raise ValueError("pipeline and regime evaluator intervals must match")
+        if not isinstance(research_evidence_producers, Sequence) \
+                or isinstance(research_evidence_producers, (str, bytes)):
+            raise TypeError("research_evidence_producers must be a sequence")
         if not strategies or len(strategies) > 20:
             raise ValueError("strategies must contain between 1 and 20 candidates")
         for name, strategy in strategies.items():
@@ -109,6 +123,8 @@ class StrategyResearchPipeline:
         self.strategies = dict(strategies)
         self.aggregator = aggregator or SignalAggregator()
         self.trading_service = trading_service
+        self.news_evidence_producer = news_evidence_producer
+        self.research_evidence_producers = tuple(research_evidence_producers)
 
     def run(
         self,
@@ -158,6 +174,56 @@ class StrategyResearchPipeline:
                 bars=bars,
             )
 
+        warnings: list[str] = []
+        all_evidence = evidence
+        if self.news_evidence_producer is not None:
+            try:
+                collection = self.news_evidence_producer.collect(
+                    instrument, as_of=as_of)
+            except NewsResearchUnavailable as exc:
+                return StrategyPipelineResult(
+                    PipelineStatus.RESEARCH_UNAVAILABLE,
+                    f"NEWS_RESEARCH_UNAVAILABLE:{exc}",
+                    bars=bars,
+                    regime=regime,
+                )
+            warnings.extend(collection.warnings)
+            all_evidence += collection.evidence
+            all_evidence, evidence_error = self._validate_research(
+                all_evidence, instrument, as_of)
+            if evidence_error is not None:
+                return StrategyPipelineResult(
+                    PipelineStatus.RESEARCH_UNAVAILABLE,
+                    evidence_error,
+                    bars=bars,
+                    regime=regime,
+                    research_warnings=tuple(warnings),
+                )
+
+        for producer in self.research_evidence_producers:
+            try:
+                collection = producer.collect(instrument, as_of=as_of)
+            except ResearchEvidenceUnavailable as exc:
+                return StrategyPipelineResult(
+                    PipelineStatus.RESEARCH_UNAVAILABLE,
+                    f"RESEARCH_EVIDENCE_UNAVAILABLE:{exc}",
+                    bars=bars,
+                    regime=regime,
+                    research_warnings=tuple(warnings),
+                )
+            warnings.extend(collection.warnings)
+            all_evidence += collection.evidence
+        all_evidence, evidence_error = self._validate_research(
+            all_evidence, instrument, as_of)
+        if evidence_error is not None:
+            return StrategyPipelineResult(
+                PipelineStatus.RESEARCH_UNAVAILABLE,
+                evidence_error,
+                bars=bars,
+                regime=regime,
+                research_warnings=tuple(warnings),
+            )
+
         research_context = {
             "regime": {
                 "label": regime.label.value,
@@ -180,7 +246,7 @@ class StrategyResearchPipeline:
                     "observed_at": item.observed_at.isoformat(),
                     "source": item.source,
                 }
-                for item in evidence
+                for item in all_evidence
             ],
         }
         ai_result, selection = self.analyst.select_strategies(
@@ -196,6 +262,7 @@ class StrategyResearchPipeline:
                 bars=bars,
                 regime=regime,
                 ai_result=ai_result,
+                research_warnings=tuple(warnings),
             )
 
         selected_name = selection.ranked_strategies[0].strategy
@@ -215,10 +282,10 @@ class StrategyResearchPipeline:
             )
 
         component_scores = {
-            item.component: float(item.score) for item in evidence
+            item.component: float(item.score) for item in all_evidence
         }
         history_evidence = next(
-            (item for item in evidence if item.component == "history"), None)
+            (item for item in all_evidence if item.component == "history"), None)
         inputs = SignalInputs(
             instrument_id=instrument.instrument_id,
             symbol=instrument.symbol,
@@ -228,6 +295,10 @@ class StrategyResearchPipeline:
             regime=regime_score(regime, instrument.instrument_id),
             history_trades=history_evidence.history_trades if history_evidence else 0,
             volatility=regime.volatility,
+            research_provenance={
+                item.component: (item.source, item.observed_at)
+                for item in all_evidence
+            },
         )
         decision = self.aggregator.aggregate(
             inputs, as_of=as_of, strategy_signal=signal)
@@ -238,8 +309,10 @@ class StrategyResearchPipeline:
             regime=regime,
             ai_result=ai_result,
             selection=selection,
+            research_warnings=tuple(warnings),
             strategy_signal=signal,
             decision=decision,
+            research_evidence=all_evidence,
         )
 
     def submit_decision(
@@ -256,8 +329,9 @@ class StrategyResearchPipeline:
             raise RuntimeError("strategy pipeline submissions are restricted to PAPER mode")
         if not isinstance(result, StrategyPipelineResult) \
                 or result.status is not PipelineStatus.COMPLETE \
-                or result.decision is None or result.strategy_signal is None:
-            raise ValueError("a complete pipeline result with a deterministic signal is required")
+                or result.decision is None or result.strategy_signal is None \
+                or result.selection is None or result.bars is None:
+            raise ValueError("a complete pipeline result with its deterministic signal is required")
         expected_side = {
             AggregatedAction.BUY: SignalSide.BUY,
             AggregatedAction.SELL: SignalSide.SELL,
@@ -266,8 +340,74 @@ class StrategyResearchPipeline:
             raise ValueError("only BUY or SELL aggregated decisions can be submitted")
         if result.strategy_signal.side is not expected_side:
             raise ValueError("aggregated action must match the deterministic strategy signal")
+        selection = result.selection
+        signal = result.strategy_signal
+        decision = result.decision
+        audit = AuditContext(
+            technical_signals={
+                "strategy": signal.strategy,
+                "side": signal.side.value,
+                "signal_id": str(signal.signal_id),
+                "timestamp": signal.timestamp.isoformat(),
+                "entry_price": signal.entry_price,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "confidence": signal.confidence,
+                "regime": signal.regime,
+                "reasons": list(signal.reasons),
+                "aggregate_action": decision.action.value,
+                "aggregate_confidence": decision.confidence,
+                "aggregate_reason_codes": list(decision.reason_codes),
+                "input_hash": decision.input_hash,
+                "research_evidence": {
+                    item.component: {
+                        "score": item.score,
+                        "source": item.source,
+                        "observed_at": item.observed_at.isoformat(),
+                    }
+                    for item in result.research_evidence
+                },
+                "ai_strategy_selection": {
+                    "provider": selection.provider,
+                    "prompt_hash": selection.prompt_hash,
+                    "response_hash": selection.response_hash,
+                    "summary": selection.summary,
+                    "ranked_strategies": [
+                        {
+                            "strategy": ranked.strategy,
+                            "confidence": ranked.confidence,
+                            "rationale": ranked.rationale,
+                        }
+                        for ranked in selection.ranked_strategies
+                    ],
+                    "risks": list(selection.risks),
+                    "data_gaps": list(selection.data_gaps),
+                },
+            },
+            news_signals={
+                "news": {
+                    "score": item.score,
+                    "source": item.source,
+                    "observed_at": item.observed_at.isoformat(),
+                }
+                for item in result.research_evidence
+                if item.component == "news"
+            },
+            strategy_decision_id=str(decision.decision_id),
+            sizing={"quantity": quantity, "method": "caller_supplied"},
+            data_reference=(
+                f"{self.provider.name}:{self.config.interval}:"
+                f"{result.bars.index[0].isoformat()}:"
+                f"{result.bars.index[-1].isoformat()}"
+            ),
+        )
         return self.trading_service.submit_signal(
-            result.strategy_signal, quantity, actor=actor)
+            signal,
+            quantity,
+            actor=actor,
+            audit=audit,
+            strategy_decision=decision,
+        )
 
     def _validate_research(
         self,
@@ -291,6 +431,7 @@ class StrategyResearchPipeline:
             age = as_of - item.observed_at
             if age < timedelta(0):
                 return (), f"RESEARCH_FROM_FUTURE:{item.component}"
-            if age > self.config.max_research_age:
+            max_age = item.max_age or self.config.max_research_age
+            if age > max_age:
                 return (), f"STALE_RESEARCH:{item.component}"
         return items, None

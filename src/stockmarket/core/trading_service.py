@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
+from .aggregation import AggregatedDecision
 from .audit_trail import AuditContext, live_gaps
 from .executors import TradingMode
 from .models import Instrument, OrderSide, OrderType, RiskDecision, RiskDecisionStatus, Signal, SignalSide
@@ -93,7 +94,13 @@ class TradingService:
         if store is not None:  # write-ahead: each transition is stored before the next step runs
             order_manager.on_change = self._persist_transition
 
-    def submit(self, ticket: OrderTicket, *, actor: str = "system") -> TicketResult:
+    def submit(
+        self,
+        ticket: OrderTicket,
+        *,
+        actor: str = "system",
+        strategy_decision: AggregatedDecision | None = None,
+    ) -> TicketResult:
         instrument = self.instruments.get(ticket.instrument_id)
         if instrument is None:
             raise UnknownInstrument(ticket.instrument_id)
@@ -106,6 +113,19 @@ class TradingService:
                     or ticket.signal.signal_id != ticket.signal_id
                     or ticket.signal.side.value != ticket.side.value):
                 raise ValueError("ticket signal identity and side must match the order ticket")
+        if strategy_decision is not None:
+            if not isinstance(strategy_decision, AggregatedDecision):
+                raise TypeError("strategy_decision must be an AggregatedDecision or None")
+            if ticket.signal is None or (
+                strategy_decision.instrument_id != ticket.instrument_id
+                or strategy_decision.symbol != instrument.symbol
+                or strategy_decision.strategy != ticket.strategy
+                or strategy_decision.action.value != ticket.side.value
+                or ticket.audit is None
+                or ticket.audit.strategy_decision_id != str(strategy_decision.decision_id)
+            ):
+                raise ValueError(
+                    "strategy decision identity and action must match the audited signal")
         now = self._clock()
         client_order_id = ticket.client_order_id or new_client_order_id()
 
@@ -124,7 +144,8 @@ class TradingService:
             order_type=ticket.order_type, timestamp=now, strategy=ticket.strategy,
             signal_id=ticket.signal_id, limit_price=ticket.limit_price, stop_price=ticket.stop_price)
         self._record_provenance(client_order_id, ticket, now, market_data)
-        self._record_audit(client_order_id, ticket, now, decision, market_data)
+        self._record_audit(
+            client_order_id, ticket, now, decision, market_data, strategy_decision)
         result = self.order_manager.submit(request, decision)
         if not result.duplicate and not result.order.is_terminal:
             result = SubmissionResult(self.order_manager.sync(client_order_id))
@@ -138,6 +159,8 @@ class TradingService:
         quantity: int,
         *,
         actor: str = "system",
+        audit: AuditContext | None = None,
+        strategy_decision: AggregatedDecision | None = None,
     ) -> TicketResult:
         """Route a priced deterministic signal through the normal risk/order boundary."""
         if self.mode is not TradingMode.PAPER:
@@ -148,6 +171,8 @@ class TradingService:
             raise ValueError("only BUY or SELL signals can be submitted")
         if signal.entry_price is None:
             raise ValueError("a priced signal is required")
+        if audit is not None and not isinstance(audit, AuditContext):
+            raise TypeError("audit must be an AuditContext or None")
         if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
             raise ValueError("quantity must be a positive integer")
         return self.submit(
@@ -162,8 +187,10 @@ class TradingService:
                 signal_id=signal.signal_id,
                 signal=signal,
                 market_regime=signal.regime,
+                audit=audit,
             ),
             actor=actor,
+            strategy_decision=strategy_decision,
         )
 
     @property
@@ -217,10 +244,15 @@ class TradingService:
             decision_timestamp=now, versioned=info is not None)
 
     def _record_audit(self, client_order_id: str, ticket: OrderTicket, now: datetime,
-                      decision: RiskDecision, market_data: tuple[float, datetime] | None) -> None:
+                      decision: RiskDecision, market_data: tuple[float, datetime] | None,
+                      strategy_decision: AggregatedDecision | None) -> None:
         """Decision inputs are stored before the order is sent; the broker response is added afterwards."""
         if self._store is None:
             return
+        if ticket.signal is not None:
+            self._store.signals.save(ticket.signal)
+        if strategy_decision is not None:
+            self._store.strategy_decisions.save(strategy_decision)
         a = ticket.audit or AuditContext()
         self._store.order_audit.record(
             client_order_id,

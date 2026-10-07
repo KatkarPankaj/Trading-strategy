@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import streamlit as st
@@ -50,10 +51,11 @@ def main() -> None:
     if st.sidebar.button("Refresh"):
         st.rerun()
 
-    tabs = st.tabs(["Markets & regime", "Signals", "Portfolio", "Orders", "PnL & drawdown",
-                    "Strategies", "News & AI", "Risk", "System health", "Audit log"])
+    tabs = st.tabs(["Research (advisory)", "Markets & regime", "Signals", "Portfolio",
+                    "Orders", "PnL & drawdown", "Strategies", "News & AI", "Risk",
+                    "System health", "Audit log"])
     renderers: list[Callable[[], None]] = [
-        lambda: _markets(client), lambda: _signals(
+        lambda: _research(client), lambda: _markets(client), lambda: _signals(
             client), lambda: _portfolio(client),
         lambda: _orders(client), lambda: _pnl(
             client), lambda: _strategies(client),
@@ -63,6 +65,99 @@ def main() -> None:
     for tab, render in zip(tabs, renderers):
         with tab:
             render()
+
+
+def _research(client: ApiClient) -> None:
+    st.subheader("Run market research")
+    st.warning(
+        "Research only. This page never submits orders. AI rankings are advisory, "
+        "and model-reported confidence is not calibrated.")
+    instruments = _safe(client, "/instruments")
+    if instruments is None:
+        return
+    if not instruments:
+        st.info("No instruments are available from the API.")
+        return
+    options = {
+        f"{item['symbol']} ({item['market']} · {item['instrument_id']})":
+        item["instrument_id"]
+        for item in instruments
+    }
+    labels = list(options)
+    with st.form("market_research"):
+        selected = st.selectbox("Instrument", labels)
+        st.caption(
+            "Optional operator-supplied scores must be based on evidence you have verified. "
+            "They are not fetched from a sector/fundamental vendor.")
+        components = st.multiselect(
+            "Include research components",
+            ("volume", "momentum", "sector", "news", "fundamental"),
+            default=[],
+        )
+        scores = {
+            component: st.slider(
+                f"{component.title()} score (-1 bearish to +1 bullish)",
+                min_value=-1.0,
+                max_value=1.0,
+                value=0.0,
+                step=0.05,
+                key=f"research_score_{component}",
+            )
+            for component in components
+        }
+        submitted = st.form_submit_button("Run research")
+    if not submitted:
+        return
+    observed_at = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "instrument_id": options[selected],
+        "as_of": observed_at,
+        "evidence": [
+            {
+                "component": component,
+                "score": score,
+                "observed_at": observed_at,
+                "source": "dashboard_operator_input",
+            }
+            for component, score in scores.items()
+        ],
+    }
+    try:
+        result = client.post("/research", payload)
+    except ApiError as exc:
+        st.error(str(exc))
+        return
+    st.caption(f"Status: {result['status']} · Mode: {result['trading_mode']}")
+    if result.get("reason"):
+        st.warning(result["reason"])
+    for warning in result.get("research_warnings", ()):
+        st.warning(warning)
+    decision = result.get("decision")
+    if decision is not None:
+        st.metric(
+            "Deterministic aggregate",
+            decision["action"],
+            f"Confidence: {decision['confidence']:.1f}% (deterministic score, not a forecast)",
+        )
+        st.write("Reason codes:", ", ".join(decision["reason_codes"]) or "None")
+    selection = result.get("selection")
+    if selection is not None:
+        st.subheader("AI strategy ranking (advisory)")
+        st.write(selection["summary"])
+        st.dataframe(views.frame(selection["ranked_strategies"]), width="stretch")
+        if selection.get("risks"):
+            st.write("AI-listed risks:", "; ".join(selection["risks"]))
+    signal = result.get("signal")
+    if signal is not None:
+        st.subheader("Deterministic strategy output")
+        st.json(signal)
+    if decision is not None:
+        with st.expander("Regime and research evidence"):
+            st.json({
+                "regime": result.get("regime"),
+                "research_evidence": result.get("research_evidence"),
+                "decision_explanation": decision.get("explanation"),
+            })
 
 
 def _markets(client: ApiClient) -> None:

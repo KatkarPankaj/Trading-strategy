@@ -43,17 +43,46 @@ class ApiClient:
         return cls(env.get("API_BASE_URL", "http://127.0.0.1:8000"), token)
 
     def get(self, path: str, **params: Any) -> Any:
-        headers = {"Authorization": f"Bearer {self._token.reveal()}"} if self._token else {
-        }
         try:
-            response = requests.get(f"{self._base}{path}", params=params or None,
-                                    headers=headers, timeout=self._timeout)
+            response = requests.get(
+                f"{self._base}{path}",
+                params=params or None,
+                headers=self._headers(),
+                timeout=self._timeout,
+            )
         except requests.RequestException as exc:
             raise ApiError(f"API unreachable: {type(exc).__name__}") from exc
+        return self._response_json(response, path)
+
+    def post(self, path: str, payload: Mapping[str, Any]) -> Any:
+        headers = self._headers()
+        headers["Content-Type"] = "application/json"
+        try:
+            response = requests.post(
+                f"{self._base}{path}",
+                json=dict(payload),
+                headers=headers,
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            raise ApiError(f"API unreachable: {type(exc).__name__}") from exc
+        return self._response_json(response, path)
+
+    def _headers(self) -> dict[str, str]:
+        if self._token is None:
+            return {}
+        return {"Authorization": f"Bearer {self._token.reveal()}"}
+
+    @staticmethod
+    def _response_json(response: requests.Response, path: str) -> Any:
         if response.status_code == 401:
             raise ApiError("API rejected the token (401)", 401)
         if response.status_code == 503 and path == "/health":
-            return response.json()  # DOWN is still a valid health report
+            return response.json()
+        if response.status_code == 503 and path == "/research":
+            raise ApiError(
+                "Research is unavailable (503); check the server's research pipeline "
+                "and market-session configuration.", 503)
         if not response.ok:
             raise ApiError(
                 f"API error {response.status_code} for {path}", response.status_code)

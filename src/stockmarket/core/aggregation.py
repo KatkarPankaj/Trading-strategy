@@ -72,6 +72,7 @@ class SignalInputs:
     history_trades: int = 0
     volatility: float | None = None  # fractional, e.g. ATR / price
     liquidity: float | None = None  # average traded value, instrument currency
+    research_provenance: Mapping[str, tuple[str, datetime]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("instrument_id", "symbol", "strategy"):
@@ -89,6 +90,20 @@ class SignalInputs:
                 _require_finite(value, name)
                 if value < 0:
                     raise ValueError(f"{name} must be non-negative")
+        if not isinstance(self.research_provenance, Mapping):
+            raise TypeError("research_provenance must be a mapping")
+        for component, provenance in self.research_provenance.items():
+            if component not in DIRECTIONAL_COMPONENTS:
+                raise ValueError(f"unknown research provenance component: {component}")
+            if getattr(self, component) is None:
+                raise ValueError(f"research provenance requires an available {component} score")
+            if not isinstance(provenance, tuple) or len(provenance) != 2:
+                raise ValueError(
+                    f"research provenance for {component} must be (source, observed_at)")
+            source, observed_at = provenance
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError(f"research provenance source for {component} must be non-empty")
+            _require_aware(observed_at, f"research_provenance[{component}].observed_at")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +115,13 @@ class SignalInputs:
             "history_trades": self.history_trades,
             "volatility": self.volatility,
             "liquidity": self.liquidity,
+            "research_provenance": {
+                name: {
+                    "source": source,
+                    "observed_at": observed_at.isoformat(),
+                }
+                for name, (source, observed_at) in sorted(self.research_provenance.items())
+            },
         }
 
 

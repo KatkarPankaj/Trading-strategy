@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +25,14 @@ class NewsAnalysisSchema(_Strict):
     relevance: float = Field(ge=0, le=1, allow_inf_nan=False)
     key_points: list[str] = Field(default_factory=list, max_length=10)
     risks: list[str] = Field(default_factory=list, max_length=10)
+
+
+class ResearchScoreSchema(_Strict):
+    summary: str = _Text
+    directional_score: float = Field(ge=-1, le=1, allow_inf_nan=False)
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    risks: list[Annotated[str, _Item]] = Field(default_factory=list, max_length=10)
+    data_gaps: list[Annotated[str, _Item]] = Field(default_factory=list, max_length=10)
 
 
 class EarningsMetric(_Strict):
@@ -84,6 +92,15 @@ class StrategySelectionSchema(_Strict):
 
 TASKS: dict[str, tuple[type[_Strict], str]] = {
     "news_analysis": (NewsAnalysisSchema, "Analyse the news item and classify its likely market relevance."),
+    "research_scoring": (
+        ResearchScoreSchema,
+        "Assess only the supplied, timestamped sector or fundamental research facts. "
+        "Return a cautious directional score from -1 (strongly adverse) to 1 (strongly supportive) "
+        "for the identified instrument over the evidence's relevant horizon, and a confidence from 0 to 1. "
+        "Use low confidence or a score near zero when facts are incomplete, stale, ambiguous or immaterial. "
+        "Do not infer missing facts, recommend a trade or strategy, set position size, or issue orders. "
+        "The score is advisory research, not authorization to trade.",
+    ),
     "earnings": (EarningsSchema, "Extract the earnings result, guidance and key metrics from the text."),
     "event_classification": (EventClassificationSchema, "Classify the type of event described."),
     "market_summary": (MarketSummarySchema, "Summarise the market conditions described."),

@@ -14,11 +14,15 @@ from ..core.executors import TradingMode
 from ..core.models import AssetClass, Instrument, TradingStatus
 from ..core.observability import CheckResult, ErrorCounter, HealthMonitor
 from ..core.order_management import OrderManager
+from ..core.market_session import MarketSession
+from ..core.ai import AIAnalyst
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.portfolio import PortfolioManager
 from ..core.recovery import RecoveryManager, rebuild_portfolio, reconcile_positions
 from ..core.risk import RiskEngine, RiskLimits
 from ..core.learning import StrategyConfigRegistry
+from ..core.strategies import OrbVwapStrategy, Strategy
+from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.kill_switch import AutoTriggerMonitor, AutoTriggerPolicy, KillSwitch
 from ..core.observability import AlertManager, StructuredLogger
 from ..core.live_readiness import LiveReadinessChecker
@@ -60,6 +64,9 @@ def build_context(
     store: Store | None = None,
     market_stats: Callable[[str], Mapping[str, Any]] | None = None,
     sector_of: Callable[[str], str | None] | None = None,
+    research_analyst: AIAnalyst | None = None,
+    research_strategies: Mapping[str, Strategy] | None = None,
+    research_sessions: Mapping[str, MarketSession] | None = None,
 ) -> ApiContext:
     """`market_stats` supplies liquidity, slippage and correlation per instrument; without it, entries are rejected (fail closed)."""
     env = os.environ if env is None else env
@@ -145,6 +152,13 @@ def build_context(
         quotes=quote_source(market_data, instruments, logger=logger),
         market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
         strategy_approval=strategies.check_live, provenance_source=strategies.version_info)
+    research_pipeline = None
+    if research_analyst is not None:
+        research_pipeline = StrategyResearchPipeline(
+            market_data,
+            research_analyst,
+            research_strategies or {"orb_vwap": OrbVwapStrategy()},
+        )
     recovery = RecoveryManager(store=store, order_manager=order_manager, portfolio=portfolio,
                                broker=broker, gate=gate)
     # connects the broker, restores orders, and halts entries on any discrepancy
@@ -173,7 +187,9 @@ def build_context(
         kill_switch_available=kill_switch.available)
     return ApiContext(settings=settings, paper=paper, live=None, store=store, health=health,
                       api_token=token, gate=gate, recovery=recovery, markets=registry, readiness=checker,
-                      kill_switch=kill_switch, monitor=monitor, market_data=market_data)
+                      kill_switch=kill_switch, monitor=monitor, market_data=market_data,
+                      instruments=instruments, research_pipeline=research_pipeline,
+                      research_sessions=research_sessions or {})
 
 
 def create_app_from_env() -> FastAPI:

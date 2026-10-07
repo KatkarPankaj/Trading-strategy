@@ -96,7 +96,19 @@ from .strategy_pipeline import (
     StrategyPipelineResult,
     StrategyResearchPipeline,
 )
-from .research import ResearchEvidence
+from .research import (
+    FundamentalEvidenceProducer,
+    NewsEvidenceCollection,
+    NewsEvidenceProducer,
+    NewsResearchUnavailable,
+    ResearchEvidenceCollection,
+    ResearchEvidence,
+    ResearchEvidenceSource,
+    ResearchEvidenceUnavailable,
+    ResearchObservation,
+    ResearchObservationProvider,
+    SectorEvidenceProducer,
+)
 
 __all__ = [
     "AggregatedAction",
@@ -118,6 +130,16 @@ __all__ = [
     "StrategyPipelineResult",
     "StrategyResearchPipeline",
     "ResearchEvidence",
+    "ResearchObservation",
+    "ResearchObservationProvider",
+    "ResearchEvidenceSource",
+    "ResearchEvidenceCollection",
+    "NewsEvidenceCollection",
+    "NewsEvidenceProducer",
+    "NewsResearchUnavailable",
+    "ResearchEvidenceUnavailable",
+    "SectorEvidenceProducer",
+    "FundamentalEvidenceProducer",
     "AssetClass",
     "Instrument",
     "Order",

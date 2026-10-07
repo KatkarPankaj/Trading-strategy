@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hmac
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -16,12 +16,15 @@ from ..core.executors import LIVE_CONFIRMATION_PHRASE, LiveTradingRefused, Tradi
 from ..core.kill_switch import KillSwitchError
 from ..core.observability import HealthMonitor
 from ..core.order_management import IdempotencyConflict, InvalidOrderTransition, OrderManagerError, UnknownOrder
+from ..core.market_session import MarketSession
+from ..core.models import Instrument
 from ..core.persistence import Store, to_json
 from ..core.recovery import RecoveryError
 from ..core.security import Secret
 from ..core.settings import AppSettings
+from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.trading_service import OrderTicket, TradingService, UnknownInstrument, summarize_trades
-from .schemas import KillResetBody, KillTriggerBody, OrderBody, ResumeBody
+from .schemas import KillResetBody, KillTriggerBody, OrderBody, ResearchRunBody, ResumeBody
 
 
 @dataclass(slots=True)
@@ -39,6 +42,9 @@ class ApiContext:
     kill_switch: Any = None
     monitor: Any = None
     market_data: Any = None
+    instruments: Mapping[str, Instrument] = field(default_factory=dict)
+    research_pipeline: StrategyResearchPipeline | None = None
+    research_sessions: Mapping[str, MarketSession] = field(default_factory=dict)
 
     @property
     def primary(self) -> TradingService:
@@ -194,6 +200,55 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def performance() -> dict[str, Any]:
         return _plain({"trading_mode": ctx.mode, "trades": summarize_trades(ctx.store.trades.recent(1000)),
                        "latest_pnl_snapshot": ctx.store.pnl.latest()})
+
+    @app.post("/research", dependencies=[Depends(auth)])
+    def run_research(body: ResearchRunBody) -> dict[str, Any]:
+        if ctx.research_pipeline is None:
+            raise HTTPException(503, "strategy research pipeline is not configured")
+        instrument = ctx.instruments.get(body.instrument_id)
+        if instrument is None:
+            raise HTTPException(404, "unknown instrument")
+        session = ctx.research_sessions.get(instrument.market)
+        if session is None:
+            raise HTTPException(
+                503, f"market session is not configured for {instrument.market}")
+        as_of = body.as_of or datetime.now(timezone.utc)
+        try:
+            evidence = tuple(
+                item.to_domain(instrument.instrument_id) for item in body.evidence)
+            result = ctx.research_pipeline.run(
+                instrument, session, as_of=as_of, research_evidence=evidence)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {
+            "trading_mode": ctx.mode,
+            "status": result.status.value,
+            "reason": result.reason,
+            "instrument_id": instrument.instrument_id,
+            "as_of": as_of.isoformat(),
+            "regime": _plain(result.regime) if result.regime is not None else None,
+            "selection": _plain(result.selection) if result.selection is not None else None,
+            "signal": _plain(result.strategy_signal)
+            if result.strategy_signal is not None else None,
+            "decision": _plain(result.decision) if result.decision is not None else None,
+            "research_evidence": [
+                {
+                    "instrument_id": item.instrument_id,
+                    "component": item.component,
+                    "score": item.score,
+                    "observed_at": item.observed_at.isoformat(),
+                    "source": item.source,
+                    "history_trades": item.history_trades,
+                    "max_age_seconds": item.max_age.total_seconds()
+                    if item.max_age is not None else None,
+                }
+                for item in result.research_evidence
+            ],
+            "research_warnings": list(result.research_warnings),
+            "bar_count": len(result.bars) if result.bars is not None else 0,
+            "latest_bar_at": result.bars.index[-1].isoformat()
+            if result.bars is not None and not result.bars.empty else None,
+        }
 
     @app.get("/orders/{client_order_id}/audit", dependencies=[Depends(auth)])
     def order_audit(client_order_id: str) -> dict[str, Any]:
