@@ -21,6 +21,9 @@ from stockmarket.core.market_intelligence import (
 )
 from stockmarket.core.markets import default_markets
 from stockmarket.core.models import AssetClass, SignalSide
+from stockmarket.core.models import OrderSide, OrderStatus, OrderType
+from stockmarket.core.order_management import ManagedOrder
+from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
 from stockmarket.core.regime import RegimeAssessment, RegimeLabel
 from stockmarket.core.security import Secret
 from stockmarket.core.strategy_pipeline import (
@@ -108,11 +111,14 @@ def make_context(*, configured=True):
             ),
             {"orb_vwap": OrbVwapStrategy()},
         )
+    db = SQLiteDatabase()
+    migrate(db)
+    store = Store(db)
     context = ApiContext(
         settings=SimpleNamespace(),
         paper=SimpleNamespace(mode=TradingMode.PAPER),
         live=None,
-        store=None,
+        store=store,
         health=None,
         api_token=Secret(TOKEN),
         instruments={instrument.instrument_id: instrument},
@@ -202,6 +208,7 @@ class ResearchApiTests(unittest.TestCase):
     def test_proposal_submission_requires_authentication_and_routes_explicit_paper_acceptance(self):
         context, provider = make_context()
         self.addCleanup(provider.close)
+        self.addCleanup(context.store.db.close)
         context.settings.max_market_data_age_seconds = 300
         as_of = datetime.now(timezone.utc) - timedelta(seconds=2)
         generated_at = as_of + timedelta(seconds=1)
@@ -273,8 +280,26 @@ class ResearchApiTests(unittest.TestCase):
         intelligence = StaticMarketIntelligence()
         context.market_intelligence = intelligence
         context.research_pipeline = Mock()
+        prior_order = ManagedOrder(
+            client_order_id="pending",
+            broker_order_id="paper-order",
+            instrument_id=instrument.instrument_id,
+            symbol=instrument.symbol,
+            side=OrderSide.BUY,
+            quantity=1,
+            order_type=OrderType.MARKET,
+            limit_price=None,
+            stop_price=None,
+            timestamp=generated_at,
+            strategy="orb_vwap",
+            signal_id=proposal.signal_id,
+            risk_decision_id=None,
+            status=OrderStatus.ACCEPTED,
+        )
+        context.paper.order_manager = SimpleNamespace(
+            get=Mock(return_value=prior_order))
         context.research_pipeline.submit_decision.return_value = SimpleNamespace(
-            order={}, risk={}, duplicate=False)
+            order=prior_order, risk={}, duplicate=False)
         client = TestClient(create_app(context))
         body = {
             "instrument_ids": [instrument.instrument_id],
@@ -299,7 +324,11 @@ class ResearchApiTests(unittest.TestCase):
         submitted = client.post(
             f"/intelligence/proposals/{proposal.proposal_id}/submit",
             headers=headers,
-            json={"operator": "test-operator", "quantity": 1},
+            json={
+                "operator": "test-operator",
+                "sizing_mode": "MANUAL_OVERRIDE",
+                "quantity": 1,
+            },
         )
 
         self.assertEqual(submitted.status_code, 200, submitted.text)
@@ -308,9 +337,27 @@ class ResearchApiTests(unittest.TestCase):
         context.research_pipeline.submit_decision.assert_called_once()
         call = context.research_pipeline.submit_decision.call_args
         self.assertEqual(call.args, (pipeline_result, 1))
+        self.assertEqual(call.kwargs["sizing_mode"], "MANUAL_OVERRIDE")
         self.assertEqual(call.kwargs["actor"], "test-operator")
         self.assertEqual(call.kwargs["proposal_id"], proposal.proposal_id)
         self.assertTrue(call.kwargs["client_order_id"].startswith("proposal-"))
+        prior_order = replace(
+            prior_order, client_order_id=call.kwargs["client_order_id"])
+        context.paper.order_manager.get.return_value = prior_order
+        replay = client.post(
+            f"/intelligence/proposals/{proposal.proposal_id}/submit",
+            headers=headers,
+            json={
+                "operator": "test-operator",
+                "sizing_mode": "MANUAL_OVERRIDE",
+                "quantity": 1,
+            },
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertTrue(replay.json()["duplicate"])
+        self.assertEqual(
+            replay.json()["execution"], "PAPER_ORDER_ALREADY_CREATED")
+        context.research_pipeline.submit_decision.assert_called_once()
 
         stale_as_of = datetime.now(timezone.utc) - timedelta(minutes=5)
         intelligence.proposal = replace(
@@ -337,7 +384,11 @@ class ResearchApiTests(unittest.TestCase):
         stale = client.post(
             "/intelligence/proposals/stale-proposal-id/submit",
             headers=headers,
-            json={"operator": "test-operator", "quantity": 1},
+            json={
+                "operator": "test-operator",
+                "sizing_mode": "MANUAL_OVERRIDE",
+                "quantity": 1,
+            },
         )
         self.assertEqual(stale.status_code, 409)
 
@@ -345,6 +396,7 @@ class ResearchApiTests(unittest.TestCase):
     def test_proposal_submission_rejects_stale_or_unknown_context(self):
         context, provider = make_context()
         self.addCleanup(provider.close)
+        self.addCleanup(context.store.db.close)
         context.settings.max_market_data_age_seconds = 1
         context.market_intelligence = SimpleNamespace()
         context.research_pipeline = Mock()
@@ -352,7 +404,11 @@ class ResearchApiTests(unittest.TestCase):
         response = client.post(
             "/intelligence/proposals/missing/submit",
             headers={"Authorization": f"Bearer {TOKEN}"},
-            json={"operator": "test-operator", "quantity": 1},
+            json={
+                "operator": "test-operator",
+                "sizing_mode": "MANUAL_OVERRIDE",
+                "quantity": 1,
+            },
         )
         self.assertEqual(response.status_code, 404)
 

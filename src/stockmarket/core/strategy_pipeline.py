@@ -318,8 +318,9 @@ class StrategyResearchPipeline:
     def submit_decision(
         self,
         result: StrategyPipelineResult,
-        quantity: int,
+        quantity: int | None = None,
         *,
+        sizing_mode: str = "MANUAL_OVERRIDE",
         actor: str = "system",
         client_order_id: str | None = None,
         proposal_id: str | None = None,
@@ -342,6 +343,13 @@ class StrategyResearchPipeline:
             raise ValueError("only BUY or SELL aggregated decisions can be submitted")
         if result.strategy_signal.side is not expected_side:
             raise ValueError("aggregated action must match the deterministic strategy signal")
+        if sizing_mode not in {"AUTOMATIC_SIZING", "MANUAL_OVERRIDE"}:
+            raise ValueError("sizing_mode must be AUTOMATIC_SIZING or MANUAL_OVERRIDE")
+        if sizing_mode == "AUTOMATIC_SIZING" and quantity is not None:
+            raise ValueError("quantity must not be supplied for AUTOMATIC_SIZING")
+        if sizing_mode == "MANUAL_OVERRIDE" and (
+                isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0):
+            raise ValueError("MANUAL_OVERRIDE requires a positive integer quantity")
         selection = result.selection
         signal = result.strategy_signal
         decision = result.decision
@@ -397,13 +405,26 @@ class StrategyResearchPipeline:
                 if item.component == "news"
             },
             strategy_decision_id=str(decision.decision_id),
-            sizing={"quantity": quantity, "method": "caller_supplied"},
+            sizing={
+                "quantity": quantity,
+                "method": sizing_mode,
+                "supervised_operator": actor if sizing_mode == "MANUAL_OVERRIDE" else None,
+            },
             data_reference=(
                 f"{self.provider.name}:{self.config.interval}:"
                 f"{result.bars.index[0].isoformat()}:"
                 f"{result.bars.index[-1].isoformat()}"
             ),
         )
+        if sizing_mode == "AUTOMATIC_SIZING":
+            submission, _ = self.trading_service.submit_sized_signal(
+                signal,
+                actor=actor,
+                audit=audit,
+                strategy_decision=decision,
+                client_order_id=client_order_id,
+            )
+            return submission
         return self.trading_service.submit_signal(
             signal,
             quantity,

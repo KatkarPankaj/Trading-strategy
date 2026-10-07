@@ -9,7 +9,7 @@ from uuid import UUID
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..core.models import OrderSide, OrderType
 from ..core.research import ResearchEvidence
@@ -132,7 +132,8 @@ class ProposalSubmitBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     operator: str = Field(min_length=1, max_length=64)
-    quantity: int = Field(gt=0, le=1_000_000_000, strict=True)
+    sizing_mode: Literal["AUTOMATIC_SIZING", "MANUAL_OVERRIDE"] = "AUTOMATIC_SIZING"
+    quantity: int | None = Field(default=None, gt=0, le=1_000_000_000, strict=True)
 
     @field_validator("operator")
     @classmethod
@@ -141,6 +142,14 @@ class ProposalSubmitBody(BaseModel):
         if not value:
             raise ValueError("operator must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def validate_sizing_selection(self) -> "ProposalSubmitBody":
+        if self.sizing_mode == "AUTOMATIC_SIZING" and self.quantity is not None:
+            raise ValueError("quantity must not be supplied for AUTOMATIC_SIZING")
+        if self.sizing_mode == "MANUAL_OVERRIDE" and self.quantity is None:
+            raise ValueError("MANUAL_OVERRIDE requires quantity")
+        return self
 
 
 class ResumeBody(BaseModel):

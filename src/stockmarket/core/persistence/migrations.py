@@ -108,10 +108,20 @@ _V4 = [
         broker_response TEXT, exit_reason TEXT, data_reference TEXT, updated_at TEXT NOT NULL)""",
 ]
 
+_V5 = [
+    """CREATE TABLE proposal_submissions (
+        proposal_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL, operator TEXT NOT NULL, sizing_mode TEXT NOT NULL,
+        quantity INTEGER, proposal_as_of TEXT NOT NULL, generated_at TEXT NOT NULL,
+        proposal_payload TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL)""",
+    "CREATE INDEX idx_proposal_submissions_state ON proposal_submissions (state)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
-    (4, "order_audit", _V4)]
+    (4, "order_audit", _V4), (5, "proposal_submissions", _V5)]
 
 
 def applied_versions(db: Database) -> set[int]:

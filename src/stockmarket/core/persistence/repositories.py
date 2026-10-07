@@ -486,6 +486,61 @@ class ExecutionRecordRepository(_Repository):
         return self._db.query("SELECT * FROM execution_records ORDER BY decision_timestamp DESC LIMIT ?", (limit,))
 
 
+class ProposalSubmissionRepository(_Repository):
+    """Durable, one-shot claim and outcome for an accepted research proposal."""
+
+    def get(self, proposal_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM proposal_submissions WHERE proposal_id = ?",
+            (proposal_id,))
+        return rows[0] if rows else None
+
+    def begin(
+        self,
+        *,
+        proposal_id: str,
+        client_order_id: str,
+        operator: str,
+        sizing_mode: str,
+        quantity: int | None,
+        proposal_as_of: datetime,
+        generated_at: datetime,
+        proposal_payload: Any,
+    ) -> bool:
+        with self._db.transaction():
+            if self.get(proposal_id) is not None:
+                return False
+            now = ts(datetime.now(timezone.utc))
+            self._db.execute(
+                """INSERT INTO proposal_submissions
+                   (proposal_id, client_order_id, state, operator, sizing_mode,
+                    quantity, proposal_as_of, generated_at, proposal_payload,
+                    error, created_at, updated_at)
+                   VALUES (?, ?, 'SUBMITTING', ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                (proposal_id, client_order_id, operator, sizing_mode, quantity,
+                 ts(proposal_as_of), ts(generated_at), to_json(proposal_payload),
+                 now, now),
+            )
+            return True
+
+    def finish(
+        self,
+        proposal_id: str,
+        *,
+        state: str,
+        quantity: int | None,
+        error: str | None,
+    ) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """UPDATE proposal_submissions
+                   SET state = ?, quantity = ?, error = ?, updated_at = ?
+                   WHERE proposal_id = ?""",
+                (state, quantity, error, ts(datetime.now(timezone.utc)),
+                 proposal_id),
+            )
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -507,3 +562,4 @@ class Store:
         self.strategy_configs = StrategyConfigRepository(db)
         self.execution_records = ExecutionRecordRepository(db)
         self.order_audit = OrderAuditRepository(db)
+        self.proposal_submissions = ProposalSubmissionRepository(db)

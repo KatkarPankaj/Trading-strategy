@@ -83,26 +83,30 @@ $env:PYTHONPATH = "src"
 
 The research form accepts optional operator-entered evidence scores. Enter only scores backed by evidence you have verified; the UI labels these as operator input, not vendor data. The API can opt in to timestamped Yahoo Finance reported-EPS event evidence with `FUNDAMENTAL_PROVIDER=yahoo`; this does not supply sector direction or mappings. AI strategy rankings and model-reported confidence are advisory and are not calibrated forecasts.
 
-The API's separate market-intelligence service exposes `POST /intelligence/opportunities` for timestamped multi-instrument proposals. It requires the configured AI provider, per-market `RESEARCH_SESSIONS`, `NEWS_PROVIDER=finnhub`, and a Finnhub API key. Results combine the existing regime/news/strategy pipeline and deterministic signal aggregation, rank by deterministic aggregate confidence, and return explainable `TradeProposal` records marked `risk_status=NOT_EVALUATED` and `execution=NOT_SUBMITTED`. Explicit paper acceptance is available through `POST /intelligence/proposals/{proposal_id}/submit`; it requires a declared operator and quantity, rejects stale proposals, and routes the original deterministic context through the existing `TradingService`/`RiskEngine` gate. This proposal workflow does not alter the legacy Streamlit paper workflows or their local state.
+The API's separate market-intelligence service exposes `POST /intelligence/opportunities` for timestamped multi-instrument proposals. It requires the configured AI provider, per-market `RESEARCH_SESSIONS`, `NEWS_PROVIDER=finnhub`, and a Finnhub API key. Results combine the existing regime/news/strategy pipeline and deterministic signal aggregation, rank by deterministic aggregate confidence, and return explainable `TradeProposal` records marked `risk_status=NOT_EVALUATED` and `execution=NOT_SUBMITTED`. Explicit paper acceptance is available through `POST /intelligence/proposals/{proposal_id}/submit`; automatic risk-based sizing is the default, while manual quantity requires an explicit `MANUAL_OVERRIDE`. Submissions are persisted and replay-protected, and the existing `TradingService`/`RiskEngine` remains authoritative. Both legacy Streamlit dashboard order mutators now fail closed before changing their separate local paper state; see [docs/EXECUTION_BOUNDARY.md](docs/EXECUTION_BOUNDARY.md). The service reservation lock is process-local, so only one API worker is supported.
 
 Platform API setup, secret handling, migration, backup, restore, health checks, and current operational limitations are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
-## Launch advanced scanner + dummy trading app
-This app includes:
+## Launch legacy research dashboard
+The dashboard can still display:
 - Top 5 intraday candidates scanner
 - Buy strategy guidance with signal/risk levels
-- Dummy buy/sell orders, holdings, cash, and PnL tracking
+
+**Legacy order execution is disabled.** The former Buy/Exit paths fail closed
+and do not change the dashboard's local portfolio or ledger. Use the
+authenticated platform PAPER API for risk-checked orders. Existing dashboard
+state files are left untouched and are not imported into the platform portfolio.
 
 ```powershell
 $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m streamlit run dashboard.py
 ```
 
-## Launch simple lightweight simulator (fast page)
+## Launch simple legacy research page (fast page)
 This page is optimized for quick load and minimal controls:
 - Budget-first setup (default `Rs 200000`)
 - Top 5 buy/sell signals only
-- Auto paper trading with basic risk controls
+- Legacy simulator order mutations are disabled
 - Daily target progress tracking (default `Rs 4000`)
 
 ```powershell
@@ -110,8 +114,11 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m streamlit run dashboard_simple.py --server.port 8507
 ```
 
-## Dashboard Strategy (Complete)
-The advanced dashboard in [dashboard.py](dashboard.py) is built for paper trading only and applies these rules:
+## Legacy Dashboard Research Behavior
+The advanced dashboard in [dashboard.py](dashboard.py) retains scanner and
+signal-display behavior. Its former local paper-execution helper has been
+removed; remaining legacy order controls fail closed. Use the platform API for
+paper execution.
 
 1. Market window logic
 - Market open: 09:15 IST
@@ -155,12 +162,15 @@ $env:PYTHONPATH = "src"
 ```
 2. Choose data source and strategy mode in sidebar.
 3. During entry window, review Top 5 list and trigger states.
-4. Use `Buy Now` only when trigger changes to `READY`.
-5. Monitor SL/TP and use `Exit` when enabled.
-6. Review Dummy Portfolio and Trade Log for performance.
+4. Treat `READY` as research output only; it does not authorize an order.
+5. Do not use legacy Buy/Exit controls; they fail closed.
+6. Review historical dashboard state only as a separate legacy record.
 
-## AI Implementation Requirements (Current)
-Use this section as the source-of-truth requirements for any AI assistant modifying `dashboard.py`.
+## Historical Legacy Dashboard Notes
+The following notes describe old dashboard behavior and are not permission to
+restore dashboard-local order execution. Any future order path must use the
+platform PAPER service; the execution boundary is documented in
+[docs/EXECUTION_BOUNDARY.md](docs/EXECUTION_BOUNDARY.md).
 
 1. Data and refresh behavior
 - Primary live mode is NSE quote mode (`NSE Quote API (non-Yahoo)`).

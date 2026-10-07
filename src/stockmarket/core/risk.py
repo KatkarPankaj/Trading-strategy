@@ -166,6 +166,11 @@ class RiskEngine:
         self._portfolio_limits = portfolio_limits
 
     @property
+    def limits(self) -> RiskLimits | None:
+        """Configured order limits, exposed read-only to decision preparation."""
+        return self._limits
+
+    @property
     def disabled_controls(self) -> dict[str, str]:
         """Explicitly disabled portfolio controls and their recorded reasons."""
         if self._portfolio_limits is None:

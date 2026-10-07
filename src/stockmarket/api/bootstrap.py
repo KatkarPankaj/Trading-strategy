@@ -31,6 +31,7 @@ from ..core.observability import AlertManager, StructuredLogger
 from ..core.live_readiness import LiveReadinessChecker
 from ..core.markets import MarketRegistry, default_markets
 from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
+from ..core.sizing import BrokerConstraints, SizingLimits
 from ..core.data.yahoo_fundamentals import YahooEarningsObservationProvider
 from ..core.data.nse_sector_indices import NSESectorIndexObservationProvider
 from ..news import FinnhubNewsProvider
@@ -311,6 +312,15 @@ def build_context(
             max_trades_per_day=settings.risk.max_trades_per_day, cash_requirement_rate=1.0,
             entry_window=(start, end),
             max_market_data_age=timedelta(seconds=settings.max_market_data_age_seconds))
+        sizing_limits = SizingLimits(
+            risk_per_trade_pct=settings.risk.risk_per_trade_pct,
+            max_order_notional=max_notional,
+            max_position_notional_pct=settings.risk.max_position_notional_pct,
+            max_total_notional_pct=settings.risk.max_total_notional_pct,
+            max_sector_exposure_pct=settings.risk.max_sector_exposure_pct,
+            broker=BrokerConstraints(
+                max_order_quantity=max_qty, max_order_notional=max_notional),
+        )
     except (TypeError, ValueError) as exc:
         errors.append(f"invalid risk limit: {exc}")
     if errors:
@@ -364,7 +374,8 @@ def build_context(
         order_manager=order_manager, portfolio=portfolio, instruments=instruments,
         quotes=quote_source(market_data, instruments, logger=logger),
         market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
-        strategy_approval=strategies.check_live, provenance_source=strategies.version_info)
+        strategy_approval=strategies.check_live, provenance_source=strategies.version_info,
+        sizing_limits=sizing_limits)
     research_pipeline = None
     market_intelligence = None
     if research_analyst is not None:

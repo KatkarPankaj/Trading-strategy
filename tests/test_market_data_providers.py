@@ -29,6 +29,7 @@ from stockmarket.core.models import (
 )
 from stockmarket.core.resilience import RetryPolicy
 from stockmarket.core.trading_service import OrderTicket, TradingService
+from stockmarket.core.risk_portfolio import PortfolioRiskState
 
 
 NOW = datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc)
@@ -200,9 +201,18 @@ class MarketDataProviderTests(unittest.TestCase):
             positions=lambda: {},
             cash={"USD": 1000.0},
             fills=[],
-            risk_state=lambda *args, **kwargs: None,
+            rate_to_base=lambda currency: 1.0,
+            gross_exposure=0.0,
+            sector_exposure=lambda: {},
+            risk_state=lambda *args, **kwargs: PortfolioRiskState(
+                equity=1000.0,
+                peak_equity=1000.0,
+                daily_pnl=0.0,
+                gross_notional_exposure=0.0,
+            ),
         )
-        risk_engine = SimpleNamespace()
+        risk_engine = SimpleNamespace(
+            limits=SimpleNamespace(max_market_data_age=timedelta(minutes=5)))
 
         def evaluate_proposal(*args, **kwargs):
             risk_engine.context = kwargs["context"]
@@ -211,6 +221,7 @@ class MarketDataProviderTests(unittest.TestCase):
         risk_engine.evaluate_proposal = evaluate_proposal
         order_manager = SimpleNamespace(
             orders=lambda: [],
+            open_orders=lambda: [],
             submit=lambda request, decision: SimpleNamespace(
                 order=SimpleNamespace(is_terminal=True, broker_order_id=None,
                                       client_order_id=request.client_order_id),

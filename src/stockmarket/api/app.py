@@ -32,7 +32,10 @@ from ..core.recovery import RecoveryError
 from ..core.security import Secret
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
-from ..core.trading_service import OrderTicket, TradingService, UnknownInstrument, summarize_trades
+from ..core.trading_service import (
+    AutomaticSizingRejected, OrderTicket, TradingService, UnknownInstrument,
+    summarize_trades,
+)
 from .schemas import (
     KillResetBody,
     KillTriggerBody,
@@ -356,6 +359,33 @@ def create_app(ctx: ApiContext) -> FastAPI:
             raise HTTPException(403, "proposal submission is restricted to PAPER mode")
         if ctx.research_pipeline is None or ctx.market_intelligence is None:
             raise HTTPException(503, "paper proposal submission is not configured")
+
+        def prior_submission(record: Mapping[str, Any]) -> dict[str, Any]:
+            if str(record["state"]).startswith("ORDER_"):
+                try:
+                    order = ctx.paper.order_manager.get(str(record["client_order_id"]))
+                except UnknownOrder as exc:
+                    raise HTTPException(
+                        409, "proposal submission is persisted but order recovery is incomplete") from exc
+                return {
+                    "trading_mode": TradingMode.PAPER.value,
+                    "execution": "PAPER_ORDER_ALREADY_CREATED",
+                    "duplicate": True,
+                    "proposal_id": proposal_id,
+                    "operator": body.operator,
+                    "order": _plain(order),
+                    "risk_decision": None,
+                }
+            if record["state"] == "REJECTED_BEFORE_ORDER":
+                raise HTTPException(
+                    409, f"proposal was rejected before order creation: {record['error']}")
+            raise HTTPException(
+                409, "proposal submission is already claimed; reconcile before retrying")
+
+        prior = ctx.store.proposal_submissions.get(proposal_id)
+        if prior is not None:
+            return prior_submission(prior)
+
         with proposal_contexts_lock:
             submission_context = proposal_contexts.get(proposal_id)
             if submission_context is not None:
@@ -374,20 +404,56 @@ def create_app(ctx: ApiContext) -> FastAPI:
 
         client_order_id = "proposal-" + hashlib.sha256(
             proposal_id.encode("utf-8")).hexdigest()[:48]
+        claimed = ctx.store.proposal_submissions.begin(
+            proposal_id=proposal_id,
+            client_order_id=client_order_id,
+            operator=body.operator,
+            sizing_mode=body.sizing_mode,
+            quantity=body.quantity,
+            proposal_as_of=proposal.as_of,
+            generated_at=proposal.generated_at,
+            proposal_payload=_plain(proposal),
+        )
+        if not claimed:
+            prior = ctx.store.proposal_submissions.get(proposal_id)
+            if prior is None:
+                raise HTTPException(503, "proposal claim disappeared during submission")
+            return prior_submission(prior)
         try:
             result = ctx.research_pipeline.submit_decision(
                 submission_context.pipeline_result,
                 body.quantity,
+                sizing_mode=body.sizing_mode,
                 actor=body.operator,
                 client_order_id=client_order_id,
                 proposal_id=proposal_id,
             )
+        except AutomaticSizingRejected as exc:
+            ctx.store.proposal_submissions.finish(
+                proposal_id,
+                state="REJECTED_BEFORE_ORDER",
+                quantity=None,
+                error=str(exc),
+            )
+            raise HTTPException(422, str(exc)) from exc
         except (IdempotencyConflict, InvalidOrderTransition) as exc:
             raise HTTPException(409, str(exc)) from exc
         except (TypeError, ValueError) as exc:
+            ctx.store.proposal_submissions.finish(
+                proposal_id,
+                state="REJECTED_BEFORE_ORDER",
+                quantity=body.quantity,
+                error=str(exc),
+            )
             raise HTTPException(422, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
+        ctx.store.proposal_submissions.finish(
+            proposal_id,
+            state=f"ORDER_{result.order.status.value}",
+            quantity=result.order.quantity,
+            error=result.order.error,
+        )
         return {
             "trading_mode": TradingMode.PAPER.value,
             "execution": "PAPER_ORDER_CREATED",

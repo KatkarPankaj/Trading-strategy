@@ -361,6 +361,10 @@ class PortfolioManager:
             raise PortfolioError(
                 f"missing FX rate for {currency.upper()}") from None
 
+    def rate_to_base(self, currency: str) -> float:
+        """Return the configured conversion rate, failing closed when unavailable."""
+        return self._rate(currency)
+
     def _record_equity(self, timestamp: datetime) -> None:
         local = timestamp.astimezone(self._tz)
         day, month = local.date(), (local.year, local.month)

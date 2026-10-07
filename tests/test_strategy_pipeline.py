@@ -7,10 +7,13 @@ import pandas as pd
 
 from stockmarket.core import (
     AggregatedAction,
+    BrokerConstraints,
     MarketSession,
     OrbVwapStrategy,
     PipelineStatus,
+    PortfolioRiskLimits,
     ResearchEvidence,
+    SizingLimits,
     StrategyResearchPipeline,
 )
 from stockmarket.core.market_intelligence import MarketIntelligenceOrchestrator
@@ -23,7 +26,7 @@ from stockmarket.core.data import (
     ResilientProvider,
 )
 from stockmarket.core.markets import default_markets
-from stockmarket.core.models import AssetClass, RiskDecisionStatus
+from stockmarket.core.models import AssetClass, OrderSide, RiskDecisionStatus
 from stockmarket.core.resilience import RetryPolicy
 from stockmarket.core.brokers import PaperBroker
 from stockmarket.core.executors import TradingMode
@@ -31,6 +34,7 @@ from stockmarket.core.order_management import OrderManager
 from stockmarket.core.portfolio import PortfolioManager
 from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
 from stockmarket.core.risk import RiskEngine, RiskLimits
+from stockmarket.core.risk_portfolio import CONTROLS
 from stockmarket.core.research import NewsEvidenceProducer
 from stockmarket.core.research import (
     FundamentalEvidenceProducer,
@@ -158,9 +162,13 @@ class CapturingOrderManager:
     def __init__(self):
         self.requests = []
         self.decisions = []
+        self.active_orders = []
 
     def orders(self):
         return []
+
+    def open_orders(self):
+        return self.active_orders
 
     def submit(self, request, decision):
         self.requests.append(request)
@@ -501,7 +509,10 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             ResearchEvidence(**{**base, "observed_at": AS_OF.replace(tzinfo=None)})
 
-    def make_trading_service(self, order_manager, quote_price, mode=TradingMode.PAPER):
+    def make_trading_service(
+        self, order_manager, quote_price, mode=TradingMode.PAPER,
+        portfolio_limits=None,
+    ):
         risk_engine = RiskEngine(RiskLimits(
             max_position_quantity=100,
             max_order_notional=20_000,
@@ -509,7 +520,7 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             max_trades_per_day=10,
             cash_requirement_rate=1.0,
             market_session=make_session(),
-        ))
+        ), portfolio_limits)
         portfolio = PortfolioManager("USD", 50_000, timezone=ZONE)
         return TradingService(
             mode=mode,
@@ -555,6 +566,15 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             quotes=lambda iid: broker.last_quote(iid),
             store=store,
             clock=lambda: AS_OF,
+            sizing_limits=SizingLimits(
+                risk_per_trade_pct=0.01,
+                max_order_notional=20_000,
+                max_position_notional_pct=0.2,
+                max_total_notional_pct=1.0,
+                max_sector_exposure_pct=0.3,
+                broker=BrokerConstraints(
+                    max_order_quantity=100, max_order_notional=20_000),
+            ),
         )
         return service, broker, portfolio, order_manager
 
@@ -616,6 +636,47 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             no_evidence.submit_decision(skipped, 1)
         self.assertEqual(len(order_manager.requests), before)
 
+    def test_active_order_reservation_is_included_in_final_portfolio_risk(self):
+        order_manager = CapturingOrderManager()
+        price = float(make_bars()["close"].iloc[-1])
+        portfolio_limits = PortfolioRiskLimits(
+            max_risk_per_trade_pct=0.01,
+            max_total_notional_pct=0.18,
+            disabled={
+                name: "not part of this reservation-focused test"
+                for name in CONTROLS
+                if name not in {
+                    "max_risk_per_trade_pct", "max_total_notional_pct"}
+            },
+        )
+        service = self.make_trading_service(
+            order_manager, price, portfolio_limits=portfolio_limits)
+        order_manager.active_orders.append(SimpleNamespace(
+            instrument_id=self.instrument.instrument_id,
+            side=OrderSide.BUY,
+            remaining_quantity=90,
+            quantity=90,
+            timestamp=AS_OF - timedelta(seconds=10),
+            limit_price=100.0,
+            signal_id=None,
+            is_terminal=False,
+        ))
+        pipeline, _ = self.pipeline(trading_service=service)
+        result = pipeline.run(
+            self.instrument,
+            make_session(),
+            as_of=AS_OF,
+            research_evidence=(
+                self.evidence("volume", 0.9),
+                self.evidence("momentum", 0.8),
+            ),
+        )
+
+        submitted = pipeline.submit_decision(result, 1)
+
+        self.assertIs(submitted.risk.status, RiskDecisionStatus.REJECTED)
+        self.assertIn("MAX_NOTIONAL_EXPOSURE_EXCEEDED", submitted.risk.reason)
+
     def test_actionable_pipeline_fills_through_real_paper_broker(self):
         service, broker, portfolio, order_manager = self.make_real_paper_service(50_000)
         pipeline, _ = self.pipeline(trading_service=service)
@@ -639,6 +700,39 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         self.assertEqual(portfolio.positions()[self.instrument.instrument_id].quantity, 1)
         self.assertEqual(broker.positions()[0].quantity, 1)
         self.assertEqual(order_manager.events(submitted.order.client_order_id)[-1].to_status.value, "FILLED")
+
+    def test_automatic_sizing_records_quantity_before_final_risk_gate(self):
+        database = SQLiteDatabase()
+        migrate(database)
+        store = Store(database)
+        self.addCleanup(store.db.close)
+        store.instruments.save(self.instrument)
+        service, _, portfolio, _ = self.make_real_paper_service(50_000, store)
+        pipeline, _ = self.pipeline(trading_service=service)
+        result = pipeline.run(
+            self.instrument,
+            make_session(),
+            as_of=AS_OF,
+            research_evidence=(
+                self.evidence("volume", 0.9),
+                self.evidence("momentum", 0.8),
+            ),
+        )
+
+        submitted = pipeline.submit_decision(
+            result,
+            sizing_mode="AUTOMATIC_SIZING",
+            actor="automatic-sizing-test",
+        )
+
+        self.assertIs(submitted.risk.status, RiskDecisionStatus.APPROVED)
+        self.assertGreater(submitted.order.quantity, 0)
+        self.assertEqual(submitted.order.status.value, "FILLED")
+        audit = store.order_audit.get(submitted.order.client_order_id)
+        self.assertEqual(audit["sizing"]["method"], "AUTOMATIC_SIZING")
+        self.assertEqual(audit["sizing"]["quantity"], submitted.order.quantity)
+        self.assertEqual(portfolio.positions()[self.instrument.instrument_id].quantity,
+                         submitted.order.quantity)
 
     def test_real_paper_broker_is_not_reached_when_risk_rejects(self):
         service, broker, portfolio, order_manager = self.make_real_paper_service(0)
