@@ -107,6 +107,11 @@ from .signal_generation import (
     SignalGenerationSettings,
 )
 from .trade_proposals import TradeProposalService, TradeProposalSettings
+from .paper_lifecycle import (
+    PaperLifecycleError,
+    PaperPositionManager,
+    PaperProposalExecutionService,
+)
 from .research import (
     FundamentalEvidenceProducer,
     NewsEvidenceCollection,
@@ -148,6 +153,9 @@ __all__ = [
     "SignalGenerationSettings",
     "TradeProposalService",
     "TradeProposalSettings",
+    "PaperLifecycleError",
+    "PaperPositionManager",
+    "PaperProposalExecutionService",
     "ResearchEvidence",
     "ResearchObservation",
     "ResearchObservationProvider",

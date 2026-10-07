@@ -8,7 +8,7 @@ from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timezone
 from enum import Enum
 from typing import Any, Iterable, Mapping
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .database import Database
 
@@ -220,9 +220,15 @@ class OrderRepository(_Repository):
 
 class FillRepository(_Repository):
     def save(self, f: Any, client_order_id: str | None = None) -> str:
-        fill_id = str(uuid4())
+        order_id = client_order_id or getattr(f, "client_order_id", None)
+        sequence = getattr(f, "fill_sequence", None)
+        fill_id = (
+            str(uuid5(NAMESPACE_URL, f"paper-fill:{order_id}:{sequence}"))
+            if order_id is not None and sequence is not None
+            else str(uuid4())
+        )
         self._upsert("fills", "fill_id", {
-            "fill_id": fill_id, "client_order_id": client_order_id, "instrument_id": f.instrument_id,
+            "fill_id": fill_id, "client_order_id": order_id, "instrument_id": f.instrument_id,
             "side": f.side.value, "quantity": f.quantity, "price": f.price, "fee": f.fee,
             "slippage": f.slippage, "currency": f.currency, "realized_pnl": f.realized_pnl,
             "timestamp": ts(f.timestamp)})
@@ -809,6 +815,16 @@ class ProposalSubmissionRepository(_Repository):
                  proposal_id),
             )
 
+    def for_order(self, client_order_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM proposal_submissions WHERE client_order_id = ?",
+            (client_order_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["proposal_payload"] = json.loads(row["proposal_payload"])
+        return row
+
 
 class AutonomousResearchRepository(_Repository):
     """Durable idempotency and per-candidate checkpoints for research-only runs."""
@@ -1073,6 +1089,23 @@ class TradeProposalRepository(_Repository):
         row["payload"] = json.loads(row["payload"])
         return {"evaluation": row, "payload": proposal}
 
+    def get_by_id(self, proposal_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT p.*, e.status AS evaluation_status,
+                      e.reason AS evaluation_reason,
+                      e.evaluated_at AS evaluated_at,
+                      e.payload AS evaluation_payload
+               FROM trade_proposals p
+               JOIN risk_evaluations e ON e.evaluation_id = p.evaluation_id
+               WHERE p.proposal_id = ?""",
+            (proposal_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        row["evaluation_payload"] = json.loads(row["evaluation_payload"])
+        return row
+
     def latest_for_signal_candidate(
         self, run_id: str, candidate_id: str,
     ) -> dict[str, Any] | None:
@@ -1217,6 +1250,68 @@ class TradeProposalRepository(_Repository):
             return {"payload": result, "duplicate": False}
 
 
+class PositionExitProposalRepository(_Repository):
+    """Idempotent, persisted exit triggers routed through the normal order boundary."""
+
+    def prepare(
+        self,
+        *,
+        proposal_id: str,
+        instrument_id: str,
+        entry_client_order_id: str,
+        trigger_reason: str,
+        side: str,
+        quantity: int,
+        quote_price: float,
+        quote_timestamp: datetime,
+        client_order_id: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        now = ts(datetime.now(timezone.utc))
+        self._upsert("position_exit_proposals", "proposal_id", {
+            "proposal_id": proposal_id,
+            "instrument_id": instrument_id,
+            "entry_client_order_id": entry_client_order_id,
+            "trigger_reason": trigger_reason,
+            "side": side,
+            "quantity": quantity,
+            "quote_price": quote_price,
+            "quote_timestamp": ts(quote_timestamp),
+            "client_order_id": client_order_id,
+            "status": "PROPOSED",
+            "risk_decision_id": None,
+            "error": None,
+            "created_at": now,
+            "updated_at": now,
+            "payload": to_json(payload),
+        })
+
+    def finish(
+        self,
+        proposal_id: str,
+        *,
+        status: str,
+        risk_decision_id: str | None,
+        error: str | None,
+    ) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """UPDATE position_exit_proposals
+                   SET status = ?, risk_decision_id = ?, error = ?, updated_at = ?
+                   WHERE proposal_id = ?""",
+                (status, risk_decision_id, error,
+                 ts(datetime.now(timezone.utc)), proposal_id))
+
+    def for_entry(self, entry_client_order_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT * FROM position_exit_proposals
+               WHERE entry_client_order_id = ? ORDER BY created_at, proposal_id""",
+            (entry_client_order_id,))
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -1239,6 +1334,7 @@ class Store:
         self.execution_records = ExecutionRecordRepository(db)
         self.order_audit = OrderAuditRepository(db)
         self.proposal_submissions = ProposalSubmissionRepository(db)
+        self.position_exit_proposals = PositionExitProposalRepository(db)
         self.scanner_runs = ScannerRunRepository(db)
         self.research_runs = CandidateResearchRepository(db)
         self.autonomous_research = AutonomousResearchRepository(db)

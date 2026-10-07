@@ -236,6 +236,26 @@ _V11 = [
     "CREATE INDEX idx_trade_proposals_instrument ON trade_proposals (instrument_id, created_at)",
 ]
 
+_V12 = [
+    """CREATE TABLE position_exit_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        instrument_id TEXT NOT NULL,
+        entry_client_order_id TEXT NOT NULL,
+        trigger_reason TEXT NOT NULL,
+        side TEXT NOT NULL,
+        quantity INTEGER NOT NULL,
+        quote_price DOUBLE PRECISION NOT NULL,
+        quote_timestamp TEXT NOT NULL,
+        client_order_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        risk_decision_id TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        payload TEXT NOT NULL)""",
+    "CREATE INDEX idx_position_exit_entry ON position_exit_proposals (entry_client_order_id, created_at)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -244,7 +264,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (8, "ai_research_assessment", _V8),
     (9, "autonomous_research_orchestrator", _V9),
     (10, "deterministic_signal_generation", _V10),
-    (11, "persisted_trade_proposal_risk_evaluation", _V11)]
+    (11, "persisted_trade_proposal_risk_evaluation", _V11),
+    (12, "paper_position_exit_proposals", _V12)]
 
 
 def applied_versions(db: Database) -> set[int]:

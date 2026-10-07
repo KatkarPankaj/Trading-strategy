@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Mapping, Sequence
+from typing import Mapping, NoReturn, Sequence
 
 import pandas as pd
 
@@ -15,11 +15,9 @@ from .aggregation import (
     SignalAggregator,
     SignalInputs,
 )
-from .audit_trail import AuditContext
 from .ai.analyst import AIAnalyst, AIResult, StrategySelection
 from .data.provider import DataProviderError, interval_delta
 from .data.resilient import ResilientProvider
-from .executors import TradingMode
 from .market_session import MarketSession
 from .models import Instrument, Signal, SignalSide
 from .regime import (
@@ -37,7 +35,7 @@ from .research import (
     ResearchEvidenceUnavailable,
 )
 from .strategies.base import Strategy
-from .trading_service import TicketResult, TradingService
+from .trading_service import TradingService
 
 
 class PipelineStatus(str, Enum):
@@ -324,115 +322,10 @@ class StrategyResearchPipeline:
         actor: str = "system",
         client_order_id: str | None = None,
         proposal_id: str | None = None,
-    ) -> TicketResult:
-        """Explicitly submit an actionable research result through PAPER TradingService."""
-        if self.trading_service is None:
-            raise RuntimeError("TradingService is not configured for this pipeline")
-        if self.trading_service.mode is not TradingMode.PAPER:
-            raise RuntimeError("strategy pipeline submissions are restricted to PAPER mode")
-        if not isinstance(result, StrategyPipelineResult) \
-                or result.status is not PipelineStatus.COMPLETE \
-                or result.decision is None or result.strategy_signal is None \
-                or result.selection is None or result.bars is None:
-            raise ValueError("a complete pipeline result with its deterministic signal is required")
-        expected_side = {
-            AggregatedAction.BUY: SignalSide.BUY,
-            AggregatedAction.SELL: SignalSide.SELL,
-        }.get(result.decision.action)
-        if expected_side is None:
-            raise ValueError("only BUY or SELL aggregated decisions can be submitted")
-        if result.strategy_signal.side is not expected_side:
-            raise ValueError("aggregated action must match the deterministic strategy signal")
-        if sizing_mode not in {"AUTOMATIC_SIZING", "MANUAL_OVERRIDE"}:
-            raise ValueError("sizing_mode must be AUTOMATIC_SIZING or MANUAL_OVERRIDE")
-        if sizing_mode == "AUTOMATIC_SIZING" and quantity is not None:
-            raise ValueError("quantity must not be supplied for AUTOMATIC_SIZING")
-        if sizing_mode == "MANUAL_OVERRIDE" and (
-                isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0):
-            raise ValueError("MANUAL_OVERRIDE requires a positive integer quantity")
-        selection = result.selection
-        signal = result.strategy_signal
-        decision = result.decision
-        audit = AuditContext(
-            technical_signals={
-                "strategy": signal.strategy,
-                "side": signal.side.value,
-                "signal_id": str(signal.signal_id),
-                "timestamp": signal.timestamp.isoformat(),
-                "entry_price": signal.entry_price,
-                "stop_loss": signal.stop_loss,
-                "take_profit": signal.take_profit,
-                "confidence": signal.confidence,
-                "regime": signal.regime,
-                "reasons": list(signal.reasons),
-                "aggregate_action": decision.action.value,
-                "aggregate_confidence": decision.confidence,
-                "aggregate_reason_codes": list(decision.reason_codes),
-                "input_hash": decision.input_hash,
-                **({"proposal_id": proposal_id} if proposal_id is not None else {}),
-                "research_evidence": {
-                    item.component: {
-                        "score": item.score,
-                        "source": item.source,
-                        "observed_at": item.observed_at.isoformat(),
-                    }
-                    for item in result.research_evidence
-                },
-                "ai_strategy_selection": {
-                    "provider": selection.provider,
-                    "prompt_hash": selection.prompt_hash,
-                    "response_hash": selection.response_hash,
-                    "summary": selection.summary,
-                    "ranked_strategies": [
-                        {
-                            "strategy": ranked.strategy,
-                            "confidence": ranked.confidence,
-                            "rationale": ranked.rationale,
-                        }
-                        for ranked in selection.ranked_strategies
-                    ],
-                    "risks": list(selection.risks),
-                    "data_gaps": list(selection.data_gaps),
-                },
-            },
-            news_signals={
-                "news": {
-                    "score": item.score,
-                    "source": item.source,
-                    "observed_at": item.observed_at.isoformat(),
-                }
-                for item in result.research_evidence
-                if item.component == "news"
-            },
-            strategy_decision_id=str(decision.decision_id),
-            sizing={
-                "quantity": quantity,
-                "method": sizing_mode,
-                "supervised_operator": actor if sizing_mode == "MANUAL_OVERRIDE" else None,
-            },
-            data_reference=(
-                f"{self.provider.name}:{self.config.interval}:"
-                f"{result.bars.index[0].isoformat()}:"
-                f"{result.bars.index[-1].isoformat()}"
-            ),
-        )
-        if sizing_mode == "AUTOMATIC_SIZING":
-            submission, _ = self.trading_service.submit_sized_signal(
-                signal,
-                actor=actor,
-                audit=audit,
-                strategy_decision=decision,
-                client_order_id=client_order_id,
-            )
-            return submission
-        return self.trading_service.submit_signal(
-            signal,
-            quantity,
-            actor=actor,
-            audit=audit,
-            strategy_decision=decision,
-            client_order_id=client_order_id,
-        )
+    ) -> NoReturn:
+        """Prevent research-phase objects from becoming orders."""
+        raise RuntimeError(
+            "research results are advisory; submit only a persisted approved Phase 2C-3 proposal")
 
     def _validate_research(
         self,

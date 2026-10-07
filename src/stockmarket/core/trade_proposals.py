@@ -531,6 +531,10 @@ class TradeProposalService:
                 request.get("as_of"), "autonomous request timestamp")
             snapshot_as_of = self._parse_time(
                 snapshot.get("as_of"), "snapshot timestamp")
+            signal_evaluation_as_of = self._parse_time(
+                generation.get("evaluation_as_of"), "signal evaluation timestamp")
+            signal_generated_at = self._parse_time(
+                generation.get("generated_at"), "signal generation timestamp")
             opportunity_assessed_at = self._parse_time(
                 assessment.get("assessed_at"), "opportunity assessment timestamp")
             opportunity_created_at = self._parse_time(
@@ -541,7 +545,8 @@ class TradeProposalService:
             return None, "SIGNAL_DATA_TIMESTAMP_MISMATCH: signal is not tied to the persisted market-data timestamp."
         timestamps = (
             data_timestamp, signal.timestamp, opportunity_as_of, run_as_of,
-            request_as_of, snapshot_as_of, opportunity_assessed_at,
+            request_as_of, snapshot_as_of, signal_evaluation_as_of,
+            signal_generated_at, opportunity_assessed_at,
             opportunity_created_at,
         )
         if any(value > evaluated_at for value in timestamps):

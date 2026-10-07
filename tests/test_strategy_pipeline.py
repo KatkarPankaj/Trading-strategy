@@ -578,7 +578,7 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         )
         return service, broker, portfolio, order_manager
 
-    def test_actionable_result_routes_through_paper_service_and_risk_engine(self):
+    def test_actionable_research_result_cannot_become_an_order(self):
         order_manager = CapturingOrderManager()
         # The quote is a fresh independent input to the RiskEngine, not the AI ranking.
         result_signal_price = float(make_bars()["close"].iloc[-1])
@@ -594,24 +594,17 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             ),
         )
 
-        submitted = pipeline.submit_decision(
-            result,
-            1,
-            actor="test",
-            client_order_id="proposal-test-idempotency",
-            proposal_id="proposal-test",
-        )
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
+            pipeline.submit_decision(
+                result,
+                1,
+                actor="test",
+                client_order_id="proposal-test-idempotency",
+                proposal_id="proposal-test",
+            )
+        self.assertEqual(order_manager.requests, [])
 
-        self.assertEqual(len(order_manager.requests), 1)
-        self.assertIs(order_manager.decisions[0].status, RiskDecisionStatus.APPROVED)
-        self.assertEqual(order_manager.requests[0].signal_id, result.strategy_signal.signal_id)
-        self.assertEqual(
-            order_manager.requests[0].client_order_id,
-            "proposal-test-idempotency",
-        )
-        self.assertEqual(submitted.risk.status, RiskDecisionStatus.APPROVED)
-
-    def test_risk_rejection_is_preserved_and_skip_is_never_submitted(self):
+    def test_research_pipeline_always_requires_persisted_risk_proposal(self):
         order_manager = CapturingOrderManager()
         result_signal_price = float(make_bars()["close"].iloc[-1])
         service = self.make_trading_service(order_manager, result_signal_price)
@@ -625,14 +618,13 @@ class StrategyResearchPipelineTests(unittest.TestCase):
                 self.evidence("momentum", 0.8),
             ),
         )
-        rejected = pipeline.submit_decision(actionable, 101)
-        self.assertIs(rejected.risk.status, RiskDecisionStatus.REJECTED)
-        self.assertIn("MAX_POSITION_QUANTITY_EXCEEDED", rejected.risk.reason)
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
+            pipeline.submit_decision(actionable, 101)
 
         no_evidence, _ = self.pipeline(trading_service=service)
         skipped = no_evidence.run(self.instrument, make_session(), as_of=AS_OF)
         before = len(order_manager.requests)
-        with self.assertRaisesRegex(ValueError, "only BUY or SELL"):
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
             no_evidence.submit_decision(skipped, 1)
         self.assertEqual(len(order_manager.requests), before)
 
@@ -672,12 +664,11 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             ),
         )
 
-        submitted = pipeline.submit_decision(result, 1)
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
+            pipeline.submit_decision(result, 1)
+        self.assertEqual(order_manager.requests, [])
 
-        self.assertIs(submitted.risk.status, RiskDecisionStatus.REJECTED)
-        self.assertIn("MAX_NOTIONAL_EXPOSURE_EXCEEDED", submitted.risk.reason)
-
-    def test_actionable_pipeline_fills_through_real_paper_broker(self):
+    def test_actionable_pipeline_does_not_reach_real_paper_broker(self):
         service, broker, portfolio, order_manager = self.make_real_paper_service(50_000)
         pipeline, _ = self.pipeline(trading_service=service)
         result = pipeline.run(
@@ -691,17 +682,14 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         )
         self.assertIs(result.decision.action, AggregatedAction.BUY)
 
-        submitted = pipeline.submit_decision(result, 1, actor="pipeline-integration-test")
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
+            pipeline.submit_decision(result, 1, actor="pipeline-integration-test")
+        self.assertEqual(portfolio.fills, ())
+        self.assertEqual(portfolio.positions(), {})
+        self.assertEqual(broker.open_orders(), ())
+        self.assertEqual(order_manager.orders(), ())
 
-        self.assertIs(submitted.risk.status, RiskDecisionStatus.APPROVED)
-        self.assertEqual(submitted.order.status.value, "FILLED")
-        self.assertEqual(submitted.order.filled_quantity, 1)
-        self.assertEqual(len(portfolio.fills), 1)
-        self.assertEqual(portfolio.positions()[self.instrument.instrument_id].quantity, 1)
-        self.assertEqual(broker.positions()[0].quantity, 1)
-        self.assertEqual(order_manager.events(submitted.order.client_order_id)[-1].to_status.value, "FILLED")
-
-    def test_automatic_sizing_records_quantity_before_final_risk_gate(self):
+    def test_research_pipeline_cannot_use_automatic_order_sizing(self):
         database = SQLiteDatabase()
         migrate(database)
         store = Store(database)
@@ -719,20 +707,14 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             ),
         )
 
-        submitted = pipeline.submit_decision(
-            result,
-            sizing_mode="AUTOMATIC_SIZING",
-            actor="automatic-sizing-test",
-        )
-
-        self.assertIs(submitted.risk.status, RiskDecisionStatus.APPROVED)
-        self.assertGreater(submitted.order.quantity, 0)
-        self.assertEqual(submitted.order.status.value, "FILLED")
-        audit = store.order_audit.get(submitted.order.client_order_id)
-        self.assertEqual(audit["sizing"]["method"], "AUTOMATIC_SIZING")
-        self.assertEqual(audit["sizing"]["quantity"], submitted.order.quantity)
-        self.assertEqual(portfolio.positions()[self.instrument.instrument_id].quantity,
-                         submitted.order.quantity)
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
+            pipeline.submit_decision(
+                result,
+                sizing_mode="AUTOMATIC_SIZING",
+                actor="automatic-sizing-test",
+            )
+        self.assertEqual(portfolio.positions(), {})
+        self.assertEqual(store.orders.all(), [])
 
     def test_real_paper_broker_is_not_reached_when_risk_rejects(self):
         service, broker, portfolio, order_manager = self.make_real_paper_service(0)
@@ -747,23 +729,21 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             ),
         )
 
-        submitted = pipeline.submit_decision(result, 1)
-
-        self.assertIs(submitted.risk.status, RiskDecisionStatus.REJECTED)
-        self.assertIn("INSUFFICIENT_CASH_OR_MARGIN", submitted.risk.reason)
-        self.assertEqual(submitted.order.status.value, "REJECTED")
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
+            pipeline.submit_decision(result, 1)
         self.assertEqual(portfolio.fills, ())
         self.assertEqual(portfolio.positions(), {})
         self.assertEqual(broker.open_orders(), ())
         self.assertEqual(order_manager.open_orders(), ())
 
-    def test_pipeline_submission_persists_audit_and_recovers_filled_portfolio(self):
+    def test_pipeline_result_cannot_persist_or_recover_an_order(self):
         database = SQLiteDatabase()
         migrate(database)
         store = Store(database)
         self.addCleanup(store.db.close)
         store.instruments.save(self.instrument)
-        service, _, portfolio, _ = self.make_real_paper_service(50_000, store)
+        service, broker, portfolio, order_manager = self.make_real_paper_service(
+            50_000, store)
         pipeline, _ = self.pipeline(trading_service=service)
         result = pipeline.run(
             self.instrument,
@@ -775,68 +755,16 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             ),
         )
 
-        submitted = pipeline.submit_decision(
-            result, 1, actor="pipeline-persistence-test")
-        trail = reconstruct(store, submitted.order.client_order_id)
-
-        self.assertIsNotNone(trail)
-        self.assertEqual(
-            trail["strategy_decision"]["decision_id"],
-            str(result.decision.decision_id),
-        )
-        self.assertEqual(trail["signal"]["signal_id"], str(result.strategy_signal.signal_id))
-        self.assertEqual(
-            trail["technical_signals"]["research_evidence"]["volume"]["score"],
-            0.9,
-        )
-        self.assertEqual(
-            trail["technical_signals"]["research_evidence"]["momentum"]["source"],
-            "test-research",
-        )
-        self.assertEqual(
-            trail["technical_signals"]["ai_strategy_selection"]["response_hash"],
-            result.selection.response_hash,
-        )
-        self.assertIn("market_data", trail)
-        self.assertEqual(trail["position_sizing"]["quantity"], 1)
-        self.assertTrue(all(trail["completeness"][key] for key in (
-            "strategy_decision",
-            "risk_decision",
-            "final_order",
-            "broker_response",
-            "fills",
-            "execution_record",
-        )))
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
+            pipeline.submit_decision(result, 1, actor="pipeline-persistence-test")
+        self.assertEqual(store.orders.all(), [])
+        self.assertEqual(store.fills.all(), [])
+        self.assertEqual(store.execution_records.recent(), [])
         self.assertEqual(store.audit.verify_chain(), [])
-        self.assertEqual(len(portfolio.fills), 1)
-
-        recovered = rebuild_portfolio(
-            store,
-            {self.instrument.instrument_id: self.instrument},
-            "USD",
-            50_000,
-        )
-        self.assertEqual(
-            recovered.positions()[self.instrument.instrument_id].quantity,
-            portfolio.positions()[self.instrument.instrument_id].quantity,
-        )
-        recovery_broker = PaperBroker(
-            recovered,
-            {self.instrument.instrument_id: self.instrument},
-            clock=lambda: AS_OF,
-            market_status_fn=lambda _: True,
-        )
-        recovery_gate = TradingGate(clock=lambda: AS_OF)
-        report = RecoveryManager(
-            store=store,
-            order_manager=OrderManager(recovery_broker, clock=lambda: AS_OF),
-            portfolio=recovered,
-            broker=recovery_broker,
-            gate=recovery_gate,
-        ).recover()
-        self.assertTrue(report.clean, report.discrepancies)
-        self.assertEqual(report.orders_restored, 1)
-        self.assertFalse(recovery_gate.halted)
+        self.assertEqual(portfolio.fills, ())
+        self.assertEqual(portfolio.positions(), {})
+        self.assertEqual(broker.open_orders(), ())
+        self.assertEqual(order_manager.open_orders(), ())
 
     def test_pipeline_submission_refuses_live_mode(self):
         order_manager = CapturingOrderManager()
@@ -854,7 +782,7 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(RuntimeError, "PAPER mode"):
+        with self.assertRaisesRegex(RuntimeError, "persisted approved"):
             pipeline.submit_decision(result, 1)
         self.assertEqual(order_manager.requests, [])
 

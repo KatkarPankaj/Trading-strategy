@@ -170,6 +170,7 @@ class _PaperOrder:
     filled: int = 0
     average_price: float | None = None
     error: str | None = None
+    fill_events: int = 0
 
 
 class PaperBroker(BrokerAdapter):
@@ -333,6 +334,9 @@ class PaperBroker(BrokerAdapter):
     def _match(self, rec: _PaperOrder) -> None:
         if rec.status not in (OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED):
             return
+        instrument = self._instruments[rec.order.instrument_id]
+        if not self._market_open(instrument.market):
+            return
         price = self._prices.get(rec.order.instrument_id)
         if price is None:
             return
@@ -352,17 +356,20 @@ class PaperBroker(BrokerAdapter):
             (1 + self._slip) if buy else price * (1 - self._slip)
         fill_price = price if kind is OrderType.LIMIT else slip_price
         qty = rec.quantity - rec.filled
-        instrument = self._instruments[rec.order.instrument_id]
         try:
             self._pf.apply_fill(
                 instrument, rec.order.side, qty, fill_price, self._clock(),
-                fee=self._fee_rate * fill_price * qty, slippage=abs(fill_price - price) * qty)
+                fee=self._fee_rate * fill_price * qty,
+                slippage=abs(fill_price - price) * qty,
+                client_order_id=rec.order.client_order_id,
+                fill_sequence=rec.fill_events + 1)
         except PortfolioError as exc:
             rec.status, rec.error = OrderStatus.REJECTED, str(exc)
             return
         rec.average_price = ((rec.average_price or 0.0) *
                              rec.filled + fill_price * qty) / (rec.filled + qty)
         rec.filled += qty
+        rec.fill_events += 1
         rec.status = OrderStatus.FILLED
 
     def _get(self, broker_order_id: str) -> _PaperOrder:

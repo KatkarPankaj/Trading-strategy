@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 from collections import OrderedDict
@@ -31,6 +30,11 @@ from ..core.kill_switch import KillSwitchError
 from ..core.markets import UnknownMarket
 from ..core.observability import HealthMonitor
 from ..core.order_management import IdempotencyConflict, InvalidOrderTransition, OrderManagerError, UnknownOrder
+from ..core.paper_lifecycle import (
+    PaperLifecycleError,
+    PaperPositionManager,
+    PaperProposalExecutionService,
+)
 from ..core.market_session import MarketSession
 from ..core.market_intelligence import (
     MarketIntelligenceOrchestrator,
@@ -46,7 +50,7 @@ from ..core.security import Secret
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.trading_service import (
-    AutomaticSizingRejected, OrderTicket, TradingService, UnknownInstrument,
+    OrderTicket, TradingService, UnknownInstrument,
     summarize_trades,
 )
 from .schemas import (
@@ -90,6 +94,8 @@ class ApiContext:
     autonomous_research: AutonomousResearchService | None = None
     signal_generation: SignalGenerationService | None = None
     trade_proposals: TradeProposalService | None = None
+    paper_proposal_execution: PaperProposalExecutionService | None = None
+    paper_position_manager: PaperPositionManager | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -634,115 +640,41 @@ def create_app(ctx: ApiContext) -> FastAPI:
         dependencies=[Depends(auth)],
     )
     def submit_proposal(proposal_id: str, body: ProposalSubmitBody) -> dict[str, Any]:
-        if ctx.mode != TradingMode.PAPER.value \
-                or ctx.paper.mode is not TradingMode.PAPER:
-            raise HTTPException(403, "proposal submission is restricted to PAPER mode")
-        if ctx.research_pipeline is None or ctx.market_intelligence is None:
-            raise HTTPException(503, "paper proposal submission is not configured")
-
-        def prior_submission(record: Mapping[str, Any]) -> dict[str, Any]:
-            if str(record["state"]).startswith("ORDER_"):
-                try:
-                    order = ctx.paper.order_manager.get(str(record["client_order_id"]))
-                except UnknownOrder as exc:
-                    raise HTTPException(
-                        409, "proposal submission is persisted but order recovery is incomplete") from exc
-                return {
-                    "trading_mode": TradingMode.PAPER.value,
-                    "execution": "PAPER_ORDER_ALREADY_CREATED",
-                    "duplicate": True,
-                    "proposal_id": proposal_id,
-                    "operator": body.operator,
-                    "order": _plain(order),
-                    "risk_decision": None,
-                }
-            if record["state"] == "REJECTED_BEFORE_ORDER":
-                raise HTTPException(
-                    409, f"proposal was rejected before order creation: {record['error']}")
-            raise HTTPException(
-                409, "proposal submission is already claimed; reconcile before retrying")
-
-        prior = ctx.store.proposal_submissions.get(proposal_id)
-        if prior is not None:
-            return prior_submission(prior)
-
-        with proposal_contexts_lock:
-            submission_context = proposal_contexts.get(proposal_id)
-            if submission_context is not None:
-                proposal_contexts.move_to_end(proposal_id)
-        if submission_context is None:
-            raise HTTPException(404, "unknown or expired proposal")
-
-        now = datetime.now(timezone.utc)
-        maximum_age = timedelta(
-            seconds=ctx.settings.max_market_data_age_seconds)
-        proposal = submission_context.proposal
-        if proposal.as_of > now or proposal.generated_at > now \
-                or now - proposal.as_of > maximum_age \
-                or now - proposal.generated_at > maximum_age:
-            raise HTTPException(409, "proposal is stale and must be regenerated")
-
-        client_order_id = "proposal-" + hashlib.sha256(
-            proposal_id.encode("utf-8")).hexdigest()[:48]
-        claimed = ctx.store.proposal_submissions.begin(
-            proposal_id=proposal_id,
-            client_order_id=client_order_id,
-            operator=body.operator,
-            sizing_mode=body.sizing_mode,
-            quantity=body.quantity,
-            proposal_as_of=proposal.as_of,
-            generated_at=proposal.generated_at,
-            proposal_payload=_plain(proposal),
-        )
-        if not claimed:
-            prior = ctx.store.proposal_submissions.get(proposal_id)
-            if prior is None:
-                raise HTTPException(503, "proposal claim disappeared during submission")
-            return prior_submission(prior)
+        executor = ctx.paper_proposal_execution
+        if executor is None or ctx.mode != TradingMode.PAPER.value:
+            raise HTTPException(503, "persisted paper proposal submission is not configured")
         try:
-            result = ctx.research_pipeline.submit_decision(
-                submission_context.pipeline_result,
-                body.quantity,
+            result = executor.submit(
+                proposal_id,
+                operator=body.operator,
                 sizing_mode=body.sizing_mode,
-                actor=body.operator,
-                client_order_id=client_order_id,
-                proposal_id=proposal_id,
-            )
-        except AutomaticSizingRejected as exc:
-            ctx.store.proposal_submissions.finish(
-                proposal_id,
-                state="REJECTED_BEFORE_ORDER",
-                quantity=None,
-                error=str(exc),
-            )
-            raise HTTPException(422, str(exc)) from exc
-        except (IdempotencyConflict, InvalidOrderTransition) as exc:
-            raise HTTPException(409, str(exc)) from exc
-        except (TypeError, ValueError) as exc:
-            ctx.store.proposal_submissions.finish(
-                proposal_id,
-                state="REJECTED_BEFORE_ORDER",
                 quantity=body.quantity,
-                error=str(exc),
             )
-            raise HTTPException(422, str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except PaperLifecycleError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except InvalidOrderTransition as exc:
+            raise HTTPException(409, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
-        ctx.store.proposal_submissions.finish(
-            proposal_id,
-            state=f"ORDER_{result.order.status.value}",
-            quantity=result.order.quantity,
-            error=result.order.error,
-        )
         return {
             "trading_mode": TradingMode.PAPER.value,
-            "execution": "PAPER_ORDER_CREATED",
-            "duplicate": result.duplicate,
-            "proposal_id": proposal_id,
             "operator": body.operator,
-            "order": _plain(result.order),
-            "risk_decision": _plain(result.risk),
+            **_plain(result),
         }
+
+    @app.post("/paper/positions/manage", dependencies=[Depends(auth)])
+    def manage_paper_positions() -> dict[str, Any]:
+        manager = ctx.paper_position_manager
+        if manager is None or ctx.mode != TradingMode.PAPER.value:
+            raise HTTPException(503, "paper position management is not configured")
+        try:
+            return _plain(manager.manage())
+        except PaperLifecycleError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except InvalidOrderTransition as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/orders/{client_order_id}/audit", dependencies=[Depends(auth)])
     def order_audit(client_order_id: str) -> dict[str, Any]:

@@ -310,6 +310,10 @@ class TradeProposalServiceTests(unittest.TestCase):
         self.assertEqual(self.db.query("SELECT * FROM fills"), [])
         self.assertEqual(self.db.query("SELECT * FROM positions"), [])
         self.assertEqual(len(self.store.trade_proposals.approved()), 1)
+        stored = self.store.trade_proposals.get_by_id(proposal["proposal_id"])
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["evaluation_status"], "APPROVED")
+        self.assertEqual(stored["payload"]["signal_id"], proposal["signal_id"])
 
         repeated = self.service.evaluate(RUN_ID, INSTRUMENT.instrument_id)
         self.assertTrue(repeated["duplicate"])

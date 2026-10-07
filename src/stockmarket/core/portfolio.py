@@ -74,6 +74,8 @@ class FillRecord:
     slippage: float
     currency: str
     realized_pnl: float  # local currency, before fees
+    client_order_id: str | None = None
+    fill_sequence: int | None = None
 
 
 class PortfolioManager:
@@ -151,6 +153,8 @@ class PortfolioManager:
         fee: float = 0.0,
         slippage: float = 0.0,
         sector: str | None = None,
+        client_order_id: str | None = None,
+        fill_sequence: int | None = None,
     ) -> FillRecord:
         if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
             raise PortfolioError("quantity must be a positive integer")
@@ -158,6 +162,19 @@ class PortfolioManager:
         _check_non_negative(fee, "fee")
         _check_non_negative(slippage, "slippage")
         _check_aware(timestamp, "timestamp")
+        if client_order_id is not None and (
+            not isinstance(client_order_id, str) or not client_order_id.strip()
+        ):
+            raise PortfolioError("client_order_id must be a non-empty string or None")
+        if fill_sequence is not None and (
+            isinstance(fill_sequence, bool)
+            or not isinstance(fill_sequence, int)
+            or fill_sequence <= 0
+        ):
+            raise PortfolioError("fill_sequence must be a positive integer or None")
+        if (client_order_id is None) != (fill_sequence is None):
+            raise PortfolioError(
+                "client_order_id and fill_sequence must be supplied together")
         ccy = instrument.currency.upper()
         rate = self._rate(ccy)
 
@@ -199,7 +216,8 @@ class PortfolioManager:
         self._fees_base += fee * rate
         self._slippage_base += slippage * rate
         record = FillRecord(timestamp, instrument.instrument_id, side, quantity, price,
-                            fee, slippage, ccy, realized)
+                            fee, slippage, ccy, realized, client_order_id,
+                            fill_sequence)
         self._fills.append(record)
         if self.on_fill is not None:
             self.on_fill(record)

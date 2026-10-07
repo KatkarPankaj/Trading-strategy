@@ -26,9 +26,12 @@ from ..core.signal_generation import (
     parse_signal_generation_settings,
 )
 from ..core.trade_proposals import TradeProposalService, TradeProposalSettings
+from ..core.paper_lifecycle import (
+    PaperPositionManager,
+    PaperProposalExecutionService,
+)
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
-from ..core.portfolio import PortfolioManager
 from ..core.recovery import RecoveryManager, rebuild_portfolio, reconcile_positions
 from ..core.risk import RiskEngine, RiskLimits
 from ..core.learning import StrategyConfigRegistry
@@ -412,7 +415,12 @@ def build_context(
             fx_rates[ccy.strip().upper()] = float(rate)
     portfolio = rebuild_portfolio(store, instruments, settings.base_currency,
                                   float(env.get("PAPER_STARTING_CASH") or 100_000), fx_rates)
-    portfolio.on_fill = lambda fill: store.fills.save(fill)
+    def persist_paper_fill(fill: Any) -> None:
+        store.fills.save(fill)
+        store.positions.replace_all(
+            portfolio.positions().values(), fill.timestamp)
+
+    portfolio.on_fill = persist_paper_fill
     broker = PaperBroker(portfolio, instruments, market_status_fn=lambda m: registry.is_regular_session(
         m, datetime.now(timezone.utc)))
     gate = TradingGate()
@@ -520,13 +528,35 @@ def build_context(
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
+    quotes = quote_source(market_data, instruments, logger=logger)
     paper = TradingService(
         mode=TradingMode.PAPER, risk_engine=risk_engine,
         order_manager=order_manager, portfolio=portfolio, instruments=instruments,
-        quotes=quote_source(market_data, instruments, logger=logger),
+        quotes=quotes,
         market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
         strategy_approval=strategies.check_live, provenance_source=strategies.version_info,
         sizing_limits=sizing_limits)
+    max_execution_data_age = timedelta(
+        seconds=settings.max_market_data_age_seconds)
+    paper_proposal_execution = PaperProposalExecutionService(
+        store=store,
+        trading=paper,
+        instruments=instruments,
+        markets=registry,
+        quotes=quotes,
+        update_price=broker.update_price,
+        strategies=registered_research_strategies,
+        max_age=max_execution_data_age,
+    )
+    paper_position_manager = PaperPositionManager(
+        store=store,
+        trading=paper,
+        instruments=instruments,
+        markets=registry,
+        quotes=quotes,
+        update_price=broker.update_price,
+        max_age=max_execution_data_age,
+    )
     research_pipeline = None
     market_intelligence = None
     if research_analyst is not None:
@@ -590,7 +620,9 @@ def build_context(
                       candidate_assessment=candidate_assessment,
                       autonomous_research=autonomous_research,
                       signal_generation=signal_generation,
-                      trade_proposals=trade_proposals)
+                      trade_proposals=trade_proposals,
+                      paper_proposal_execution=paper_proposal_execution,
+                      paper_position_manager=paper_position_manager)
 
 
 def create_app_from_env() -> FastAPI:

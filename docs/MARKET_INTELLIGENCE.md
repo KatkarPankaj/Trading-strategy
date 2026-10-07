@@ -11,7 +11,7 @@ Persisted RESEARCH scan → ranked accepted candidates
     → timestamped ResearchSnapshot + durable ResearchRun
 ```
 
-Snapshot creation does **not** invoke AI, choose strategies, create deterministic strategy signals, evaluate risk, size positions, stage proposals, submit orders, or call the paper executor. The separate, manually triggered Phase 2B-F assessment below reads only persisted snapshots and stops at `STRATEGY_SELECTED` or `REJECTED`. The existing market-intelligence `TradeProposal` and paper submission APIs remain separate. RiskEngine remains the final pre-order gate in that downstream workflow.
+Snapshot creation does **not** invoke AI, choose strategies, create deterministic strategy signals, evaluate risk, size positions, stage proposals, submit orders, or call the paper executor. The separate, manually triggered Phase 2B-F assessment below reads only persisted snapshots and stops at `STRATEGY_SELECTED` or `REJECTED`. In-memory market-intelligence `TradeProposal` objects are advisory and cannot be submitted. Only persisted, approved Phase 2C-3 proposals are eligible for the downstream PAPER submission endpoint. RiskEngine remains the final pre-order gate.
 
 ## Snapshot contract
 
@@ -81,7 +81,17 @@ python -m stockmarket research-signal --run-id <run-id> --candidate-id <instrume
 
 The existing deterministic `size_position()` computes account-currency quantity from the stored entry/stop, account equity and cash, configured risk and exposure limits, instrument constraints, and portfolio exposure. `RiskEngine` evaluates that sized proposal as the final deterministic gate. Migration V11 persists each risk evaluation and its input fingerprint; a `TradeProposal` row is created only for an approved decision. A persisted approved proposal for the same signal is returned on repeat rather than duplicated. FX provenance identifies `PortfolioManager.rate_to_base` as the configured source; this phase does not provide a timestamped FX quote feed.
 
-This is a terminal advisory artifact. The approved result includes the risk decision, sizing and proposal provenance and explicitly reports `execution: "NOT_SUBMITTED"` and `order_id: null`. It does not call `TradingService.submit()`, `OrderManager`, a broker or executor, create an order, or mutate portfolio positions/cash. It does not implement Phase 2C-4 or enable autonomous/paper/live order placement.
+This is a terminal advisory artifact. The approved result includes the risk decision, sizing and proposal provenance and explicitly reports `execution: "NOT_SUBMITTED"` and `order_id: null`. This evaluation step does not call `TradingService.submit()`, `OrderManager`, a broker or executor, create an order, or mutate portfolio positions/cash. An explicit separate acceptance is required for Phase 2C-4.
+
+## Phase 2C-4 and 2C-5: PAPER order and position lifecycle
+
+`POST /intelligence/proposals/{proposal_id}/submit` reloads the persisted V11 approval and verifies its PAPER run, candidate, generated-signal, registered strategy/version, proposal/signal identity, freshness, tradability and regular market session. It requires a current valid tick-grid quote. Automatic sizing is the default; manual quantity is an explicit override. Both paths call `TradingService`, which obtains a fresh quote and applies the final RiskEngine decision before `OrderManager` can submit to `PaperBroker`. The endpoint does not accept an in-memory market-intelligence proposal, create orders from research/AI output, or enable a live route. The deterministic client-order identity and durable one-shot submission claim mean a retry returns the existing order or blocks for recovery; it never creates a second order for the proposal.
+
+Paper fills are linked to their client order and assigned deterministic fill IDs, persisted before the portfolio snapshot is rewritten, and replayed to rebuild the account on restart. The broker's resting-order book is still in-memory. If recovery cannot reconcile a pending order, the trading gate stays closed for new entries; operators must reconcile rather than resubmit.
+
+`POST /paper/positions/manage` evaluates only current open portfolio positions with a recoverable, fill-linked approved proposal. It checks that the fresh quote is on tick, not stale/future, later than the position open, and within a regular market session. Long/short stop-loss and take-profit triggers are deterministic; each exit is persisted as a V12 exit proposal and routed as `OrderIntent.EXIT` through the same `TradingService`, `RiskEngine`, `OrderManager` and paper broker. Exit quantity is capped at the current open position. Missing provenance or invalid protective levels fail closed. This is quote-triggered monitoring, not a persistent background scheduler or a claim of guaranteed stop execution; gaps, slippage, broker state and process uptime remain relevant.
+
+An exit-manager call is required to evaluate a position; no automatic polling job is configured. Execution remains simulated PAPER-only.
 
 Authenticated API:
 
@@ -106,6 +116,9 @@ All endpoints require the configured bearer token:
 - `POST /research/assessments/{snapshot_id}` explicitly assesses a persisted snapshot and returns a research-only opportunity. It does not refresh evidence or execute anything.
 - `GET /research/assessments/{assessment_id}` returns the persisted assessment and associated opportunity.
 - `GET /research/opportunities?limit=100&offset=0` lists persisted opportunities in deterministic rank order.
+- `POST /research/autonomous/{run_id}/candidates/{candidate_id}/risk` and `GET` persist/retrieve the Phase 2C-3 risk proposal.
+- `POST /intelligence/proposals/{proposal_id}/submit` explicitly submits an eligible persisted Phase 2C-3 proposal in PAPER mode.
+- `POST /paper/positions/manage` evaluates fresh quotes and routes supported deterministic stop/target exits in PAPER mode.
 
 Responses explicitly set `research_only: true`, `execution: "NOT_SUBMITTED"`, and `risk_status: "NOT_EVALUATED"`. Snapshot/research status is `COMPLETE`, `PARTIAL`, or `FAILED`. Autonomous-run status also includes `INTERRUPTED` while a failed stage awaits safe retry. Missing optional sources are not assigned neutral scores. Because macro and sentiment do not yet have providers, runs will normally be `PARTIAL`.
 
@@ -156,6 +169,6 @@ Values are validated and bounded. The in-process cache is keyed by instrument, e
 
 ## Validation and future work
 
-Focused tests cover snapshot persistence and inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, future evidence rejection, AI schema/citation and provider failures, registered-strategy validation, deterministic ranking, V8 persistence and authenticated assessment API behavior. Phase 2C-1 through 2C-3 are separate explicit PAPER research stages. Phase 2C-3 preserves deterministic strategy and research provenance, uses RiskEngine as the final gate, and stops at a persisted advisory proposal; Phase 2C-4 is not implemented.
+Focused tests cover snapshot persistence and inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, future evidence rejection, AI schema/citation and provider failures, registered-strategy validation, deterministic ranking, V8 persistence and authenticated assessment API behavior. Phase 2C-3 preserves deterministic strategy and research provenance and stops at a persisted advisory proposal; Phase 2C-4/2C-5 require an explicit PAPER submission/management request and route all orders through RiskEngine and OrderManager. Paper resting-order recovery remains fail-closed rather than restart-resumable.
 
 Historical provider revisions, point-in-time fundamentals and news archives, macro/sentiment providers, source licensing, cache/load behavior at broad-universe scale, and independent calibration remain open work. Nothing in this phase establishes profitability, live readiness, or production suitability.

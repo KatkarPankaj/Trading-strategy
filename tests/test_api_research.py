@@ -205,7 +205,7 @@ class ResearchApiTests(unittest.TestCase):
         )
         self.assertEqual(naive.status_code, 422)
 
-    def test_proposal_submission_requires_authentication_and_routes_explicit_paper_acceptance(self):
+    def test_proposal_submission_does_not_accept_ephemeral_research_proposals(self):
         context, provider = make_context()
         self.addCleanup(provider.close)
         self.addCleanup(context.store.db.close)
@@ -331,19 +331,8 @@ class ResearchApiTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(submitted.status_code, 200, submitted.text)
-        self.assertEqual(submitted.json()["trading_mode"], "PAPER")
-        self.assertEqual(submitted.json()["execution"], "PAPER_ORDER_CREATED")
-        context.research_pipeline.submit_decision.assert_called_once()
-        call = context.research_pipeline.submit_decision.call_args
-        self.assertEqual(call.args, (pipeline_result, 1))
-        self.assertEqual(call.kwargs["sizing_mode"], "MANUAL_OVERRIDE")
-        self.assertEqual(call.kwargs["actor"], "test-operator")
-        self.assertEqual(call.kwargs["proposal_id"], proposal.proposal_id)
-        self.assertTrue(call.kwargs["client_order_id"].startswith("proposal-"))
-        prior_order = replace(
-            prior_order, client_order_id=call.kwargs["client_order_id"])
-        context.paper.order_manager.get.return_value = prior_order
+        self.assertEqual(submitted.status_code, 503, submitted.text)
+        context.research_pipeline.submit_decision.assert_not_called()
         replay = client.post(
             f"/intelligence/proposals/{proposal.proposal_id}/submit",
             headers=headers,
@@ -353,11 +342,8 @@ class ResearchApiTests(unittest.TestCase):
                 "quantity": 1,
             },
         )
-        self.assertEqual(replay.status_code, 200, replay.text)
-        self.assertTrue(replay.json()["duplicate"])
-        self.assertEqual(
-            replay.json()["execution"], "PAPER_ORDER_ALREADY_CREATED")
-        context.research_pipeline.submit_decision.assert_called_once()
+        self.assertEqual(replay.status_code, 503, replay.text)
+        context.research_pipeline.submit_decision.assert_not_called()
 
         stale_as_of = datetime.now(timezone.utc) - timedelta(minutes=5)
         intelligence.proposal = replace(
@@ -390,7 +376,7 @@ class ResearchApiTests(unittest.TestCase):
                 "quantity": 1,
             },
         )
-        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.status_code, 503)
 
 
     def test_proposal_submission_rejects_stale_or_unknown_context(self):
@@ -410,7 +396,38 @@ class ResearchApiTests(unittest.TestCase):
                 "quantity": 1,
             },
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 503)
+
+    def test_persisted_proposal_endpoint_delegates_to_paper_lifecycle_service(self):
+        context, provider = make_context(configured=False)
+        self.addCleanup(provider.close)
+        self.addCleanup(context.store.db.close)
+        executor = Mock()
+        executor.submit.return_value = {
+            "proposal_id": "persisted-proposal",
+            "execution": "PAPER_ORDER_CREATED",
+            "duplicate": False,
+        }
+        context.paper_proposal_execution = executor
+        context.research_pipeline = Mock()
+        response = TestClient(create_app(context)).post(
+            "/intelligence/proposals/persisted-proposal/submit",
+            headers={"Authorization": "Bearer " + TOKEN},
+            json={
+                "operator": "test-operator",
+                "sizing_mode": "MANUAL_OVERRIDE",
+                "quantity": 5,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["trading_mode"], "PAPER")
+        executor.submit.assert_called_once_with(
+            "persisted-proposal",
+            operator="test-operator",
+            sizing_mode="MANUAL_OVERRIDE",
+            quantity=5,
+        )
+        context.research_pipeline.submit_decision.assert_not_called()
 
 
 if __name__ == "__main__":
