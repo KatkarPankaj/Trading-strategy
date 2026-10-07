@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from ..core.audit_trail import AuditContext, reconstruct
 from ..core.executors import LIVE_CONFIRMATION_PHRASE, LiveTradingRefused, TradingMode
 from ..core.kill_switch import KillSwitchError
+from ..core.markets import UnknownMarket
 from ..core.observability import HealthMonitor
 from ..core.order_management import IdempotencyConflict, InvalidOrderTransition, OrderManagerError, UnknownOrder
 from ..core.market_session import MarketSession
@@ -213,6 +215,20 @@ def create_app(ctx: ApiContext) -> FastAPI:
             raise HTTPException(
                 503, f"market session is not configured for {instrument.market}")
         as_of = body.as_of or datetime.now(timezone.utc)
+        if ctx.markets is not None:
+            try:
+                market = ctx.markets.get(instrument.market)
+            except UnknownMarket as exc:
+                raise HTTPException(
+                    503, f"market calendar is unavailable for {instrument.market}") from exc
+            market_date = as_of.astimezone(ZoneInfo(market.timezone)).date()
+            if not market.is_covered(market_date):
+                raise HTTPException(
+                    503, f"market calendar is not covered for {instrument.market} "
+                    f"in {market_date.year}")
+            if not market.calendar.is_trading_day(market_date):
+                raise HTTPException(
+                    422, f"research date is not a trading day for {instrument.market}")
         try:
             evidence = tuple(
                 item.to_domain(instrument.instrument_id) for item in body.evidence)

@@ -17,7 +17,7 @@ The current application remains paper-trading only. The October 2026 platform la
 - `src/stockmarket/config.py`, `src/stockmarket/data.py`, `src/stockmarket/strategy.py`, `src/stockmarket/backtest.py`, `src/stockmarket/sweep.py` and `src/stockmarket/cli.py` remain established library/CLI paths. The legacy market-data cache uses Parquet; do not assume it uses pickle.
 - `src/stockmarket/core/persistence/` provides database/repository and migration code. Legacy JSON/CSV outputs remain local paper artifacts and are not transactional or concurrency-safe.
 - `tests/` contains focused automated test modules. Coverage is incomplete, especially for newer platform services. Check declared development dependencies and available tools before claiming tests ran.
-- `Dockerfile`, `docker-compose.yml` and `deploy/` assets exist but have not thereby been validated as production deployment. No `.github/workflows/` CI pipeline is currently established.
+- `Dockerfile`, `docker-compose.yml` and `deploy/` assets exist but have not thereby been validated as production deployment. `.github/workflows/ci.yml` runs the existing unittest suite, Bandit and pip-audit; it is not a production deployment gate.
 
 The legacy dashboards do not yet consistently use the new platform services. Before behavior changes, inspect the owning module and its callers; do not assume a platform abstraction is wired into a dashboard or API simply because it exists. Change legacy code only when needed to preserve a required workflow or deliberately migrate it toward the platform objective.
 
@@ -39,7 +39,7 @@ The legacy dashboards do not yet consistently use the new platform services. Bef
 
 ## Linting, Formatting and Type Checking
 
-- There is no established repository-wide lint, formatting or static type-check gate, and no CI workflow currently enforces one. Do not claim compliance with unconfigured checks.
+- There is no established repository-wide lint, formatting or static type-check gate. CI currently enforces tests, Bandit and pip-audit only. Do not claim compliance with unconfigured checks.
 - Use existing configured tools where available. Do not add conflicting tools or make them mandatory without configuring and documenting a consistent workflow.
 - Keep imports, whitespace and annotations clean in changed files.
 

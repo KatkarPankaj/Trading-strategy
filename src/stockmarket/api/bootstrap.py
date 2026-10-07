@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from fastapi import FastAPI
@@ -16,6 +16,7 @@ from ..core.observability import CheckResult, ErrorCounter, HealthMonitor
 from ..core.order_management import OrderManager
 from ..core.market_session import MarketSession
 from ..core.ai import AIAnalyst
+from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.portfolio import PortfolioManager
 from ..core.recovery import RecoveryManager, rebuild_portfolio, reconcile_positions
@@ -23,11 +24,14 @@ from ..core.risk import RiskEngine, RiskLimits
 from ..core.learning import StrategyConfigRegistry
 from ..core.strategies import OrbVwapStrategy, Strategy
 from ..core.strategy_pipeline import StrategyResearchPipeline
+from ..core.research import FundamentalEvidenceProducer, SectorEvidenceProducer
 from ..core.kill_switch import AutoTriggerMonitor, AutoTriggerPolicy, KillSwitch
 from ..core.observability import AlertManager, StructuredLogger
 from ..core.live_readiness import LiveReadinessChecker
-from ..core.markets import default_markets
+from ..core.markets import MarketRegistry, default_markets
 from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
+from ..core.data.yahoo_fundamentals import YahooEarningsObservationProvider
+from ..core.data.nse_sector_indices import NSESectorIndexObservationProvider
 from ..core.trading_gate import TradingGate
 from ..core.security import SecurityError, get_secret
 from ..core.settings import AppSettings, ConfigurationError, Environment, load_settings
@@ -57,6 +61,105 @@ def _parse_time(value: str, name: str, errors: list[str]) -> time:
         return time(0, 0)
 
 
+def _research_from_env(
+    env: Mapping[str, str],
+    registry: MarketRegistry,
+    configured_markets: tuple[str, ...],
+) -> tuple[AIAnalyst | None, dict[str, MarketSession], list[str]]:
+    errors: list[str] = []
+    base_url = (env.get("AI_BASE_URL") or "").strip()
+    model = (env.get("AI_MODEL") or "").strip()
+    api_key_value = (env.get("AI_API_KEY") or "").strip()
+    api_key_file = (env.get("AI_API_KEY_FILE") or "").strip()
+    timeout_value = (env.get("AI_TIMEOUT_SECONDS") or "").strip()
+    ai_configured = any((base_url, model, api_key_value, timeout_value))
+    analyst: AIAnalyst | None = None
+
+    if ai_configured:
+        if not base_url or not model or not (api_key_value or api_key_file):
+            errors.append(
+                "AI_BASE_URL, AI_MODEL, and AI_API_KEY or AI_API_KEY_FILE must be configured together")
+        else:
+            try:
+                key = get_secret("AI_API_KEY", env)
+                if key is None:
+                    raise SecurityError("AI_API_KEY is required")
+                timeout = float(timeout_value or "20")
+                provider = OpenAICompatibleProvider(
+                    base_url, model, key, timeout=timeout)
+                analyst = AIAnalyst(provider)
+            except (SecurityError, TypeError, ValueError) as exc:
+                errors.append(f"invalid AI provider configuration: {exc}")
+
+    sessions: dict[str, MarketSession] = {}
+    session_data = (env.get("RESEARCH_SESSIONS") or "").strip()
+    if session_data:
+        try:
+            parsed = json.loads(session_data)
+        except json.JSONDecodeError:
+            errors.append("RESEARCH_SESSIONS must be valid JSON")
+            parsed = None
+        if parsed is not None:
+            if not isinstance(parsed, dict):
+                errors.append("RESEARCH_SESSIONS must be an object keyed by market code")
+            else:
+                for market_code, settings in parsed.items():
+                    if not isinstance(market_code, str) or not isinstance(settings, dict):
+                        errors.append("RESEARCH_SESSIONS entries must map market codes to objects")
+                        continue
+                    code = market_code.upper()
+                    if code not in configured_markets:
+                        errors.append(
+                            f"RESEARCH_SESSIONS market {code!r} must be listed in MARKETS")
+                        continue
+                    if not set(settings).issubset({
+                            "opening_range_minutes", "entry_start", "entry_cutoff",
+                            "square_off", "late_entry_start"}):
+                        errors.append(
+                            f"RESEARCH_SESSIONS for {code} contains unsupported fields")
+                        continue
+                    required = {
+                        "opening_range_minutes", "entry_cutoff",
+                        "square_off", "late_entry_start",
+                    }
+                    if not required.issubset(settings):
+                        errors.append(
+                            f"RESEARCH_SESSIONS for {code} requires "
+                            "opening_range_minutes, entry_cutoff, square_off, and late_entry_start")
+                        continue
+                    definition = registry.get(code)
+                    try:
+                        minutes = settings["opening_range_minutes"]
+                        if isinstance(minutes, bool) or not isinstance(minutes, int) \
+                                or not 1 <= minutes <= 240:
+                            raise ValueError("opening_range_minutes must be between 1 and 240")
+                        open_at = definition.calendar.open_time
+                        close_at = definition.calendar.close_time
+                        opening_end = (datetime.combine(
+                            date.min, open_at) + timedelta(minutes=minutes)).time()
+                        session = MarketSession(
+                            timezone=definition.timezone,
+                            market_open=open_at,
+                            opening_range_end=opening_end,
+                            entry_cutoff=time.fromisoformat(settings["entry_cutoff"]),
+                            square_off=time.fromisoformat(settings["square_off"]),
+                            market_close=close_at,
+                            entry_start=time.fromisoformat(settings["entry_start"])
+                            if "entry_start" in settings else None,
+                            late_entry_start=time.fromisoformat(
+                                settings["late_entry_start"]),
+                        )
+                    except (TypeError, ValueError) as exc:
+                        errors.append(f"invalid RESEARCH_SESSIONS for {code}: {exc}")
+                        continue
+                    sessions[code] = session
+    elif ai_configured and analyst is not None:
+        errors.append(
+            "RESEARCH_SESSIONS is required when an AI provider is configured")
+
+    return analyst, sessions, errors
+
+
 def build_context(
     settings: AppSettings,
     env: Mapping[str, str] | None = None,
@@ -77,6 +180,58 @@ def build_context(
     registry = default_markets()
     errors += [f"MARKETS lists unknown market {m!r}; known: {list(registry.codes())}"
                for m in settings.markets if m not in registry.codes()]
+    env_analyst, env_sessions, research_errors = _research_from_env(
+        env, registry, settings.markets)
+    errors.extend(research_errors)
+    if research_analyst is None:
+        research_analyst = env_analyst
+    if research_sessions is None:
+        research_sessions = env_sessions
+    fundamental_provider_name = (env.get("FUNDAMENTAL_PROVIDER") or "").strip().lower()
+    if fundamental_provider_name not in ("", "yahoo"):
+        errors.append("FUNDAMENTAL_PROVIDER must be 'yahoo' when set")
+    if fundamental_provider_name and research_analyst is None:
+        errors.append("FUNDAMENTAL_PROVIDER requires a configured AI research provider")
+    sector_provider_name = (env.get("SECTOR_PROVIDER") or "").strip().lower()
+    if sector_provider_name not in ("", "nse"):
+        errors.append("SECTOR_PROVIDER must be 'nse' when set")
+    sector_map: dict[str, str] = {}
+    sector_map_value = (env.get("NSE_SECTOR_INDEX_MAP") or "").strip()
+    if sector_map_value:
+        try:
+            raw_sector_map = json.loads(sector_map_value)
+        except json.JSONDecodeError:
+            errors.append("NSE_SECTOR_INDEX_MAP must be valid JSON")
+        else:
+            if not isinstance(raw_sector_map, dict):
+                errors.append("NSE_SECTOR_INDEX_MAP must be a JSON object")
+            else:
+                for symbol, index_name in raw_sector_map.items():
+                    if not isinstance(symbol, str) or not symbol.strip() \
+                            or not isinstance(index_name, str) or not index_name.strip():
+                        errors.append(
+                            "NSE_SECTOR_INDEX_MAP must map non-empty symbols to index names")
+                        break
+                    if not index_name.strip().upper().startswith("NIFTY "):
+                        errors.append(
+                            "NSE_SECTOR_INDEX_MAP values must be NSE NIFTY index names")
+                        break
+                    normalized_symbol = symbol.strip().upper()
+                    if normalized_symbol in sector_map:
+                        errors.append(
+                            f"NSE_SECTOR_INDEX_MAP contains duplicate symbol "
+                            f"{normalized_symbol!r}")
+                        break
+                    sector_map[normalized_symbol] = " ".join(index_name.split())
+    if sector_provider_name == "nse" and not sector_map:
+        errors.append(
+            "NSE_SECTOR_INDEX_MAP is required when SECTOR_PROVIDER=nse")
+    if sector_provider_name == "nse" and "IN" not in settings.markets:
+        errors.append("MARKETS must include IN when SECTOR_PROVIDER=nse")
+    if sector_map and sector_provider_name != "nse":
+        errors.append("NSE_SECTOR_INDEX_MAP requires SECTOR_PROVIDER=nse")
+    if sector_provider_name and research_analyst is None:
+        errors.append("SECTOR_PROVIDER requires a configured AI research provider")
     token = None
     try:
         token = get_secret("API_TOKEN", env, required=settings.environment in (
@@ -154,10 +309,18 @@ def build_context(
         strategy_approval=strategies.check_live, provenance_source=strategies.version_info)
     research_pipeline = None
     if research_analyst is not None:
+        research_evidence_producers = []
+        if fundamental_provider_name == "yahoo":
+            research_evidence_producers.append(
+                FundamentalEvidenceProducer(YahooEarningsObservationProvider()))
+        if sector_provider_name == "nse" and sector_map:
+            research_evidence_producers.append(SectorEvidenceProducer(
+                NSESectorIndexObservationProvider(sector_map)))
         research_pipeline = StrategyResearchPipeline(
             market_data,
             research_analyst,
             research_strategies or {"orb_vwap": OrbVwapStrategy()},
+            research_evidence_producers=tuple(research_evidence_producers),
         )
     recovery = RecoveryManager(store=store, order_manager=order_manager, portfolio=portfolio,
                                broker=broker, gate=gate)

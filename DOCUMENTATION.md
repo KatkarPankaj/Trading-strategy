@@ -1,4 +1,12 @@
-# Stock Market Trading Simulator — Complete Documentation
+# Legacy NSE/BSE Simulator — Historical Workflow Guide
+
+> This document describes the pre-October NSE/BSE applications and their
+> local paper-trading workflows. It is retained for compatibility and is not
+> the design authority for new platform work. The newer paper-only API,
+> research dashboard, architecture, and operations guidance are documented in
+> [README.md](README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and
+> [docs/OPERATIONS.md](docs/OPERATIONS.md). Legacy dashboards are not yet
+> migrated to the platform services.
 
 ## Table of Contents
 1. [Tool Overview](#tool-overview)

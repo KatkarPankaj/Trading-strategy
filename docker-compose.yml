@@ -65,6 +65,14 @@ services:
       BASE_CURRENCY: ${BASE_CURRENCY:-USD}
       MARKETS: ${MARKETS:-US}
       DATA_PROVIDER: ${DATA_PROVIDER:-mock}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_API_KEY_FILE: /run/secrets/ai_api_key
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-}
+      RESEARCH_SESSIONS: ${RESEARCH_SESSIONS:-}
+      FUNDAMENTAL_PROVIDER: ${FUNDAMENTAL_PROVIDER:-}
+      SECTOR_PROVIDER: ${SECTOR_PROVIDER:-}
+      NSE_SECTOR_INDEX_MAP: ${NSE_SECTOR_INDEX_MAP:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       ENTRY_WINDOW_START: ${ENTRY_WINDOW_START:?set ENTRY_WINDOW_START in .env}
       ENTRY_WINDOW_END: ${ENTRY_WINDOW_END:?set ENTRY_WINDOW_END in .env}
@@ -77,6 +85,7 @@ services:
     secrets:
       - database_url
       - api_token
+      - ai_api_key
     ports:
       - "127.0.0.1:8000:8000" # loopback only; put a TLS-terminating proxy in front for remote access
     read_only: true
@@ -141,6 +150,8 @@ secrets:
     file: ./secrets/database_url.txt
   api_token:
     file: ./secrets/api_token.txt
+  ai_api_key:
+    file: ./secrets/ai_api_key.txt
 
 volumes:
   pgdata:

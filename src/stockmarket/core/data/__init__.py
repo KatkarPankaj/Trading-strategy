@@ -1,6 +1,10 @@
 """Market data providers and the reliability layer around them."""
 
 from .mock import MockProvider
+from .nse_sector_indices import (
+    NSESectorDataUnavailable,
+    NSESectorIndexObservationProvider,
+)
 from .factory import create_market_data_provider
 from .provider import (
     INTERVALS,
@@ -25,6 +29,8 @@ __all__ = [
     "DataUnavailable",
     "MarketDataProvider",
     "MockProvider",
+    "NSESectorDataUnavailable",
+    "NSESectorIndexObservationProvider",
     "create_market_data_provider",
     "ProviderTimeout",
     "Quote",

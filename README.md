@@ -1,6 +1,15 @@
-# Budget-Based Trading Simulator (NSE)
+# Global Market Research and Paper-Trading Platform
 
-Personal-use paper-trading app to test whether a strategy can grow a fixed budget without risking real capital.
+The current development path is the October platform layer: provider-aware market
+research, deterministic strategy evaluation, risk-gated paper execution, and an
+API-backed read-only monitor. It remains paper-only and is not a production/live
+trading system. The earlier NSE-focused Streamlit simulators and backtest
+workflows are retained separately for compatibility; they are not the authority
+for new platform architecture.
+
+See [Platform Architecture](docs/ARCHITECTURE.md) for system boundaries and
+[Platform Operations](docs/OPERATIONS.md) for API setup, secrets, deployment,
+backup, and recovery.
 
 ## Product Goal
 - Start with a defined budget. Default budget is `Rs 200000`.
@@ -64,15 +73,17 @@ Then open the local URL shown in terminal (usually http://localhost:8501).
 ## Launch API-backed read-only monitor
 This separate Streamlit page reads data from the platform API and includes an advisory-only Research tab. It has no order-submission controls.
 
-The API must be running and `API_TOKEN` must match its configured bearer token. `API_BASE_URL` defaults to `http://127.0.0.1:8000` for local use; non-loopback API URLs must use HTTPS. The research endpoint additionally requires the server to be initialized with an AI analyst, registered strategies, and explicit market sessions. If those are not configured, research returns 503; the dashboard does not supply or invent them.
+The API must be running and `API_TOKEN` must match its configured bearer token. `API_BASE_URL` defaults to `http://127.0.0.1:8000` for local use; non-loopback API URLs must use HTTPS. Research requires an approved OpenAI-compatible endpoint configured through `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`/`AI_API_KEY_FILE`, plus explicit `RESEARCH_SESSIONS` for each enabled market. The dashboard does not supply credentials or invent session boundaries; if the API's research components or calendar coverage are unavailable, it reports an API error.
 
 ```powershell
 $env:PYTHONPATH = "src"
 # Set API_TOKEN using your approved local secret-handling method.
-.\.venv\Scripts\python.exe -m streamlit run src/stockmarket/dashboard/app.py
+.\.venv\Scripts\python.exe -m streamlit run dashboard_app.py
 ```
 
-The research form accepts optional operator-entered evidence scores. Enter only scores backed by evidence you have verified; the UI labels these as operator input, not vendor data. AI strategy rankings and model-reported confidence are advisory and are not calibrated forecasts.
+The research form accepts optional operator-entered evidence scores. Enter only scores backed by evidence you have verified; the UI labels these as operator input, not vendor data. The API can opt in to timestamped Yahoo Finance reported-EPS event evidence with `FUNDAMENTAL_PROVIDER=yahoo`; this does not supply sector direction or mappings. AI strategy rankings and model-reported confidence are advisory and are not calibrated forecasts.
+
+Platform API setup, secret handling, migration, backup, restore, health checks, and current operational limitations are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Launch advanced scanner + dummy trading app
 This app includes:

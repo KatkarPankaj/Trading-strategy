@@ -12,6 +12,7 @@ from .analyst import (
     news_score,
     sanitize,
 )
+from .openai_compatible import OpenAICompatibleProvider
 from .schemas import (
     TASKS,
     EarningsSchema,
@@ -35,6 +36,7 @@ __all__ = [
     "MarketSummarySchema",
     "NewsAnalysisSchema",
     "NullProvider",
+    "OpenAICompatibleProvider",
     "ResearchNoteSchema",
     "ResearchScoreSchema",
     "SignalExplanationSchema",

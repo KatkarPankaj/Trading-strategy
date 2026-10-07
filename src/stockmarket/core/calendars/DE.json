@@ -1,0 +1,19 @@
+{
+  "market": "DE",
+  "note": "Xetra and Frankfurt cash-market non-trading days for 2026. Coverage is limited to this year; confirm future dates with Deutsche Boerse.",
+  "source": "https://www.cashmarket.deutsche-boerse.com/cash-en/trading/trading-calendar-and-trading-hours",
+  "verified_on": "2026-10-07",
+  "years": [
+    2026
+  ],
+  "holidays": [
+    "2026-01-01",
+    "2026-04-03",
+    "2026-04-06",
+    "2026-05-01",
+    "2026-12-24",
+    "2026-12-25",
+    "2026-12-31"
+  ],
+  "early_closes": {}
+}
