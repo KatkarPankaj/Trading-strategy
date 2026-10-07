@@ -24,6 +24,7 @@ from ..core.risk import RiskEngine, RiskLimits
 from ..core.learning import StrategyConfigRegistry
 from ..core.strategies import OrbVwapStrategy, Strategy
 from ..core.strategy_pipeline import StrategyResearchPipeline
+from ..core.market_intelligence import MarketIntelligenceOrchestrator
 from ..core.research import FundamentalEvidenceProducer, SectorEvidenceProducer
 from ..core.kill_switch import AutoTriggerMonitor, AutoTriggerPolicy, KillSwitch
 from ..core.observability import AlertManager, StructuredLogger
@@ -32,6 +33,8 @@ from ..core.markets import MarketRegistry, default_markets
 from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
 from ..core.data.yahoo_fundamentals import YahooEarningsObservationProvider
 from ..core.data.nse_sector_indices import NSESectorIndexObservationProvider
+from ..news import FinnhubNewsProvider
+from ..core.research import NewsEvidenceProducer
 from ..core.trading_gate import TradingGate
 from ..core.security import SecurityError, get_secret
 from ..core.settings import AppSettings, ConfigurationError, Environment, load_settings
@@ -232,6 +235,61 @@ def build_context(
         errors.append("NSE_SECTOR_INDEX_MAP requires SECTOR_PROVIDER=nse")
     if sector_provider_name and research_analyst is None:
         errors.append("SECTOR_PROVIDER requires a configured AI research provider")
+    news_provider_name = (env.get("NEWS_PROVIDER") or "").strip().lower()
+    if news_provider_name not in ("", "finnhub"):
+        errors.append("NEWS_PROVIDER must be 'finnhub' when set")
+    finnhub_symbol_map: dict[str, str] = {}
+    finnhub_symbol_map_value = (env.get("FINNHUB_SYMBOL_MAP") or "").strip()
+    if finnhub_symbol_map_value:
+        try:
+            raw_finnhub_symbol_map = json.loads(finnhub_symbol_map_value)
+        except json.JSONDecodeError:
+            errors.append("FINNHUB_SYMBOL_MAP must be valid JSON")
+        else:
+            if not isinstance(raw_finnhub_symbol_map, dict):
+                errors.append("FINNHUB_SYMBOL_MAP must be a JSON object")
+            else:
+                for key, provider_symbol in raw_finnhub_symbol_map.items():
+                    if not isinstance(key, str) or ":" not in key \
+                            or not isinstance(provider_symbol, str) \
+                            or not provider_symbol.strip():
+                        errors.append(
+                            "FINNHUB_SYMBOL_MAP must map MARKET:SYMBOL to provider symbols")
+                        break
+                    market_code, symbol = key.split(":", 1)
+                    market_code = market_code.strip().upper()
+                    normalized_key = f"{market_code}:{symbol.strip().upper()}"
+                    if not symbol.strip() or market_code not in registry.codes():
+                        errors.append(
+                            f"FINNHUB_SYMBOL_MAP contains invalid key {key!r}")
+                        break
+                    if market_code not in settings.markets:
+                        errors.append(
+                            f"FINNHUB_SYMBOL_MAP market {market_code!r} "
+                            "must be included in MARKETS")
+                        break
+                    if normalized_key in finnhub_symbol_map:
+                        errors.append(
+                            f"FINNHUB_SYMBOL_MAP contains duplicate key {normalized_key!r}")
+                        break
+                    finnhub_symbol_map[normalized_key] = provider_symbol.strip().upper()
+    if news_provider_name == "finnhub":
+        try:
+            finnhub_api_key = get_secret("FINNHUB_API_KEY", env)
+            if finnhub_api_key is None:
+                errors.append(
+                    "FINNHUB_API_KEY or FINNHUB_API_KEY_FILE is required "
+                    "when NEWS_PROVIDER=finnhub")
+        except SecurityError as exc:
+            errors.append(str(exc))
+            finnhub_api_key = None
+        if research_analyst is None:
+            errors.append(
+                "NEWS_PROVIDER=finnhub requires a configured AI research provider")
+    else:
+        finnhub_api_key = None
+        if finnhub_symbol_map:
+            errors.append("FINNHUB_SYMBOL_MAP requires NEWS_PROVIDER=finnhub")
     token = None
     try:
         token = get_secret("API_TOKEN", env, required=settings.environment in (
@@ -308,6 +366,7 @@ def build_context(
         market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
         strategy_approval=strategies.check_live, provenance_source=strategies.version_info)
     research_pipeline = None
+    market_intelligence = None
     if research_analyst is not None:
         research_evidence_producers = []
         if fundamental_provider_name == "yahoo":
@@ -316,12 +375,23 @@ def build_context(
         if sector_provider_name == "nse" and sector_map:
             research_evidence_producers.append(SectorEvidenceProducer(
                 NSESectorIndexObservationProvider(sector_map)))
+        news_evidence_producer = None
+        if news_provider_name == "finnhub" and finnhub_api_key is not None:
+            news_evidence_producer = NewsEvidenceProducer(
+                FinnhubNewsProvider(
+                    finnhub_api_key.reveal(), symbol_map=finnhub_symbol_map),
+                limit=5,
+            )
         research_pipeline = StrategyResearchPipeline(
             market_data,
             research_analyst,
             research_strategies or {"orb_vwap": OrbVwapStrategy()},
+            trading_service=paper,
+            news_evidence_producer=news_evidence_producer,
             research_evidence_producers=tuple(research_evidence_producers),
         )
+        if news_evidence_producer is not None:
+            market_intelligence = MarketIntelligenceOrchestrator(research_pipeline)
     recovery = RecoveryManager(store=store, order_manager=order_manager, portfolio=portfolio,
                                broker=broker, gate=gate)
     # connects the broker, restores orders, and halts entries on any discrepancy
@@ -352,7 +422,8 @@ def build_context(
                       api_token=token, gate=gate, recovery=recovery, markets=registry, readiness=checker,
                       kill_switch=kill_switch, monitor=monitor, market_data=market_data,
                       instruments=instruments, research_pipeline=research_pipeline,
-                      research_sessions=research_sessions or {})
+                      research_sessions=research_sessions or {},
+                      market_intelligence=market_intelligence)
 
 
 def create_app_from_env() -> FastAPI:

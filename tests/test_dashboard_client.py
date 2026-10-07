@@ -69,6 +69,27 @@ class ApiClientTests(unittest.TestCase):
         self.assertIn("research pipeline", str(raised.exception))
         self.assertIn("market-session", str(raised.exception))
 
+    @patch("stockmarket.dashboard.client.requests.post")
+    def test_market_intelligence_unavailable_explains_provider_configuration(self, post):
+        post.return_value = self.response(status_code=503)
+
+        with self.assertRaises(ApiError) as raised:
+            self.client.post("/intelligence/opportunities", {})
+
+        self.assertEqual(raised.exception.status, 503)
+        self.assertIn("provider credentials", str(raised.exception))
+        self.assertIn("market-session", str(raised.exception))
+
+    @patch("stockmarket.dashboard.client.requests.post")
+    def test_stale_proposal_conflict_is_explained(self, post):
+        post.return_value = self.response(status_code=409)
+
+        with self.assertRaises(ApiError) as raised:
+            self.client.post("/intelligence/proposals/id/submit", {})
+
+        self.assertEqual(raised.exception.status, 409)
+        self.assertIn("stale or conflicting", str(raised.exception))
+
     @patch("stockmarket.dashboard.client.requests.get")
     def test_health_503_is_returned_as_a_health_report(self, get):
         get.return_value = self.response(

@@ -73,6 +73,9 @@ services:
       FUNDAMENTAL_PROVIDER: ${FUNDAMENTAL_PROVIDER:-}
       SECTOR_PROVIDER: ${SECTOR_PROVIDER:-}
       NSE_SECTOR_INDEX_MAP: ${NSE_SECTOR_INDEX_MAP:-}
+      NEWS_PROVIDER: ${NEWS_PROVIDER:-}
+      FINNHUB_API_KEY_FILE: /run/secrets/finnhub_api_key
+      FINNHUB_SYMBOL_MAP: ${FINNHUB_SYMBOL_MAP:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       ENTRY_WINDOW_START: ${ENTRY_WINDOW_START:?set ENTRY_WINDOW_START in .env}
       ENTRY_WINDOW_END: ${ENTRY_WINDOW_END:?set ENTRY_WINDOW_END in .env}
@@ -86,6 +89,7 @@ services:
       - database_url
       - api_token
       - ai_api_key
+      - finnhub_api_key
     ports:
       - "127.0.0.1:8000:8000" # loopback only; put a TLS-terminating proxy in front for remote access
     read_only: true
@@ -152,6 +156,8 @@ secrets:
     file: ./secrets/api_token.txt
   ai_api_key:
     file: ./secrets/ai_api_key.txt
+  finnhub_api_key:
+    file: ./secrets/finnhub_api_key.txt
 
 volumes:
   pgdata:

@@ -1,9 +1,10 @@
-"""Streamlit monitoring UI. Read-only: it cannot place or modify orders."""
+"""API-backed Streamlit dashboard for research, paper proposals and monitoring."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import quote
 
 import streamlit as st
 
@@ -47,20 +48,21 @@ def main() -> None:
     label, level = views.mode_banner(health)
     _banner(label, level)
     st.caption(
-        "Monitoring only. Orders are placed through the API, never from this page.")
+        "Research and order review use the platform API. Only explicit PAPER proposal "
+        "acceptance is available here; arbitrary orders cannot be entered.")
     if st.sidebar.button("Refresh"):
         st.rerun()
 
-    tabs = st.tabs(["Research (advisory)", "Markets & regime", "Signals", "Portfolio",
-                    "Orders", "PnL & drawdown", "Strategies", "News & AI", "Risk",
-                    "System health", "Audit log"])
+    tabs = st.tabs(["Research (advisory)", "Opportunities", "Markets & regime",
+                    "Signals", "Portfolio", "Orders", "PnL & drawdown",
+                    "Strategies", "News & AI", "Risk", "System health", "Audit log"])
     renderers: list[Callable[[], None]] = [
-        lambda: _research(client), lambda: _markets(client), lambda: _signals(
-            client), lambda: _portfolio(client),
-        lambda: _orders(client), lambda: _pnl(
-            client), lambda: _strategies(client),
-        lambda: _news(client), lambda: _risk(
-            client), lambda: _health(health), lambda: _audit(client),
+        lambda: _research(client), lambda: _opportunities(client),
+        lambda: _markets(client), lambda: _signals(client),
+        lambda: _portfolio(client), lambda: _orders(client),
+        lambda: _pnl(client), lambda: _strategies(client),
+        lambda: _news(client), lambda: _risk(client),
+        lambda: _health(health), lambda: _audit(client),
     ]
     for tab, render in zip(tabs, renderers):
         with tab:
@@ -70,7 +72,7 @@ def main() -> None:
 def _research(client: ApiClient) -> None:
     st.subheader("Run market research")
     st.warning(
-        "Research only. This page never submits orders. AI rankings are advisory, "
+        "This research form is advisory and never submits orders. AI rankings are advisory, "
         "and model-reported confidence is not calibrated.")
     instruments = _safe(client, "/instruments")
     if instruments is None:
@@ -160,6 +162,136 @@ def _research(client: ApiClient) -> None:
             })
 
 
+def _opportunities(client: ApiClient) -> None:
+    st.subheader("Rank market opportunities")
+    st.warning(
+        "AI and research evidence are advisory. Proposals are not risk-approved. "
+        "Acceptance is explicit, PAPER-only, and requires an operator-supplied quantity.")
+    instruments = _safe(client, "/instruments")
+    if instruments is None:
+        return
+    if not instruments:
+        st.info("No instruments are available from the API.")
+        return
+
+    options = {
+        f"{item['symbol']} ({item['market']} · {item['instrument_id']})":
+        item["instrument_id"]
+        for item in instruments
+    }
+    labels = list(options)
+    with st.form("market_opportunities"):
+        selected = st.multiselect("Candidate instruments (up to 10)", labels)
+        submitted = st.form_submit_button("Rank opportunities")
+    if submitted:
+        st.session_state.pop("market_intelligence_result", None)
+        if not selected:
+            st.error("Select at least one instrument.")
+        elif len(selected) > 10:
+            st.error("Select no more than 10 instruments.")
+        else:
+            as_of = datetime.now(timezone.utc).isoformat()
+            try:
+                result = client.post("/intelligence/opportunities", {
+                    "instrument_ids": [options[label] for label in selected],
+                    "as_of": as_of,
+                })
+            except ApiError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["market_intelligence_result"] = result
+
+    result = st.session_state.get("market_intelligence_result")
+    if not result:
+        return
+    st.caption(
+        f"Mode: {result.get('trading_mode', 'UNKNOWN')} · "
+        f"as_of: {result.get('as_of', 'unknown')} · "
+        f"execution: {result.get('execution', 'UNKNOWN')}")
+    proposals = result.get("proposals") or []
+    if not proposals:
+        st.info("No actionable proposals were produced for this run.")
+    else:
+        st.dataframe(views.frame([
+            {
+                "rank": item["rank"],
+                "symbol": item["symbol"],
+                "market": item["market"],
+                "side": item["side"],
+                "strategy": item["strategy"],
+                "opportunity_score": item["opportunity_score"],
+                "aggregate_score": item["aggregate_score"],
+                "entry": item["entry_price"],
+                "stop": item["stop_loss"],
+                "target": item["take_profit"],
+                "as_of": item["as_of"],
+            }
+            for item in proposals
+        ]), width="stretch")
+        for item in proposals:
+            with st.expander(
+                f"Rank {item['rank']}: {item['symbol']} {item['side']} "
+                f"via {item['strategy']}"):
+                st.json({
+                    "proposal_id": item["proposal_id"],
+                    "regime": item["regime"],
+                    "strategy_selection": item["strategy_selection"],
+                    "research_evidence": item["research_evidence"],
+                    "research_warnings": item["research_warnings"],
+                    "explanation": item["explanation"],
+                    "risk_status": item["risk_status"],
+                })
+                with st.form(f"submit_proposal_{item['proposal_id']}"):
+                    operator = st.text_input(
+                        "Operator", key=f"proposal_operator_{item['proposal_id']}")
+                    quantity = st.number_input(
+                        "Paper order quantity",
+                        min_value=1,
+                        max_value=1_000_000_000,
+                        value=1,
+                        step=1,
+                        key=f"proposal_quantity_{item['proposal_id']}",
+                    )
+                    accept = st.form_submit_button("Submit proposal to PAPER risk gate")
+                if accept:
+                    if not operator.strip():
+                        st.error("Enter the operator name for the audit record.")
+                        continue
+                    try:
+                        health = client.get("/health")
+                        if health.get("trading_mode") != "PAPER":
+                            st.error("Proposal submission is disabled unless the API confirms PAPER mode.")
+                            continue
+                        submission = client.post(
+                            "/intelligence/proposals/"
+                            f"{quote(item['proposal_id'], safe='')}/submit",
+                            {"operator": operator.strip(), "quantity": int(quantity)},
+                        )
+                    except ApiError as exc:
+                        st.error(str(exc))
+                        continue
+                    risk = submission.get("risk_decision") or {}
+                    order = submission.get("order") or {}
+                    if submission.get("duplicate"):
+                        st.info(
+                            f"Duplicate acceptance; no new order was sent. "
+                            f"Existing paper order status: {order.get('status', 'UNKNOWN')}.")
+                    elif risk.get("status") == "APPROVED":
+                        st.success(
+                            f"Risk approved; paper order status: "
+                            f"{order.get('status', 'UNKNOWN')}.")
+                    else:
+                        st.warning(
+                            f"Risk decision: {risk.get('status', 'UNKNOWN')} — "
+                            f"{risk.get('reason', 'No reason returned')}")
+                    st.json(submission)
+
+    assessments = result.get("assessments") or []
+    if assessments:
+        with st.expander("Candidate assessments"):
+            st.dataframe(views.frame(assessments), width="stretch")
+
+
 def _markets(client: ApiClient) -> None:
     st.subheader("Global market status")
     data = _safe(client, "/markets")
@@ -195,6 +327,7 @@ def _portfolio(client: ApiClient) -> None:
 
 def _orders(client: ApiClient) -> None:
     st.subheader("Orders")
+    st.caption("Paper order review. Proposal entries are submitted only after explicit acceptance and final RiskEngine approval.")
     only_open = st.checkbox("Open orders only")
     _table(views.frame(_safe(client, "/orders", open_only=only_open)))
 

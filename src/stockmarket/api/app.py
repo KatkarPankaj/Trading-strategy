@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -19,6 +22,10 @@ from ..core.markets import UnknownMarket
 from ..core.observability import HealthMonitor
 from ..core.order_management import IdempotencyConflict, InvalidOrderTransition, OrderManagerError, UnknownOrder
 from ..core.market_session import MarketSession
+from ..core.market_intelligence import (
+    MarketIntelligenceOrchestrator,
+    ProposalSubmissionContext,
+)
 from ..core.models import Instrument
 from ..core.persistence import Store, to_json
 from ..core.recovery import RecoveryError
@@ -26,7 +33,15 @@ from ..core.security import Secret
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.trading_service import OrderTicket, TradingService, UnknownInstrument, summarize_trades
-from .schemas import KillResetBody, KillTriggerBody, OrderBody, ResearchRunBody, ResumeBody
+from .schemas import (
+    KillResetBody,
+    KillTriggerBody,
+    OpportunityRunBody,
+    OrderBody,
+    ProposalSubmitBody,
+    ResearchRunBody,
+    ResumeBody,
+)
 
 
 @dataclass(slots=True)
@@ -47,6 +62,7 @@ class ApiContext:
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
     research_pipeline: StrategyResearchPipeline | None = None
     research_sessions: Mapping[str, MarketSession] = field(default_factory=dict)
+    market_intelligence: MarketIntelligenceOrchestrator | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -63,6 +79,8 @@ def _plain(value: Any) -> Any:
 
 def create_app(ctx: ApiContext) -> FastAPI:
     app = FastAPI(title="Trading Platform API", version="0.1.0")
+    proposal_contexts: OrderedDict[str, ProposalSubmissionContext] = OrderedDict()
+    proposal_contexts_lock = RLock()
     if ctx.market_data is not None:
         app.add_event_handler("shutdown", ctx.market_data.close)
 
@@ -264,6 +282,120 @@ def create_app(ctx: ApiContext) -> FastAPI:
             "bar_count": len(result.bars) if result.bars is not None else 0,
             "latest_bar_at": result.bars.index[-1].isoformat()
             if result.bars is not None and not result.bars.empty else None,
+        }
+
+    @app.post("/intelligence/opportunities", dependencies=[Depends(auth)])
+    def rank_opportunities(body: OpportunityRunBody) -> dict[str, Any]:
+        if ctx.market_intelligence is None:
+            raise HTTPException(503, "market intelligence service is not configured")
+        if ctx.mode != TradingMode.PAPER.value:
+            raise HTTPException(
+                403, "market-intelligence proposals are available only in PAPER mode")
+        now = datetime.now(timezone.utc)
+        if body.as_of > now:
+            raise HTTPException(422, "as_of must not be in the future")
+
+        candidates: list[tuple[Instrument, MarketSession]] = []
+        for instrument_id in body.instrument_ids:
+            instrument = ctx.instruments.get(instrument_id)
+            if instrument is None:
+                raise HTTPException(404, f"unknown instrument {instrument_id!r}")
+            session = ctx.research_sessions.get(instrument.market)
+            if session is None:
+                raise HTTPException(
+                    503, f"market session is not configured for {instrument.market}")
+            if ctx.markets is not None:
+                try:
+                    market = ctx.markets.get(instrument.market)
+                except UnknownMarket as exc:
+                    raise HTTPException(
+                        503, f"market calendar is unavailable for {instrument.market}") from exc
+                market_date = body.as_of.astimezone(
+                    ZoneInfo(market.timezone)).date()
+                if not market.is_covered(market_date):
+                    raise HTTPException(
+                        503, f"market calendar is not covered for {instrument.market} "
+                        f"in {market_date.year}")
+                if not market.calendar.is_trading_day(market_date):
+                    raise HTTPException(
+                        422, f"research date is not a trading day for {instrument.market}")
+            candidates.append((instrument, session))
+
+        try:
+            result = ctx.market_intelligence.run(
+                candidates, as_of=body.as_of)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        with proposal_contexts_lock:
+            for submission_context in result.submission_contexts:
+                proposal_id = submission_context.proposal.proposal_id
+                proposal_contexts.pop(proposal_id, None)
+                proposal_contexts[proposal_id] = submission_context
+            while len(proposal_contexts) > 1000:
+                proposal_contexts.popitem(last=False)
+        return {
+            "trading_mode": TradingMode.PAPER.value,
+            "execution": "NOT_SUBMITTED",
+            "risk_status": "NOT_EVALUATED",
+            "as_of": result.as_of.isoformat(),
+            "generated_at": result.generated_at.isoformat(),
+            "ranking_method": (
+                "deterministic aggregate confidence descending; "
+                "absolute aggregate score descending; instrument_id ascending"),
+            "proposals": [_plain(item) for item in result.proposals],
+            "assessments": [_plain(item) for item in result.assessments],
+        }
+
+    @app.post(
+        "/intelligence/proposals/{proposal_id}/submit",
+        dependencies=[Depends(auth)],
+    )
+    def submit_proposal(proposal_id: str, body: ProposalSubmitBody) -> dict[str, Any]:
+        if ctx.mode != TradingMode.PAPER.value \
+                or ctx.paper.mode is not TradingMode.PAPER:
+            raise HTTPException(403, "proposal submission is restricted to PAPER mode")
+        if ctx.research_pipeline is None or ctx.market_intelligence is None:
+            raise HTTPException(503, "paper proposal submission is not configured")
+        with proposal_contexts_lock:
+            submission_context = proposal_contexts.get(proposal_id)
+            if submission_context is not None:
+                proposal_contexts.move_to_end(proposal_id)
+        if submission_context is None:
+            raise HTTPException(404, "unknown or expired proposal")
+
+        now = datetime.now(timezone.utc)
+        maximum_age = timedelta(
+            seconds=ctx.settings.max_market_data_age_seconds)
+        proposal = submission_context.proposal
+        if proposal.as_of > now or proposal.generated_at > now \
+                or now - proposal.as_of > maximum_age \
+                or now - proposal.generated_at > maximum_age:
+            raise HTTPException(409, "proposal is stale and must be regenerated")
+
+        client_order_id = "proposal-" + hashlib.sha256(
+            proposal_id.encode("utf-8")).hexdigest()[:48]
+        try:
+            result = ctx.research_pipeline.submit_decision(
+                submission_context.pipeline_result,
+                body.quantity,
+                actor=body.operator,
+                client_order_id=client_order_id,
+                proposal_id=proposal_id,
+            )
+        except (IdempotencyConflict, InvalidOrderTransition) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return {
+            "trading_mode": TradingMode.PAPER.value,
+            "execution": "PAPER_ORDER_CREATED",
+            "duplicate": result.duplicate,
+            "proposal_id": proposal_id,
+            "operator": body.operator,
+            "order": _plain(result.order),
+            "risk_decision": _plain(result.risk),
         }
 
     @app.get("/orders/{client_order_id}/audit", dependencies=[Depends(auth)])

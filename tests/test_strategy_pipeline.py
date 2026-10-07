@@ -13,6 +13,7 @@ from stockmarket.core import (
     ResearchEvidence,
     StrategyResearchPipeline,
 )
+from stockmarket.core.market_intelligence import MarketIntelligenceOrchestrator
 from stockmarket.core.ai import AIAnalyst
 from stockmarket.core.audit_trail import reconstruct
 from stockmarket.core.recovery import RecoveryManager, rebuild_portfolio
@@ -33,6 +34,7 @@ from stockmarket.core.risk import RiskEngine, RiskLimits
 from stockmarket.core.research import NewsEvidenceProducer
 from stockmarket.core.research import (
     FundamentalEvidenceProducer,
+    ResearchEvidenceCollection,
     ResearchObservation,
     SectorEvidenceProducer,
 )
@@ -173,6 +175,21 @@ class CapturingOrderManager:
         )
 
 
+class StaticNewsEvidenceProducer:
+    def collect(self, instrument, *, as_of):
+        return ResearchEvidenceCollection(
+            evidence=(ResearchEvidence(
+                instrument_id=instrument.instrument_id,
+                component="news",
+                score=0.8,
+                observed_at=as_of - timedelta(minutes=1),
+                source="test-news",
+            ),),
+            event_count=1,
+            analyzed_count=1,
+        )
+
+
 class StrategyResearchPipelineTests(unittest.TestCase):
     def setUp(self):
         self.instrument = make_instrument()
@@ -229,6 +246,57 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         self.assertEqual(result.strategy_signal.side.value, "BUY")
         self.assertIs(result.decision.action, AggregatedAction.SKIP)
         self.assertIn("INSUFFICIENT_COMPONENTS", result.decision.reason_codes)
+
+    def test_market_intelligence_ranks_deterministically_and_keeps_submission_context(self):
+        second_instrument = default_markets().get("US").instrument(
+            "MSFT", mic="XNAS", asset_class=AssetClass.EQUITY, tick_size=0.01)
+        raw_provider = CountingMockProvider(
+            {
+                self.instrument.instrument_id: self.instrument,
+                second_instrument.instrument_id: second_instrument,
+            },
+            {
+                self.instrument.instrument_id: make_bars(),
+                second_instrument.instrument_id: make_bars(),
+            },
+            clock=lambda: AS_OF.astimezone(timezone.utc),
+        )
+        provider = ResilientProvider(
+            raw_provider,
+            policy=DataPolicy(retry=RetryPolicy(max_attempts=1)),
+            clock=lambda: AS_OF.astimezone(timezone.utc),
+            sleep=lambda _: None,
+        )
+        self.addCleanup(provider.close)
+        pipeline = StrategyResearchPipeline(
+            provider,
+            AIAnalyst(
+                StaticAIProvider(selection_response()),
+                clock=lambda: AS_OF.astimezone(timezone.utc),
+            ),
+            {"orb_vwap": OrbVwapStrategy()},
+            news_evidence_producer=StaticNewsEvidenceProducer(),
+        )
+        orchestrator = MarketIntelligenceOrchestrator(
+            pipeline,
+            clock=lambda: AS_OF + timedelta(seconds=1),
+        )
+
+        result = orchestrator.run(
+            ((second_instrument, make_session()), (self.instrument, make_session())),
+            as_of=AS_OF,
+        )
+
+        self.assertEqual(
+            [item.instrument_id for item in result.proposals],
+            sorted((self.instrument.instrument_id, second_instrument.instrument_id)),
+        )
+        self.assertEqual(
+            [item.proposal.proposal_id for item in result.submission_contexts],
+            [item.proposal_id for item in result.proposals],
+        )
+        self.assertTrue(all(
+            item.risk_status == "NOT_EVALUATED" for item in result.proposals))
 
     def test_data_quality_failure_stops_before_ai_or_strategy(self):
         self.raw_provider.set_bars(
@@ -506,11 +574,21 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             ),
         )
 
-        submitted = pipeline.submit_decision(result, 1, actor="test")
+        submitted = pipeline.submit_decision(
+            result,
+            1,
+            actor="test",
+            client_order_id="proposal-test-idempotency",
+            proposal_id="proposal-test",
+        )
 
         self.assertEqual(len(order_manager.requests), 1)
         self.assertIs(order_manager.decisions[0].status, RiskDecisionStatus.APPROVED)
         self.assertEqual(order_manager.requests[0].signal_id, result.strategy_signal.signal_id)
+        self.assertEqual(
+            order_manager.requests[0].client_order_id,
+            "proposal-test-idempotency",
+        )
         self.assertEqual(submitted.risk.status, RiskDecisionStatus.APPROVED)
 
     def test_risk_rejection_is_preserved_and_skip_is_never_submitted(self):

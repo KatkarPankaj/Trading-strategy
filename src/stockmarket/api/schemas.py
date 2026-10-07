@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
@@ -99,6 +100,46 @@ class ResearchRunBody(BaseModel):
     def require_aware_as_of(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("as_of must be timezone-aware")
+        return value
+
+
+class OpportunityRunBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instrument_ids: list[str] = Field(min_length=1, max_length=10)
+    as_of: datetime
+
+    @field_validator("instrument_ids")
+    @classmethod
+    def unique_instruments(cls, value: list[str]) -> list[str]:
+        if any(not instrument_id.strip() or len(instrument_id) > 64
+               or not re.fullmatch(_ID, instrument_id)
+               for instrument_id in value):
+            raise ValueError("instrument_ids contains an invalid instrument identifier")
+        if len(set(value)) != len(value):
+            raise ValueError("instrument_ids must not contain duplicates")
+        return value
+
+    @field_validator("as_of")
+    @classmethod
+    def require_aware_as_of(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+        return value
+
+
+class ProposalSubmitBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operator: str = Field(min_length=1, max_length=64)
+    quantity: int = Field(gt=0, le=1_000_000_000, strict=True)
+
+    @field_validator("operator")
+    @classmethod
+    def non_blank_operator(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("operator must not be blank")
         return value
 
 

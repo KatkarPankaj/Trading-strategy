@@ -83,6 +83,14 @@ class ApiClient:
             raise ApiError(
                 "Research is unavailable (503); check the server's research pipeline "
                 "and market-session configuration.", 503)
+        if response.status_code == 503 and path.startswith("/intelligence/"):
+            raise ApiError(
+                "Market intelligence is unavailable (503); check provider credentials, "
+                "news configuration and market-session coverage.", 503)
+        if response.status_code == 409 and "/submit" in path:
+            raise ApiError(
+                "Proposal submission was rejected as stale or conflicting (409); "
+                "regenerate and review the proposal.", 409)
         if not response.ok:
             raise ApiError(
                 f"API error {response.status_code} for {path}", response.status_code)

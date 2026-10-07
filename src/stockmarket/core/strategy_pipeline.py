@@ -321,6 +321,8 @@ class StrategyResearchPipeline:
         quantity: int,
         *,
         actor: str = "system",
+        client_order_id: str | None = None,
+        proposal_id: str | None = None,
     ) -> TicketResult:
         """Explicitly submit an actionable research result through PAPER TradingService."""
         if self.trading_service is None:
@@ -359,6 +361,7 @@ class StrategyResearchPipeline:
                 "aggregate_confidence": decision.confidence,
                 "aggregate_reason_codes": list(decision.reason_codes),
                 "input_hash": decision.input_hash,
+                **({"proposal_id": proposal_id} if proposal_id is not None else {}),
                 "research_evidence": {
                     item.component: {
                         "score": item.score,
@@ -407,6 +410,7 @@ class StrategyResearchPipeline:
             actor=actor,
             audit=audit,
             strategy_decision=decision,
+            client_order_id=client_order_id,
         )
 
     def _validate_research(

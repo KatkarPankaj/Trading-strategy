@@ -96,6 +96,12 @@ from .strategy_pipeline import (
     StrategyPipelineResult,
     StrategyResearchPipeline,
 )
+from .market_intelligence import (
+    MarketIntelligenceOrchestrator,
+    MarketIntelligenceResult,
+    OpportunityAssessment,
+    TradeProposal,
+)
 from .research import (
     FundamentalEvidenceProducer,
     NewsEvidenceCollection,
@@ -129,6 +135,10 @@ __all__ = [
     "StrategyPipelineConfig",
     "StrategyPipelineResult",
     "StrategyResearchPipeline",
+    "MarketIntelligenceOrchestrator",
+    "MarketIntelligenceResult",
+    "OpportunityAssessment",
+    "TradeProposal",
     "ResearchEvidence",
     "ResearchObservation",
     "ResearchObservationProvider",

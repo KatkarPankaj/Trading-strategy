@@ -6,7 +6,7 @@ streamlit==1.65.0
 pytz==2026.5
 nsepython==2.97
 pyarrow==25.0.1
-fastapi==0.110.1
-uvicorn==0.25.0
+fastapi==0.142.2
+uvicorn==0.54.0
 pydantic==2.12.3
 psycopg[binary]==3.2.3

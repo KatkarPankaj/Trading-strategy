@@ -1,7 +1,10 @@
-from datetime import time, timedelta, timezone
+from dataclasses import replace
+from datetime import datetime, time, timedelta, timezone
 from types import SimpleNamespace
 import json
 import unittest
+from unittest.mock import Mock
+from uuid import uuid4
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -11,10 +14,21 @@ from stockmarket.core import MarketSession, OrbVwapStrategy
 from stockmarket.core.ai import AIAnalyst
 from stockmarket.core.data import DataPolicy, MockProvider, ResilientProvider
 from stockmarket.core.executors import TradingMode
+from stockmarket.core.market_intelligence import (
+    MarketIntelligenceResult,
+    ProposalSubmissionContext,
+    TradeProposal,
+)
 from stockmarket.core.markets import default_markets
-from stockmarket.core.models import AssetClass
+from stockmarket.core.models import AssetClass, SignalSide
+from stockmarket.core.regime import RegimeAssessment, RegimeLabel
 from stockmarket.core.security import Secret
-from stockmarket.core.strategy_pipeline import StrategyResearchPipeline
+from stockmarket.core.strategy_pipeline import (
+    PipelineStatus,
+    StrategyPipelineResult,
+    StrategyResearchPipeline,
+)
+from stockmarket.core.ai.analyst import StrategySelection
 
 
 ZONE = "America/New_York"
@@ -184,6 +198,163 @@ class ResearchApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(naive.status_code, 422)
+
+    def test_proposal_submission_requires_authentication_and_routes_explicit_paper_acceptance(self):
+        context, provider = make_context()
+        self.addCleanup(provider.close)
+        context.settings.max_market_data_age_seconds = 300
+        as_of = datetime.now(timezone.utc) - timedelta(seconds=2)
+        generated_at = as_of + timedelta(seconds=1)
+        instrument = next(iter(context.instruments.values()))
+        proposal = TradeProposal(
+            proposal_id="test-proposal-id",
+            rank=1,
+            instrument_id=instrument.instrument_id,
+            symbol=instrument.symbol,
+            market=instrument.market,
+            as_of=as_of,
+            generated_at=generated_at,
+            side=SignalSide.BUY,
+            strategy="orb_vwap",
+            signal_id=uuid4(),
+            entry_price=100.0,
+            stop_loss=99.0,
+            take_profit=102.0,
+            opportunity_score=75.0,
+            aggregate_score=0.5,
+            aggregation_explanation='{"action":"BUY"}',
+            regime=RegimeAssessment(
+                instrument_id=instrument.instrument_id,
+                label=RegimeLabel.TRENDING_UP,
+                directional_score=0.6,
+                volatility=0.01,
+                interval="5m",
+                lookback_bars=20,
+                start_at=as_of - timedelta(minutes=100),
+                end_at=as_of,
+                assessed_at=as_of,
+            ),
+            strategy_selection=StrategySelection(
+                instrument_id=instrument.instrument_id,
+                as_of=as_of,
+                generated_at=generated_at,
+                provider="test",
+                prompt_hash="prompt",
+                response_hash="response",
+                summary="A test selection.",
+                ranked_strategies=(),
+                risks=(),
+                data_gaps=(),
+            ),
+            research_evidence=(),
+            research_warnings=(),
+            explanation=("Deterministic test proposal.",),
+        )
+        pipeline_result = StrategyPipelineResult(PipelineStatus.COMPLETE, None)
+
+        class StaticMarketIntelligence:
+            def __init__(self):
+                self.proposal = proposal
+
+            def run(self, _candidates, *, as_of):
+                if len(_candidates) != 1:
+                    raise AssertionError("test request should contain one candidate")
+                self.result = MarketIntelligenceResult(
+                    as_of=as_of,
+                    generated_at=self.proposal.generated_at,
+                    proposals=(self.proposal,),
+                    assessments=(),
+                    submission_contexts=(
+                        ProposalSubmissionContext(self.proposal, pipeline_result),
+                    ),
+                )
+                return self.result
+
+        intelligence = StaticMarketIntelligence()
+        context.market_intelligence = intelligence
+        context.research_pipeline = Mock()
+        context.research_pipeline.submit_decision.return_value = SimpleNamespace(
+            order={}, risk={}, duplicate=False)
+        client = TestClient(create_app(context))
+        body = {
+            "instrument_ids": [instrument.instrument_id],
+            "as_of": as_of.isoformat(),
+        }
+
+        self.assertEqual(
+            client.post("/intelligence/opportunities", json=body).status_code,
+            401,
+        )
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        ranked = client.post(
+            "/intelligence/opportunities", headers=headers, json=body)
+        self.assertEqual(ranked.status_code, 200, ranked.text)
+
+        invalid_quantity = client.post(
+            f"/intelligence/proposals/{proposal.proposal_id}/submit",
+            headers=headers,
+            json={"operator": "test-operator", "quantity": 0},
+        )
+        self.assertEqual(invalid_quantity.status_code, 422)
+        submitted = client.post(
+            f"/intelligence/proposals/{proposal.proposal_id}/submit",
+            headers=headers,
+            json={"operator": "test-operator", "quantity": 1},
+        )
+
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertEqual(submitted.json()["trading_mode"], "PAPER")
+        self.assertEqual(submitted.json()["execution"], "PAPER_ORDER_CREATED")
+        context.research_pipeline.submit_decision.assert_called_once()
+        call = context.research_pipeline.submit_decision.call_args
+        self.assertEqual(call.args, (pipeline_result, 1))
+        self.assertEqual(call.kwargs["actor"], "test-operator")
+        self.assertEqual(call.kwargs["proposal_id"], proposal.proposal_id)
+        self.assertTrue(call.kwargs["client_order_id"].startswith("proposal-"))
+
+        stale_as_of = datetime.now(timezone.utc) - timedelta(minutes=5)
+        intelligence.proposal = replace(
+            proposal,
+            proposal_id="stale-proposal-id",
+            as_of=stale_as_of,
+            generated_at=stale_as_of + timedelta(seconds=1),
+            regime=replace(proposal.regime, assessed_at=stale_as_of),
+            strategy_selection=replace(
+                proposal.strategy_selection,
+                as_of=stale_as_of,
+                generated_at=stale_as_of + timedelta(seconds=1),
+            ),
+        )
+        stale_ranked = client.post(
+            "/intelligence/opportunities",
+            headers=headers,
+            json={
+                "instrument_ids": [instrument.instrument_id],
+                "as_of": stale_as_of.isoformat(),
+            },
+        )
+        self.assertEqual(stale_ranked.status_code, 200, stale_ranked.text)
+        stale = client.post(
+            "/intelligence/proposals/stale-proposal-id/submit",
+            headers=headers,
+            json={"operator": "test-operator", "quantity": 1},
+        )
+        self.assertEqual(stale.status_code, 409)
+
+
+    def test_proposal_submission_rejects_stale_or_unknown_context(self):
+        context, provider = make_context()
+        self.addCleanup(provider.close)
+        context.settings.max_market_data_age_seconds = 1
+        context.market_intelligence = SimpleNamespace()
+        context.research_pipeline = Mock()
+        client = TestClient(create_app(context))
+        response = client.post(
+            "/intelligence/proposals/missing/submit",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"operator": "test-operator", "quantity": 1},
+        )
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

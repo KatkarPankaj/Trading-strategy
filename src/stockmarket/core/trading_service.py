@@ -161,6 +161,7 @@ class TradingService:
         actor: str = "system",
         audit: AuditContext | None = None,
         strategy_decision: AggregatedDecision | None = None,
+        client_order_id: str | None = None,
     ) -> TicketResult:
         """Route a priced deterministic signal through the normal risk/order boundary."""
         if self.mode is not TradingMode.PAPER:
@@ -182,6 +183,7 @@ class TradingService:
                 quantity=quantity,
                 order_type=OrderType.MARKET,
                 strategy=signal.strategy,
+                client_order_id=client_order_id,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
                 signal_id=signal.signal_id,

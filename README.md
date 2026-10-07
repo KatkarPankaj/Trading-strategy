@@ -2,8 +2,8 @@
 
 The current development path is the October platform layer: provider-aware market
 research, deterministic strategy evaluation, risk-gated paper execution, and an
-API-backed read-only monitor. It remains paper-only and is not a production/live
-trading system. The earlier NSE-focused Streamlit simulators and backtest
+API-backed monitor with explicit paper-proposal acceptance. It remains paper-only
+and is not a production/live trading system. The earlier NSE-focused Streamlit simulators and backtest
 workflows are retained separately for compatibility; they are not the authority
 for new platform architecture.
 
@@ -70,8 +70,8 @@ $env:PYTHONPATH = "src"
 
 Then open the local URL shown in terminal (usually http://localhost:8501).
 
-## Launch API-backed read-only monitor
-This separate Streamlit page reads data from the platform API and includes an advisory-only Research tab. It has no order-submission controls.
+## Launch API-backed platform dashboard
+This separate Streamlit page reads data from the platform API. It includes advisory research and opportunity ranking, server-backed order review, and an explicit paper-only proposal acceptance form. It cannot create arbitrary orders or bypass the platform RiskEngine.
 
 The API must be running and `API_TOKEN` must match its configured bearer token. `API_BASE_URL` defaults to `http://127.0.0.1:8000` for local use; non-loopback API URLs must use HTTPS. Research requires an approved OpenAI-compatible endpoint configured through `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`/`AI_API_KEY_FILE`, plus explicit `RESEARCH_SESSIONS` for each enabled market. The dashboard does not supply credentials or invent session boundaries; if the API's research components or calendar coverage are unavailable, it reports an API error.
 
@@ -82,6 +82,8 @@ $env:PYTHONPATH = "src"
 ```
 
 The research form accepts optional operator-entered evidence scores. Enter only scores backed by evidence you have verified; the UI labels these as operator input, not vendor data. The API can opt in to timestamped Yahoo Finance reported-EPS event evidence with `FUNDAMENTAL_PROVIDER=yahoo`; this does not supply sector direction or mappings. AI strategy rankings and model-reported confidence are advisory and are not calibrated forecasts.
+
+The API's separate market-intelligence service exposes `POST /intelligence/opportunities` for timestamped multi-instrument proposals. It requires the configured AI provider, per-market `RESEARCH_SESSIONS`, `NEWS_PROVIDER=finnhub`, and a Finnhub API key. Results combine the existing regime/news/strategy pipeline and deterministic signal aggregation, rank by deterministic aggregate confidence, and return explainable `TradeProposal` records marked `risk_status=NOT_EVALUATED` and `execution=NOT_SUBMITTED`. Explicit paper acceptance is available through `POST /intelligence/proposals/{proposal_id}/submit`; it requires a declared operator and quantity, rejects stale proposals, and routes the original deterministic context through the existing `TradingService`/`RiskEngine` gate. This proposal workflow does not alter the legacy Streamlit paper workflows or their local state.
 
 Platform API setup, secret handling, migration, backup, restore, health checks, and current operational limitations are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 

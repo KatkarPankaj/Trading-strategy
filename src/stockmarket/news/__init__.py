@@ -9,6 +9,7 @@ from .models import (
     NewsSentiment,
 )
 from .provider import NewsProvider
+from .finnhub import FinnhubNewsProvider, FinnhubNewsUnavailable
 
 __all__ = [
     "MarketImpact",
@@ -16,6 +17,8 @@ __all__ = [
     "NewsEvent",
     "NewsEventType",
     "NewsProvider",
+    "FinnhubNewsProvider",
+    "FinnhubNewsUnavailable",
     "NewsQuery",
     "NewsSentiment",
 ]
