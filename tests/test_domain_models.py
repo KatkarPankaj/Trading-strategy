@@ -63,6 +63,39 @@ class InstrumentTests(unittest.TestCase):
             self.make_instrument(timezone="Not/A_Zone")
         with self.assertRaises(ValueError):
             self.make_instrument(trading_hours=(time(9, 0),))
+        with self.assertRaisesRegex(ValueError, "timezone-naive"):
+            self.make_instrument(
+                trading_hours=(time(9, 0, tzinfo=timezone.utc), time(16, 0))
+            )
+
+    def test_tick_size_must_fit_price_precision(self):
+        with self.assertRaisesRegex(ValueError, "price_precision"):
+            self.make_instrument(tick_size=0.001, price_precision=2)
+
+    def test_currency_must_be_a_three_letter_uppercase_code(self):
+        for currency in ("US", "usd", "U$D", "ＵＳＤ"):
+            with self.subTest(currency=currency), self.assertRaisesRegex(
+                ValueError, "currency"
+            ):
+                self.make_instrument(currency=currency)
+
+    def test_validates_prices_and_quantities_against_instrument_constraints(self):
+        instrument = self.make_instrument(
+            tick_size=0.05,
+            price_precision=2,
+            lot_size=5,
+            minimum_order_quantity=10,
+        )
+
+        self.assertTrue(instrument.is_valid_price(100.05))
+        self.assertFalse(instrument.is_valid_price(100.03))
+        self.assertFalse(instrument.is_valid_price(float("nan")))
+        self.assertFalse(instrument.is_valid_price(True))
+        self.assertTrue(instrument.is_valid_order_quantity(10))
+        self.assertTrue(instrument.is_valid_order_quantity(15))
+        self.assertFalse(instrument.is_valid_order_quantity(5))
+        self.assertFalse(instrument.is_valid_order_quantity(12))
+        self.assertFalse(instrument.is_valid_order_quantity(True))
 
 
 class SignalTests(unittest.TestCase):

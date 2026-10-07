@@ -23,6 +23,7 @@ from ..core.kill_switch import AutoTriggerMonitor, AutoTriggerPolicy, KillSwitch
 from ..core.observability import AlertManager, StructuredLogger
 from ..core.live_readiness import LiveReadinessChecker
 from ..core.markets import default_markets
+from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
 from ..core.trading_gate import TradingGate
 from ..core.security import SecurityError, get_secret
 from ..core.settings import AppSettings, ConfigurationError, Environment, load_settings
@@ -119,25 +120,38 @@ def build_context(
     order_manager = OrderManager(broker)
     strategies = StrategyConfigRegistry(store.strategy_configs)
     risk_engine = RiskEngine(limits, settings.risk.to_portfolio_limits())
-    paper = TradingService(
-        mode=TradingMode.PAPER, risk_engine=risk_engine,
-        order_manager=order_manager, portfolio=portfolio, instruments=instruments,
-        quotes=broker.last_quote, market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
-        strategy_approval=strategies.check_live, provenance_source=strategies.version_info)
-    recovery = RecoveryManager(store=store, order_manager=order_manager, portfolio=portfolio,
-                               broker=broker, gate=gate)
-    # connects the broker, restores orders, and halts entries on any discrepancy
-    recovery.recover()
-
     health = HealthMonitor(max_market_data_age=timedelta(seconds=settings.max_market_data_age_seconds),
                            errors=ErrorCounter())
     health.register_check("database", store.db.healthy)
     health.register_check("broker", lambda: broker.is_connected)
     health.register_check("trading_gate", lambda: CheckResult(
         not gate.halted, gate.blocked_reason() or "open"))
+    logger = StructuredLogger("platform", errors=health.errors)
+    raw_market_data = create_market_data_provider(
+        settings.data_provider, instruments, markets=registry)
+    market_data = ResilientProvider(
+        raw_market_data,
+        policy=DataPolicy(max_quote_age=timedelta(
+            seconds=settings.max_market_data_age_seconds)),
+        health=health,
+        logger=logger,
+    )
+    health.register_check("market_data_provider", lambda: CheckResult(
+        market_data.breaker_state != "OPEN",
+        f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
+    paper = TradingService(
+        mode=TradingMode.PAPER, risk_engine=risk_engine,
+        order_manager=order_manager, portfolio=portfolio, instruments=instruments,
+        quotes=quote_source(market_data, instruments, logger=logger),
+        market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
+        strategy_approval=strategies.check_live, provenance_source=strategies.version_info)
+    recovery = RecoveryManager(store=store, order_manager=order_manager, portfolio=portfolio,
+                               broker=broker, gate=gate)
+    # connects the broker, restores orders, and halts entries on any discrepancy
+    recovery.recover()
+
     live_strategies = tuple(s.strip() for s in (
         env.get("LIVE_STRATEGIES") or "").split(",") if s.strip())
-    logger = StructuredLogger("platform", errors=health.errors)
     alerts = AlertManager(logger)
     kill_switch = KillSwitch(gate, services=lambda: [
                              paper], store=store, logger=logger, alerts=alerts)
@@ -159,7 +173,7 @@ def build_context(
         kill_switch_available=kill_switch.available)
     return ApiContext(settings=settings, paper=paper, live=None, store=store, health=health,
                       api_token=token, gate=gate, recovery=recovery, markets=registry, readiness=checker,
-                      kill_switch=kill_switch, monitor=monitor)
+                      kill_switch=kill_switch, monitor=monitor, market_data=market_data)
 
 
 def create_app_from_env() -> FastAPI:

@@ -57,6 +57,8 @@ class MarketDefinition:
         return years is None or day.year in years
 
     def phase(self, at: datetime) -> SessionPhase:
+        if not isinstance(at, datetime):
+            raise TypeError("market phase decisions require a datetime")
         if at.tzinfo is None or at.utcoffset() is None:
             raise ValueError("timestamp must be timezone-aware")
         local = at.astimezone(ZoneInfo(self.timezone))
@@ -64,9 +66,9 @@ class MarketDefinition:
         cal = self.calendar
         if not cal.is_trading_day(day):
             return SessionPhase.CLOSED
-        close = cal.close_time_on(day)
-        if cal.open_time <= t < close:
+        if cal.is_open(at):
             return SessionPhase.REGULAR
+        close = cal.close_time_on(day)
         if self.pre_market_open is not None and self.pre_market_open <= t < cal.open_time:
             return SessionPhase.PRE_MARKET
         if self.post_market_close is not None and close <= t < self.post_market_close:
@@ -89,7 +91,8 @@ class MarketDefinition:
         return Instrument(
             instrument_id=f"{mic}:{symbol}", symbol=symbol, exchange=mic, market=self.code,
             asset_class=asset_class, currency=self.currency, timezone=self.timezone,
-            tick_size=tick_size, lot_size=lot_size or self.default_lot_size,
+            tick_size=tick_size,
+            lot_size=self.default_lot_size if lot_size is None else lot_size,
             trading_hours=(self.calendar.open_time, self.calendar.close_time),
             trading_status=extra.pop("trading_status", TradingStatus.ACTIVE), **extra)
 

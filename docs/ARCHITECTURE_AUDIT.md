@@ -434,23 +434,24 @@ flowchart LR
 
 ## 18) Status Since Baseline
 
-The repository now also contains a new platform layer. This audit did not change it; the table records the difference from the baseline findings so the audit is not misleading.
+The repository now also contains a new platform layer. The table records the difference from the baseline findings so the audit is not misleading.
 
 | Baseline finding | Current state |
 |---|---|
-| No tests | 15 test modules, 144 tests passing. They cover domain models, market sessions, news, legacy paper order management, risk engine, portfolio risk, sizing, portfolio manager, signal aggregation, backtest validation, performance statistics, robustness, walk-forward and validation CLI/reports. No committed tests exist yet for the order manager, brokers, executors, recovery, kill switch, learning registry, audit trail, AI layer, data providers, persistence, settings, API or live-readiness modules. |
+| No tests | 22 test modules, 210 tests passing. They cover domain models, instruments, market sessions/calendars, provider validation/resilience and quote-snapshot consistency, deterministic ORB/VWAP signals and strategy-to-aggregation guards, market-regime classification, AI strategy-ranking validation, timestamped research evidence and provider-to-aggregation strategy pipeline fail-closed behavior, explicit PAPER TradingService/RiskEngine routing and rejection, news, legacy paper order management, risk engine, portfolio risk, sizing, portfolio manager, signal aggregation, backtest validation, performance statistics, robustness, walk-forward and validation CLI/reports. No committed tests yet cover full pipeline execution through a production paper broker, recovery, kill switch, learning registry, audit trail, persistence, settings, API or live-readiness modules. |
 | No central RiskEngine | `core/risk.py` and `core/risk_portfolio.py` exist; legacy dashboards do not call them. |
 | No order state machine / paper-live split | `core/order_management.py`, `core/executors.py`, `core/brokers.py` exist (paper default, live gated); legacy dashboards still execute orders themselves. |
 | Pickle cache | `data.py` now writes Parquet. |
 | No .env.example, unpinned dependencies | `.env.example` added; `requirements.txt` pinned. |
 | No persistence layer / API / observability | `core/persistence/`, `api/`, `core/observability/` exist and are not used by the legacy dashboards. |
-| No data-provider interface | `core/data/` (interface, mock, Yahoo adapter, quality gates, resilience) exists; the legacy `data.py` and dashboards still call Yahoo/NSE directly. |
-| No regime engine, no Strategy interface | Still open. ORB/VWAP are not migrated. |
+| No data-provider interface | `core/data/` (interface, mock, Yahoo adapter, factory, quality gates, resilience) exists. The API paper path now uses the configured provider through `ResilientProvider`; legacy `data.py` and dashboards still call Yahoo/NSE directly. |
+| No regime engine, no Strategy interface | `core/strategies/` defines a shared contract and an ORB/VWAP implementation producing `Signal` objects. `SignalAggregator` accepts that output, uses it as the authoritative technical direction, rejects stale/unpriced/mismatched signals, and prevents HOLD or opposing research evidence from authorizing the reverse direction. `core/regime.py` evaluates a validated rolling bar window and exposes a bounded supporting score. `core/ai/analyst.py` returns structured, identity-/time-bound rankings restricted to caller-supplied strategy names; failures and invalid candidates produce no selection. `core/strategy_pipeline.py` now composes provider, regime, AI selection, deterministic signal and aggregation with fresh, instrument-matched `ResearchEvidence`. Explicit actionable submission is routed through `TradingService.submit_signal()` in PAPER mode only, with signal context included in deterministic RiskEngine checks. The legacy DataFrame-based implementation remains in use by backtests and dashboards. |
 | No CI | Still open (no `.github/workflows`). |
-| No docs set | Still open (`docs/` has only this audit and `PHASE_5_PLAN.md`). |
+| No docs set | `docs/ARCHITECTURE.md` now records the target boundaries and integration sequence. Platform operations documentation remains open; `README.md` and `DOCUMENTATION.md` remain legacy-app focused. |
 | Legacy dashboards contain business logic | Still open; the new read-only dashboard is in `src/stockmarket/dashboard/`. |
-| India-specific assumptions | Still present in all legacy code (section 16.12); the new `core/markets.py` defines US, IN and DE markets, with IN/DE holiday data not yet supplied. |
+| Market sessions / calendar coverage | `core/trading_calendar.py` now supports covered-year fail-closed behavior, holidays, weekends, early closes and recurring intraday pauses; market phase uses the calendar for regular-session decisions. Only US holiday data is supplied. |
+| India-specific assumptions | Still present in legacy paths (section 16.12); the new `core/markets.py` defines US, IN and DE markets, but IN/DE holiday data is not supplied. |
 
 ### Recommended next implementation phase
 
-Complete the missing platform pieces that other work depends on: the Strategy interface with ORB/VWAP migrated (and a market-regime engine), then add automated tests for the new modules before wiring any of them into the legacy dashboards. Do not enable live trading.
+Add independent research-evidence producers and full pipeline-to-paper-broker integration tests. Keep AI ranking advisory; deterministic signals and RiskEngine retain authority. Continue adding service/integration tests before wiring new behavior into legacy dashboards. Do not enable live trading.

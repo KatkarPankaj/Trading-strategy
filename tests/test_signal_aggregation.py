@@ -5,6 +5,7 @@ import unittest
 from stockmarket.core import (
     AggregatedAction,
     AggregationConfig,
+    Signal,
     SignalAggregator,
     SignalInputs,
     SignalSide,
@@ -33,6 +34,21 @@ def inputs(**overrides):
     )
     values.update(overrides)
     return SignalInputs(**values)
+
+
+def strategy_signal(side=SignalSide.BUY, **overrides):
+    values = dict(
+        instrument_id="XNSE:RELIANCE",
+        symbol="RELIANCE",
+        timestamp=NOW - timedelta(seconds=30),
+        strategy="orb",
+        side=side,
+        entry_price=100.0 if side is not SignalSide.HOLD else None,
+        stop_loss=98.0 if side is SignalSide.BUY else 102.0 if side is SignalSide.SELL else None,
+        take_profit=102.0 if side is SignalSide.BUY else 98.0 if side is SignalSide.SELL else None,
+    )
+    values.update(overrides)
+    return Signal(**values)
 
 
 class SignalAggregationTests(unittest.TestCase):
@@ -133,6 +149,61 @@ class SignalAggregationTests(unittest.TestCase):
         self.assertEqual(signal.signal_id, buy.decision_id)
         skip = self.aggregator.aggregate(inputs(technical=None), as_of=NOW)
         self.assertIs(skip.to_signal(entry_price=100.0).side, SignalSide.HOLD)
+
+    def test_strategy_signal_supplies_authoritative_technical_component(self):
+        decision = self.aggregator.aggregate(
+            inputs(technical=-0.9),
+            as_of=NOW,
+            strategy_signal=strategy_signal(SignalSide.BUY),
+        )
+        self.assertIs(decision.action, AggregatedAction.BUY)
+        self.assertEqual(decision.explanation["inputs"]["technical"], 1.0)
+        self.assertEqual(decision.explanation["inputs"]["provided_technical_score"], -0.9)
+
+    def test_aggregation_cannot_reverse_deterministic_strategy_direction(self):
+        decision = self.aggregator.aggregate(
+            inputs(volume=1.0, momentum=1.0, regime=1.0, sector=1.0,
+                   news=1.0, fundamental=1.0, history=1.0),
+            as_of=NOW,
+            strategy_signal=strategy_signal(SignalSide.SELL),
+        )
+        self.assertIs(decision.action, AggregatedAction.HOLD)
+        self.assertIn("STRATEGY_AGGREGATION_CONFLICT", decision.reason_codes)
+
+    def test_held_strategy_cannot_become_entry_from_bullish_research(self):
+        decision = self.aggregator.aggregate(
+            inputs(),
+            as_of=NOW,
+            strategy_signal=strategy_signal(SignalSide.HOLD),
+        )
+        self.assertIs(decision.action, AggregatedAction.HOLD)
+        self.assertIn("STRATEGY_SIGNAL_HOLD", decision.reason_codes)
+
+    def test_strategy_signal_must_match_instrument_symbol_and_strategy(self):
+        with self.assertRaisesRegex(ValueError, "must match aggregation inputs"):
+            self.aggregator.aggregate(
+                inputs(),
+                as_of=NOW,
+                strategy_signal=strategy_signal(instrument_id="XNYS:RELIANCE"),
+            )
+
+    def test_stale_or_unpriced_strategy_signal_skips_aggregation(self):
+        stale = self.aggregator.aggregate(
+            inputs(),
+            as_of=NOW,
+            strategy_signal=strategy_signal(
+                timestamp=NOW - timedelta(minutes=10)),
+        )
+        self.assertIs(stale.action, AggregatedAction.SKIP)
+        self.assertIn("STALE_STRATEGY_SIGNAL", stale.reason_codes)
+
+        unpriced = self.aggregator.aggregate(
+            inputs(),
+            as_of=NOW,
+            strategy_signal=strategy_signal(entry_price=None),
+        )
+        self.assertIs(unpriced.action, AggregatedAction.SKIP)
+        self.assertIn("UNPRICED_STRATEGY_SIGNAL", unpriced.reason_codes)
 
 
 if __name__ == "__main__":

@@ -229,18 +229,70 @@ def _r(value: float) -> float:
 
 
 class SignalAggregator:
-    """Pure function of (inputs, config, as_of); no clocks, randomness, or text generation."""
+    """Aggregate evidence deterministically; an optional strategy signal gates direction."""
 
     def __init__(self, config: AggregationConfig | None = None) -> None:
         self.config = config or AggregationConfig()
 
-    def aggregate(self, inputs: SignalInputs, *, as_of: datetime) -> AggregatedDecision:
+    def aggregate(
+        self,
+        inputs: SignalInputs,
+        *,
+        as_of: datetime,
+        strategy_signal: Signal | None = None,
+    ) -> AggregatedDecision:
         _require_aware(as_of, "as_of")
         cfg = self.config
         input_dict = inputs.to_dict()
         scores: dict[str, float | None] = {
             name: getattr(inputs, name) for name in DIRECTIONAL_COMPONENTS}
         excluded: dict[str, str] = {}
+        strategy_side: SignalSide | None = None
+        strategy_signal_skip: str | None = None
+        strategy_signal_age: float | None = None
+        if strategy_signal is not None:
+            if not isinstance(strategy_signal, Signal):
+                raise TypeError("strategy_signal must be a Signal")
+            if (strategy_signal.instrument_id != inputs.instrument_id
+                    or strategy_signal.symbol != inputs.symbol
+                    or strategy_signal.strategy != inputs.strategy):
+                raise ValueError(
+                    "strategy_signal instrument, symbol and strategy must match aggregation inputs")
+            strategy_side = strategy_signal.side
+            signal_payload = {
+                "signal_id": str(strategy_signal.signal_id),
+                "instrument_id": strategy_signal.instrument_id,
+                "symbol": strategy_signal.symbol,
+                "timestamp": strategy_signal.timestamp.isoformat(),
+                "strategy": strategy_signal.strategy,
+                "side": strategy_side.value,
+                "entry_price": strategy_signal.entry_price,
+                "stop_loss": strategy_signal.stop_loss,
+                "take_profit": strategy_signal.take_profit,
+                "reasons": list(strategy_signal.reasons),
+            }
+            input_dict["strategy_signal"] = signal_payload
+            signal_age = (as_of - strategy_signal.timestamp).total_seconds()
+            strategy_signal_age = _r(signal_age)
+            if signal_age < 0:
+                strategy_signal_skip = "STRATEGY_SIGNAL_FROM_FUTURE"
+            elif signal_age > cfg.max_input_age_seconds:
+                strategy_signal_skip = "STALE_STRATEGY_SIGNAL"
+            elif strategy_side is not SignalSide.HOLD and strategy_signal.entry_price is None:
+                strategy_signal_skip = "UNPRICED_STRATEGY_SIGNAL"
+            else:
+                strategy_signal_skip = None
+            if strategy_signal_skip is not None:
+                excluded["technical"] = strategy_signal_skip
+                scores["technical"] = None
+            else:
+                scores["technical"] = {
+                    SignalSide.BUY: 1.0,
+                    SignalSide.SELL: -1.0,
+                    SignalSide.HOLD: 0.0,
+                }[strategy_side]
+            input_dict["provided_technical_score"] = inputs.technical
+            input_dict["technical"] = scores["technical"]
         if scores["history"] is not None and inputs.history_trades < cfg.min_history_trades:
             scores["history"] = None
             excluded["history"] = "INSUFFICIENT_HISTORY_TRADES"
@@ -249,6 +301,8 @@ class SignalAggregator:
         age = (as_of - inputs.timestamp).total_seconds()
 
         skip: list[str] = []
+        if strategy_signal is not None and strategy_signal_skip is not None:
+            skip.append(strategy_signal_skip)
         if age < 0:
             skip.append("INPUT_FROM_FUTURE")
         elif age > cfg.max_input_age_seconds:
@@ -304,6 +358,19 @@ class SignalAggregator:
                 action = AggregatedAction.HOLD
                 reasons.append("SCORE_WITHIN_NEUTRAL_BAND")
 
+            if strategy_signal is not None and action in (
+                    AggregatedAction.BUY, AggregatedAction.SELL):
+                expected_action = {
+                    SignalSide.BUY: AggregatedAction.BUY,
+                    SignalSide.SELL: AggregatedAction.SELL,
+                }.get(strategy_side)
+                if expected_action is None:
+                    action = AggregatedAction.HOLD
+                    reasons.append("STRATEGY_SIGNAL_HOLD")
+                elif action is not expected_action:
+                    action = AggregatedAction.HOLD
+                    reasons.append("STRATEGY_AGGREGATION_CONFLICT")
+
             vol_factor = 1.0
             if inputs.volatility is not None:
                 vol_factor = 1.0 - 0.5 * \
@@ -335,6 +402,8 @@ class SignalAggregator:
             "components": components,
             "gates": {
                 "skip_reasons": skip,
+                "strategy_signal_side": strategy_side.value if strategy_side else None,
+                "strategy_signal_age_seconds": strategy_signal_age,
                 "volatility": inputs.volatility,
                 "liquidity": inputs.liquidity,
             },

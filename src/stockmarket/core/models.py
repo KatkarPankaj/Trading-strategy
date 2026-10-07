@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time
+from decimal import Decimal
 from enum import Enum
 from math import isfinite
 from uuid import UUID, uuid4
@@ -145,6 +146,13 @@ class Instrument:
     def __post_init__(self) -> None:
         for name in ("instrument_id", "symbol", "exchange", "market", "currency"):
             _require_text(getattr(self, name), name)
+        if (
+            len(self.currency) != 3
+            or not self.currency.isascii()
+            or not self.currency.isalpha()
+            or not self.currency.isupper()
+        ):
+            raise ValueError("currency must be an uppercase 3-letter currency code")
         _require_enum(self.asset_class, AssetClass, "asset_class")
         _require_enum(self.trading_status, TradingStatus, "trading_status")
         _require_positive_number(self.tick_size, "tick_size")
@@ -158,6 +166,13 @@ class Instrument:
             raise TypeError("price_precision must be an integer")
         if self.price_precision < 0:
             raise ValueError("price_precision must be non-negative")
+        tick_precision = max(
+            0, -Decimal(str(self.tick_size)).normalize().as_tuple().exponent
+        )
+        if tick_precision > self.price_precision:
+            raise ValueError(
+                "price_precision must be sufficient to represent tick_size"
+            )
         if self.shortable is not None and not isinstance(self.shortable, bool):
             raise TypeError("shortable must be a bool or None")
         if not isinstance(self.timezone, str) or not self.timezone.strip():
@@ -170,10 +185,36 @@ class Instrument:
             if (
                 not isinstance(self.trading_hours, tuple)
                 or len(self.trading_hours) != 2
-                or any(not isinstance(value, time) for value in self.trading_hours)
+                or any(
+                    not isinstance(value, time) or value.tzinfo is not None
+                    for value in self.trading_hours
+                )
             ):
                 raise ValueError(
-                    "trading_hours must be a pair of local time values")
+                    "trading_hours must be a pair of timezone-naive local times"
+                )
+
+    def is_valid_price(self, price: object) -> bool:
+        """Return whether a positive price lies on this instrument's tick grid."""
+        if (
+            isinstance(price, bool)
+            or not isinstance(price, (int, float))
+            or not isfinite(price)
+            or price <= 0
+        ):
+            return False
+        return (
+            Decimal(str(price)) % Decimal(str(self.tick_size))
+        ) == Decimal(0)
+
+    def is_valid_order_quantity(self, quantity: object) -> bool:
+        """Return whether a positive quantity satisfies minimum and lot-size rules."""
+        return (
+            isinstance(quantity, int)
+            and not isinstance(quantity, bool)
+            and quantity >= self.minimum_order_quantity
+            and quantity % self.lot_size == 0
+        )
 
 
 @dataclass(frozen=True, slots=True)

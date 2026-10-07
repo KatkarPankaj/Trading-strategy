@@ -1,6 +1,17 @@
 """Optional AI research layer. Imports nothing from risk, orders, portfolio, brokers or execution."""
 
-from .analyst import AIAnalyst, AIProvider, AIResult, AIUnavailable, NullProvider, news_score, sanitize
+from .analyst import (
+    AIAnalyst,
+    AIProvider,
+    AIResult,
+    AIUnavailable,
+    NullProvider,
+    StrategyRank,
+    StrategySelection,
+    build_strategy_selection,
+    news_score,
+    sanitize,
+)
 from .schemas import (
     TASKS,
     EarningsSchema,
@@ -9,6 +20,8 @@ from .schemas import (
     NewsAnalysisSchema,
     ResearchNoteSchema,
     SignalExplanationSchema,
+    StrategyRankSchema,
+    StrategySelectionSchema,
 )
 
 __all__ = [
@@ -23,7 +36,12 @@ __all__ = [
     "NullProvider",
     "ResearchNoteSchema",
     "SignalExplanationSchema",
+    "StrategyRank",
+    "StrategyRankSchema",
+    "StrategySelection",
+    "StrategySelectionSchema",
     "TASKS",
+    "build_strategy_selection",
     "news_score",
     "sanitize",
 ]

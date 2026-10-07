@@ -68,6 +68,20 @@ class ResearchNoteSchema(_Strict):
     data_gaps: list[str] = Field(default_factory=list, max_length=10)
 
 
+class StrategyRankSchema(_Strict):
+    strategy: str = Field(min_length=1, max_length=80)
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    rationale: str = Field(min_length=1, max_length=1000)
+
+
+class StrategySelectionSchema(_Strict):
+    summary: str = _Text
+    ranked_strategies: list[StrategyRankSchema] = Field(
+        min_length=1, max_length=20)
+    risks: list[str] = Field(default_factory=list, max_length=10)
+    data_gaps: list[str] = Field(default_factory=list, max_length=10)
+
+
 TASKS: dict[str, tuple[type[_Strict], str]] = {
     "news_analysis": (NewsAnalysisSchema, "Analyse the news item and classify its likely market relevance."),
     "earnings": (EarningsSchema, "Extract the earnings result, guidance and key metrics from the text."),
@@ -77,4 +91,10 @@ TASKS: dict[str, tuple[type[_Strict], str]] = {
                            "Explain in plain language why the supplied machine-generated signal data looks the way it does. "
                            "Do not change or second-guess the decision."),
     "research_note": (ResearchNoteSchema, "Write a short research note from the supplied material."),
+    "strategy_selection": (
+        StrategySelectionSchema,
+        "Rank only the supplied deterministic strategy candidates for evaluation against the supplied market research. "
+        "Do not invent strategies, produce trading signals, recommend a trade direction or size, or issue orders. "
+        "Explain uncertainty and data gaps; the ranking is advisory and is not authorization to trade.",
+    ),
 }

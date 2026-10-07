@@ -114,4 +114,4 @@ class YahooProvider(MarketDataProvider):
         idx = pd.DatetimeIndex(df.index)
         df.index = (idx.tz_localize(ZoneInfo(instrument.timezone))
                     if idx.tz is None else idx).tz_convert("UTC")
-        return df[~df.index.duplicated(keep="last")].sort_index()
+        return df

@@ -38,6 +38,7 @@ class ApiContext:
     readiness: Any = None
     kill_switch: Any = None
     monitor: Any = None
+    market_data: Any = None
 
     @property
     def primary(self) -> TradingService:
@@ -54,6 +55,8 @@ def _plain(value: Any) -> Any:
 
 def create_app(ctx: ApiContext) -> FastAPI:
     app = FastAPI(title="Trading Platform API", version="0.1.0")
+    if ctx.market_data is not None:
+        app.add_event_handler("shutdown", ctx.market_data.close)
 
     @app.middleware("http")
     async def show_mode(request: Request, call_next):  # the trading mode is never hidden

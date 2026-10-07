@@ -1,6 +1,7 @@
 """Market data providers and the reliability layer around them."""
 
 from .mock import MockProvider
+from .factory import create_market_data_provider
 from .provider import (
     INTERVALS,
     DataProviderError,
@@ -24,6 +25,7 @@ __all__ = [
     "DataUnavailable",
     "MarketDataProvider",
     "MockProvider",
+    "create_market_data_provider",
     "ProviderTimeout",
     "Quote",
     "RateLimited",

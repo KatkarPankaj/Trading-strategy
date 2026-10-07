@@ -9,7 +9,7 @@ from uuid import UUID
 
 from .audit_trail import AuditContext, live_gaps
 from .executors import TradingMode
-from .models import Instrument, OrderSide, OrderType, RiskDecision, RiskDecisionStatus
+from .models import Instrument, OrderSide, OrderType, RiskDecision, RiskDecisionStatus, Signal, SignalSide
 from .order_management import (
     ManagedOrder,
     OrderManager,
@@ -47,6 +47,7 @@ class OrderTicket:
     # hash of the parameters the strategy is actually running
     parameters_hash: str | None = None
     audit: AuditContext | None = None
+    signal: Signal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,27 +97,74 @@ class TradingService:
         instrument = self.instruments.get(ticket.instrument_id)
         if instrument is None:
             raise UnknownInstrument(ticket.instrument_id)
+        if ticket.signal is not None:
+            if not isinstance(ticket.signal, Signal):
+                raise TypeError("ticket.signal must be a Signal or None")
+            if (ticket.signal.instrument_id != ticket.instrument_id
+                    or ticket.signal.symbol != instrument.symbol
+                    or ticket.signal.strategy != ticket.strategy
+                    or ticket.signal.signal_id != ticket.signal_id
+                    or ticket.signal.side.value != ticket.side.value):
+                raise ValueError("ticket signal identity and side must match the order ticket")
         now = self._clock()
         client_order_id = ticket.client_order_id or new_client_order_id()
 
-        decision = self._halt_decision(ticket, now) or self._risk.evaluate_proposal(
-            instrument, side=ticket.side, quantity=ticket.quantity, order_type=ticket.order_type,
-            created_at=now, context=self._context(ticket, instrument, now),
-            limit_price=ticket.limit_price, stop_price=ticket.stop_price,
-            strategy=ticket.strategy, signal_id=ticket.signal_id)
+        decision = self._halt_decision(ticket, now)
+        market_data = None
+        if decision is None:
+            market_data = self._quotes(ticket.instrument_id)
+            decision = self._risk.evaluate_proposal(
+                instrument, side=ticket.side, quantity=ticket.quantity, order_type=ticket.order_type,
+                created_at=now, context=self._context(ticket, instrument, now, market_data),
+                limit_price=ticket.limit_price, stop_price=ticket.stop_price,
+                strategy=ticket.strategy, signal_id=ticket.signal_id)
         request = OrderRequest(
             client_order_id=client_order_id, instrument_id=instrument.instrument_id,
             symbol=instrument.symbol, side=ticket.side, quantity=ticket.quantity,
             order_type=ticket.order_type, timestamp=now, strategy=ticket.strategy,
             signal_id=ticket.signal_id, limit_price=ticket.limit_price, stop_price=ticket.stop_price)
-        self._record_provenance(client_order_id, ticket, now)
-        self._record_audit(client_order_id, ticket, now, decision)
+        self._record_provenance(client_order_id, ticket, now, market_data)
+        self._record_audit(client_order_id, ticket, now, decision, market_data)
         result = self.order_manager.submit(request, decision)
         if not result.duplicate and not result.order.is_terminal:
             result = SubmissionResult(self.order_manager.sync(client_order_id))
         self._record_broker_response(result.order)
         self._persist(result, decision, actor, "ORDER_SUBMITTED")
         return TicketResult(result.order, decision, result.duplicate)
+
+    def submit_signal(
+        self,
+        signal: Signal,
+        quantity: int,
+        *,
+        actor: str = "system",
+    ) -> TicketResult:
+        """Route a priced deterministic signal through the normal risk/order boundary."""
+        if self.mode is not TradingMode.PAPER:
+            raise RuntimeError("signal submission is currently restricted to PAPER mode")
+        if not isinstance(signal, Signal):
+            raise TypeError("signal must be a Signal")
+        if signal.side not in (SignalSide.BUY, SignalSide.SELL):
+            raise ValueError("only BUY or SELL signals can be submitted")
+        if signal.entry_price is None:
+            raise ValueError("a priced signal is required")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("quantity must be a positive integer")
+        return self.submit(
+            OrderTicket(
+                instrument_id=signal.instrument_id,
+                side=OrderSide(signal.side.value),
+                quantity=quantity,
+                order_type=OrderType.MARKET,
+                strategy=signal.strategy,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                signal_id=signal.signal_id,
+                signal=signal,
+                market_regime=signal.regime,
+            ),
+            actor=actor,
+        )
 
     @property
     def disabled_controls(self) -> dict[str, str]:
@@ -149,13 +197,15 @@ class TradingService:
         return RiskDecision(RiskDecisionStatus.REJECTED, now, f"TRADING_HALTED: {reason}",
                             signal_id=ticket.signal_id)
 
-    def _record_provenance(self, client_order_id: str, ticket: OrderTicket, now: datetime) -> None:
+    def _record_provenance(
+        self, client_order_id: str, ticket: OrderTicket, now: datetime,
+        market_data: tuple[float, datetime] | None,
+    ) -> None:
         """Stored before the order is sent, so every decision can be traced to a strategy version and its data."""
         if self._store is None:
             return
         info = self._provenance_source(
             ticket.strategy) if self._provenance_source is not None else None
-        quote = self._quotes(ticket.instrument_id)
         self._store.execution_records.save(
             client_order_id=client_order_id, mode=self.mode.value, strategy_name=ticket.strategy,
             strategy_version=info.strategy_version if info else "UNVERSIONED",
@@ -163,19 +213,19 @@ class TradingService:
             parameters_hash=ticket.parameters_hash or (
                 info.parameters_hash if info else None),
             signal_id=ticket.signal_id, market_regime=ticket.market_regime,
-            data_timestamp=quote[1] if quote else None, decision_timestamp=now, versioned=info is not None)
+            data_timestamp=market_data[1] if market_data else None,
+            decision_timestamp=now, versioned=info is not None)
 
     def _record_audit(self, client_order_id: str, ticket: OrderTicket, now: datetime,
-                      decision: RiskDecision) -> None:
+                      decision: RiskDecision, market_data: tuple[float, datetime] | None) -> None:
         """Decision inputs are stored before the order is sent; the broker response is added afterwards."""
         if self._store is None:
             return
-        quote = self._quotes(ticket.instrument_id)
         a = ticket.audit or AuditContext()
         self._store.order_audit.record(
             client_order_id,
             market_data={"instrument_id": ticket.instrument_id,
-                         "price": quote[0], "timestamp": quote[1]} if quote else None,
+                         "price": market_data[0], "timestamp": market_data[1]} if market_data else None,
             technical_signals=dict(a.technical_signals) or None, news_signals=dict(a.news_signals) or None,
             ai_analysis_ids=list(a.ai_analysis_ids) or None, strategy_decision_id=a.strategy_decision_id,
             sizing=dict(a.sizing) or None, data_reference=a.data_reference, exit_reason=a.exit_reason,
@@ -209,8 +259,10 @@ class TradingService:
         return order
 
     # ---- internals ----
-    def _context(self, t: OrderTicket, inst: Instrument, now: datetime) -> RiskContext:
-        quote = self._quotes(inst.instrument_id)
+    def _context(
+        self, t: OrderTicket, inst: Instrument, now: datetime,
+        quote: tuple[float, datetime] | None,
+    ) -> RiskContext:
         position = self.portfolio.positions().get(inst.instrument_id)
         orders = self.order_manager.orders()
         open_orders = [o for o in orders if not o.is_terminal]
@@ -233,6 +285,7 @@ class TradingService:
             trades_today=sum(
                 1 for f in self.portfolio.fills if f.timestamp.date() == today),
             intent=t.intent, stop_loss=t.stop_loss, take_profit=t.take_profit,
+            signal=t.signal,
             portfolio=self.portfolio.risk_state(
                 inst.instrument_id, sector=self._sector_of(inst.instrument_id), **stats))
 

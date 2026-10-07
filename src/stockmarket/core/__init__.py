@@ -81,6 +81,22 @@ from .aggregation import (
     SignalAggregator,
     SignalInputs,
 )
+from .strategies import OrbVwapConfig, OrbVwapStrategy, Strategy
+from .regime import (
+    MarketRegimeEvaluator,
+    RegimeAssessment,
+    RegimeConfig,
+    RegimeLabel,
+    RegimeUnavailable,
+    regime_score,
+)
+from .strategy_pipeline import (
+    PipelineStatus,
+    StrategyPipelineConfig,
+    StrategyPipelineResult,
+    StrategyResearchPipeline,
+)
+from .research import ResearchEvidence
 
 __all__ = [
     "AggregatedAction",
@@ -88,6 +104,20 @@ __all__ = [
     "AggregationConfig",
     "SignalAggregator",
     "SignalInputs",
+    "OrbVwapConfig",
+    "OrbVwapStrategy",
+    "Strategy",
+    "MarketRegimeEvaluator",
+    "RegimeAssessment",
+    "RegimeConfig",
+    "RegimeLabel",
+    "RegimeUnavailable",
+    "regime_score",
+    "PipelineStatus",
+    "StrategyPipelineConfig",
+    "StrategyPipelineResult",
+    "StrategyResearchPipeline",
+    "ResearchEvidence",
     "AssetClass",
     "Instrument",
     "Order",
