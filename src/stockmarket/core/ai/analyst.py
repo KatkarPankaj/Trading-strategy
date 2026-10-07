@@ -105,6 +105,14 @@ class AIAnalyst:
         self._max_chars = max_input_chars
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
+    @property
+    def max_input_chars(self) -> int:
+        return self._max_chars
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name
+
     def analyze(self, task: str, text: str, *, context: Mapping[str, Any] | None = None) -> AIResult:
         started = time.monotonic()
         now = self._clock()

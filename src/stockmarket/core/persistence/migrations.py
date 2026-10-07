@@ -158,11 +158,30 @@ _V7 = [
     "CREATE INDEX idx_research_evidence_snapshot ON research_evidence (snapshot_id, component)",
 ]
 
+_V8 = [
+    """CREATE TABLE ai_research_assessments (
+        assessment_id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL REFERENCES research_snapshots(snapshot_id),
+        status TEXT NOT NULL, provider TEXT NOT NULL, model_version TEXT NOT NULL,
+        prompt_version TEXT NOT NULL, schema_version TEXT NOT NULL,
+        assessed_at TEXT NOT NULL, strategy_valid INTEGER NOT NULL,
+        recommended_strategy TEXT, error TEXT, payload TEXT NOT NULL)""",
+    """CREATE TABLE research_opportunities (
+        opportunity_id TEXT PRIMARY KEY,
+        assessment_id TEXT NOT NULL UNIQUE
+            REFERENCES ai_research_assessments(assessment_id),
+        state TEXT NOT NULL, ranking_score DOUBLE PRECISION, lifecycle TEXT NOT NULL,
+        created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+    "CREATE INDEX idx_ai_assessments_snapshot ON ai_research_assessments (snapshot_id, assessed_at)",
+    "CREATE INDEX idx_research_opportunities_rank ON research_opportunities (state, ranking_score)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
     (4, "order_audit", _V4), (5, "proposal_submissions", _V5),
-    (6, "market_scanner", _V6), (7, "candidate_research", _V7)]
+    (6, "market_scanner", _V6), (7, "candidate_research", _V7),
+    (8, "ai_research_assessment", _V8)]
 
 
 def applied_versions(db: Database) -> set[int]:

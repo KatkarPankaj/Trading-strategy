@@ -4,6 +4,8 @@
 
 > **Phase 2B status update:** a separate candidate-research service now persists timestamped snapshots for accepted candidates from RESEARCH scanner runs. It reuses deterministic regime analysis and records source-attributed evidence without invoking AI, generating signals, or entering execution. The historical audit score below has not been recalculated; this addition does not change the NOT READY verdict for autonomous or live trading.
 
+> **Phase 2B-F status update:** a separate, manually invoked service now reads persisted snapshots for strict AI assessment, evidence-citation validation, registered-strategy selection and deterministic opportunity ranking. It ends at `STRATEGY_SELECTED` or `REJECTED`, with no signal/proposal/order side effects. The historical audit score below has not been recalculated; this addition does not change the NOT READY verdict for autonomous or live trading.
+
 ## Executive verdict
 
 **Verdict: NOT READY for autonomous trading. Suitable only for constrained, manually supervised PAPER research and order workflows through the platform API. Not suitable for live trading.**

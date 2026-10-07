@@ -15,6 +15,7 @@ from .analyst import (
 from .openai_compatible import OpenAICompatibleProvider
 from .schemas import (
     TASKS,
+    CandidateAssessmentSchema,
     EarningsSchema,
     EventClassificationSchema,
     MarketSummarySchema,
@@ -31,6 +32,7 @@ __all__ = [
     "AIProvider",
     "AIResult",
     "AIUnavailable",
+    "CandidateAssessmentSchema",
     "EarningsSchema",
     "EventClassificationSchema",
     "MarketSummarySchema",

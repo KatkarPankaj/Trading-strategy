@@ -17,6 +17,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..core.audit_trail import AuditContext, reconstruct
 from ..core.candidate_research import CandidateResearchService
+from ..core.ai.candidate_assessment import (
+    CandidateAssessmentError,
+    CandidateAssessmentService,
+)
 from ..core.executors import LIVE_CONFIRMATION_PHRASE, LiveTradingRefused, TradingMode
 from ..core.kill_switch import KillSwitchError
 from ..core.markets import UnknownMarket
@@ -72,6 +76,7 @@ class ApiContext:
     market_intelligence: MarketIntelligenceOrchestrator | None = None
     scanner: MarketScanner | None = None
     candidate_research: CandidateResearchService | None = None
+    candidate_assessment: CandidateAssessmentService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -294,6 +299,47 @@ def create_app(ctx: ApiContext) -> FastAPI:
                 item["payload"]
                 for item in ctx.store.research_runs.evidence(snapshot_id)
             ],
+        }
+
+    @app.post("/research/assessments/{snapshot_id}", dependencies=[Depends(auth)])
+    def assess_candidate_snapshot(snapshot_id: str) -> dict[str, Any]:
+        if ctx.candidate_assessment is None:
+            raise HTTPException(503, "AI candidate assessment is not configured")
+        try:
+            opportunity = ctx.candidate_assessment.assess(snapshot_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except CandidateAssessmentError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {
+            "research_only": True,
+            "execution": "NOT_SUBMITTED",
+            "risk_status": "NOT_EVALUATED",
+            "opportunity": _plain(opportunity),
+        }
+
+    @app.get("/research/assessments/{assessment_id}", dependencies=[Depends(auth)])
+    def get_candidate_assessment(assessment_id: str) -> dict[str, Any]:
+        if ctx.candidate_assessment is None:
+            raise HTTPException(503, "AI candidate assessment is not configured")
+        assessment = ctx.candidate_assessment.get_assessment(assessment_id)
+        if assessment is None:
+            raise HTTPException(404, "unknown AI research assessment")
+        return assessment
+
+    @app.get("/research/opportunities", dependencies=[Depends(auth)])
+    def list_research_opportunities(
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        if ctx.candidate_assessment is None:
+            raise HTTPException(503, "AI candidate assessment is not configured")
+        return {
+            "research_only": True,
+            "execution": "NOT_SUBMITTED",
+            "risk_status": "NOT_EVALUATED",
+            "opportunities": ctx.candidate_assessment.opportunities(
+                limit=limit, offset=offset),
         }
 
     @app.get("/signals", dependencies=[Depends(auth)])

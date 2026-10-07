@@ -649,6 +649,91 @@ class CandidateResearchRepository(_Repository):
             row["payload"] = json.loads(row["payload"])
         return rows
 
+    def save_opportunity(self, opportunity: Any) -> None:
+        assessment = opportunity.assessment
+        with self._db.transaction():
+            self._db.execute(
+                """INSERT INTO ai_research_assessments
+                   (assessment_id, snapshot_id, status, provider, model_version,
+                    prompt_version, schema_version, assessed_at, strategy_valid,
+                    recommended_strategy, error, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (assessment.assessment_id, assessment.snapshot_id,
+                 assessment.status.value, assessment.provider,
+                 assessment.model_version, assessment.prompt_version,
+                 assessment.schema_version, ts(assessment.assessed_at),
+                 int(assessment.recommended_strategy is not None),
+                 assessment.recommended_strategy, assessment.error,
+                 to_json(assessment)),
+            )
+            ranking_score = (
+                opportunity.ranking.score if opportunity.ranking is not None else None)
+            self._db.execute(
+                """INSERT INTO research_opportunities
+                   (opportunity_id, assessment_id, state, ranking_score,
+                    lifecycle, created_at, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (opportunity.opportunity_id, assessment.assessment_id,
+                 opportunity.state.value, ranking_score,
+                 to_json(opportunity.lifecycle), ts(opportunity.created_at),
+                 to_json(opportunity)),
+            )
+
+    def get_assessment(self, assessment_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM ai_research_assessments WHERE assessment_id = ?",
+            (assessment_id,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        opportunities = self._db.query(
+            """SELECT opportunity_id, state, ranking_score, lifecycle,
+                      created_at, payload
+               FROM research_opportunities WHERE assessment_id = ?""",
+            (assessment_id,),
+        )
+        if opportunities:
+            opportunity = opportunities[0]
+            opportunity["lifecycle"] = json.loads(opportunity["lifecycle"])
+            opportunity["payload"] = json.loads(opportunity["payload"])
+            row["opportunity"] = opportunity
+        return row
+
+    def get_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM research_opportunities WHERE opportunity_id = ?",
+            (opportunity_id,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        row["lifecycle"] = json.loads(row["lifecycle"])
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def list_opportunities(
+        self, *, limit: int = 100, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        rows = self._db.query(
+            """SELECT opportunity_id, assessment_id, state, ranking_score,
+                      lifecycle, created_at, payload
+               FROM research_opportunities
+               ORDER BY CASE WHEN ranking_score IS NULL THEN 1 ELSE 0 END,
+                        ranking_score DESC, created_at DESC, opportunity_id
+               LIMIT ? OFFSET ?""",
+            (limit, offset),
+        )
+        for row in rows:
+            row["lifecycle"] = json.loads(row["lifecycle"])
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
 
 class ProposalSubmissionRepository(_Repository):
     """Durable, one-shot claim and outcome for an accepted research proposal."""

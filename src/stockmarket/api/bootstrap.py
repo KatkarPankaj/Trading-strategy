@@ -16,6 +16,7 @@ from ..core.observability import CheckResult, ErrorCounter, HealthMonitor
 from ..core.order_management import OrderManager
 from ..core.market_session import MarketSession
 from ..core.ai import AIAnalyst
+from ..core.ai.candidate_assessment import CandidateAssessmentService
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.portfolio import PortfolioManager
@@ -180,6 +181,34 @@ def _research_from_env(
             "RESEARCH_SESSIONS is required when an AI provider is configured")
 
     return analyst, sessions, errors
+
+
+def create_candidate_assessment_service(
+    store: Store,
+    instruments: Mapping[str, Instrument],
+    registry: MarketRegistry,
+    *,
+    env: Mapping[str, str] | None = None,
+    research_analyst: AIAnalyst | None = None,
+    research_strategies: Mapping[str, Strategy] | None = None,
+) -> CandidateAssessmentService | None:
+    """Create the snapshot-only AI service without starting data or execution services."""
+    env = os.environ if env is None else env
+    if research_analyst is None:
+        research_analyst, _, errors = _research_from_env(
+            env, registry, tuple(sorted({i.market for i in instruments.values()})))
+        if errors:
+            raise ConfigurationError("; ".join(errors))
+    if research_analyst is None:
+        return None
+    return CandidateAssessmentService(
+        research_analyst,
+        store.research_runs,
+        instruments,
+        registry,
+        research_strategies or {"orb_vwap": OrbVwapStrategy()},
+        model_version=(env.get("AI_MODEL") or "unspecified").strip(),
+    )
 
 
 def build_context(
@@ -421,6 +450,19 @@ def build_context(
         settings=parse_candidate_research_settings(
             (env.get("CANDIDATE_RESEARCH_SETTINGS") or "").strip()),
     )
+    registered_research_strategies = (
+        research_strategies or {"orb_vwap": OrbVwapStrategy()})
+    candidate_assessment = (
+        create_candidate_assessment_service(
+            store,
+            instruments,
+            registry,
+            env=env,
+            research_analyst=research_analyst,
+            research_strategies=registered_research_strategies,
+        )
+        if research_analyst is not None else None
+    )
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
@@ -450,7 +492,7 @@ def build_context(
         research_pipeline = StrategyResearchPipeline(
             market_data,
             research_analyst,
-            research_strategies or {"orb_vwap": OrbVwapStrategy()},
+            registered_research_strategies,
             trading_service=paper,
             news_evidence_producer=news_evidence_producer,
             research_evidence_producers=tuple(research_evidence_producers),
@@ -490,7 +532,8 @@ def build_context(
                       research_sessions=research_sessions or {},
                       market_intelligence=market_intelligence,
                       scanner=scanner,
-                      candidate_research=candidate_research)
+                      candidate_research=candidate_research,
+                      candidate_assessment=candidate_assessment)
 
 
 def create_app_from_env() -> FastAPI:

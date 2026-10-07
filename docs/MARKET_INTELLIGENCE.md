@@ -11,7 +11,7 @@ Persisted RESEARCH scan → ranked accepted candidates
     → timestamped ResearchSnapshot + durable ResearchRun
 ```
 
-It does **not** invoke AI, choose strategies, create deterministic strategy signals, evaluate risk, size positions, stage proposals, submit orders, or call the paper executor. The existing market-intelligence `TradeProposal` and paper submission APIs remain separate. RiskEngine remains the final pre-order gate in that downstream workflow.
+Snapshot creation does **not** invoke AI, choose strategies, create deterministic strategy signals, evaluate risk, size positions, stage proposals, submit orders, or call the paper executor. The separate, manually triggered Phase 2B-F assessment below reads only persisted snapshots and stops at `STRATEGY_SELECTED` or `REJECTED`. The existing market-intelligence `TradeProposal` and paper submission APIs remain separate. RiskEngine remains the final pre-order gate in that downstream workflow.
 
 ## Snapshot contract
 
@@ -26,6 +26,16 @@ Each snapshot is tied to an instrument, a scanner run, and a timezone-aware `as_
 
 `as_of` and observation timestamps must be timezone-aware. Observations after `as_of` are rejected, and the research timestamp cannot predate the scanner run timestamp. Migration V7 stores scanner `as_of` and selected Top-N membership; older scanner runs without that timestamp are rejected as research inputs. Historical news is withheld unless an archive-capable adapter is added; current Finnhub calls are not historical retrieval proof. Likewise, current Yahoo earnings and NSE sector adapters do not declare point-in-time archive support, so their facts are withheld for historical queries. Historical OHLCV can still carry provider restatement/corporate-action risk; it is not an immutable point-in-time data archive.
 
+## Phase 2B-F: AI assessment and deterministic ranking
+
+`CandidateAssessmentService` accepts a persisted snapshot ID only. It constructs a bounded context from the stored snapshot, its source-attributed evidence, the registered instrument/market definitions and the market-calendar phase at the snapshot's `as_of`. It does not call market-data, news, web or other fact providers. It rejects inconsistent identities, non-aware or future timestamps, and future-observed technical/regime scores before invoking AI. Missing, unavailable and rejected components remain distinct; AI cannot override absent critical technical or regime evidence.
+
+The strict `candidate_assessment` schema requires snapshot/instrument identity, directional bias (including `INSUFFICIENT_EVIDENCE`), confidence, an advisory 0–100 AI score, risk flags, cited evidence IDs, invalidating conditions and an explanation. Citation IDs must belong to the persisted snapshot. Model/provider errors, invalid output, insufficient critical evidence and invalid strategy selections are recorded as explicit rejected states. The service then reuses `AIAnalyst.select_strategies()` against the already registered deterministic strategy catalog; an unknown or duplicate strategy cannot be selected.
+
+The final opportunity score is deterministic and bounded to 0–100: evidence completeness 20%, data quality 15%, technical alignment 20%, regime compatibility 15%, AI opportunity score 15%, AI-reported confidence 5%, and registered-strategy availability 10%; each AI risk flag subtracts 5 points up to a 25-point cap. The component contributions and penalty are persisted in the explanation. This is an advisory ranking, not a probability, forecast, trade recommendation, risk approval or profitability claim.
+
+Successful/rejected assessment records persist the complete input context, assessment time, snapshot link, provider, configured model name (`AI_MODEL`, or `unspecified`), prompt/schema versions, prompt/response hashes, registered strategy names and implementation/version metadata (the current strategy contract does not define a version, so it is recorded as `unspecified`), strategy validation, lifecycle and ranking. Migration V8 adds the assessment/opportunity records. The successful lifecycle ends at `STRATEGY_SELECTED`; failures end at `REJECTED`. Neither state creates a signal, a `TradeProposal`, a risk decision, an order, a broker call or an execution event. Phase 2C begins after this boundary.
+
 ## API
 
 All endpoints require the configured bearer token:
@@ -33,6 +43,9 @@ All endpoints require the configured bearer token:
 - `POST /research/candidates` accepts `{ "scan_id": "...", "limit": 20, "as_of": "2026-10-08T20:00:00Z" }`. `as_of` may be omitted to use the service clock, but cannot predate the scanner run's persisted `as_of`. Only selected Top-N candidates from a persisted `RESEARCH` scanner run are eligible; `PAPER` runs are rejected.
 - `GET /research/runs/{run_id}` returns the durable run and its snapshots.
 - `GET /research/snapshots/{snapshot_id}` returns the snapshot and its individually persisted evidence records.
+- `POST /research/assessments/{snapshot_id}` explicitly assesses a persisted snapshot and returns a research-only opportunity. It does not refresh evidence or execute anything.
+- `GET /research/assessments/{assessment_id}` returns the persisted assessment and associated opportunity.
+- `GET /research/opportunities?limit=100&offset=0` lists persisted opportunities in deterministic rank order.
 
 Responses explicitly set `research_only: true`, `execution: "NOT_SUBMITTED"`, and `risk_status: "NOT_EVALUATED"`. Run/snapshot status is `COMPLETE`, `PARTIAL`, or `FAILED`. Missing optional sources are not assigned neutral scores. Because macro and sentiment do not yet have providers, runs will normally be `PARTIAL`.
 
@@ -43,6 +56,8 @@ python -m stockmarket research --scan-id <research-scan-id> --limit 20
 python -m stockmarket research --scan-id <research-scan-id> --as-of 2026-10-08T20:00:00Z
 python -m stockmarket research-show --run-id <research-run-id>
 python -m stockmarket research-show --snapshot-id <snapshot-id>
+python -m stockmarket research-assess --snapshot-id <snapshot-id>
+python -m stockmarket research-assessment-show --assessment-id <assessment-id>
 ```
 
 The command uses the configured database, instrument registry, and market-data provider. Optional news/fundamental/sector adapters are currently wired in the API bootstrap; the CLI run uses the available market-data source and reports other components as missing. CLI output is JSON suitable for manual inspection. Exit code `0` means all requested snapshots completed with all components available; `2` indicates partial or failed coverage.
@@ -76,11 +91,11 @@ Values are validated and bounded. The in-process cache is keyed by instrument, e
 | Point-in-time controls | PARTIAL | Aware timestamps, future-observation rejection, historical provider restrictions, and explicit provenance; historical OHLCV revisions and archive lineage are not solved. |
 | Evidence quality | PARTIAL | Component availability/failure and evidence quality are explicit; no macro/sentiment feed or independent source-quality calibration exists. |
 | Persistence and inspection | IMPLEMENTED | Migration V7 persists research runs, snapshots, and component evidence; authenticated API and CLI expose manual inspection. |
-| AI input/output and opportunity ranking | NOT IMPLEMENTED IN PHASE 2B | Phase 2C should define a strict AI contract over snapshots, rank opportunities, and recommend only registered strategies. |
+| AI input/output and opportunity ranking | IMPLEMENTED IN PHASE 2B-F | Manual snapshot-only assessment, strict output/citation validation, registered-strategy selection, deterministic explainable ranking, provenance and V8 persistence; ends at `STRATEGY_SELECTED` or `REJECTED`. |
 | Execution and risk | UNCHANGED | No signals or orders are produced here. Downstream paper acceptance still requires explicit action and RiskEngine evaluation. |
 
 ## Validation and future work
 
-Focused tests cover persistence and API inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, and future evidence rejection. Phase 2C must add its own schema, prompt/model provenance, deterministic ranking, unavailable-AI behavior, and tests; it must not bypass strategy validation or RiskEngine.
+Focused tests cover snapshot persistence and inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, future evidence rejection, AI schema/citation and provider failures, registered-strategy validation, deterministic ranking, V8 persistence and authenticated assessment API behavior. Phase 2C may proceed after `STRATEGY_SELECTED`, but must continue to preserve deterministic strategy validation and RiskEngine as the final gate.
 
 Historical provider revisions, point-in-time fundamentals and news archives, macro/sentiment providers, source licensing, cache/load behavior at broad-universe scale, and independent calibration remain open work. Nothing in this phase establishes profitability, live readiness, or production suitability.

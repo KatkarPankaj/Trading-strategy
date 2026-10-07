@@ -23,7 +23,7 @@ from .sweep import run_parameter_sweep
 from .validation.robustness import default_parameter_variations, run_robustness_analysis
 from .validation.reports import write_validation_report
 from .validation.walk_forward import WalkForwardConfig, walk_forward_validate
-from .api.bootstrap import instrument_from_row
+from .api.bootstrap import create_candidate_assessment_service, instrument_from_row
 from .core.data import DataPolicy, ResilientProvider, create_market_data_provider
 from .core.markets import default_markets
 from .core.persistence import open_store, to_json
@@ -219,6 +219,16 @@ def _build_parser() -> argparse.ArgumentParser:
     research_show_target = research_show_parser.add_mutually_exclusive_group(required=True)
     research_show_target.add_argument("--run-id")
     research_show_target.add_argument("--snapshot-id")
+
+    research_assess_parser = subparsers.add_parser(
+        "research-assess",
+        help="Assess a persisted candidate snapshot using configured AI research")
+    research_assess_parser.add_argument("--snapshot-id", required=True)
+
+    assessment_show_parser = subparsers.add_parser(
+        "research-assessment-show",
+        help="Inspect a persisted AI research assessment")
+    assessment_show_parser.add_argument("--assessment-id", required=True)
 
     return parser
 
@@ -669,6 +679,55 @@ def cmd_candidate_research_show(
         store.db.close()
 
 
+def cmd_candidate_assess(snapshot_id: str) -> int:
+    settings = load_settings()
+    auto_migrate = (os.environ.get("AUTO_MIGRATE") or (
+        "false" if settings.environment in (Environment.STAGING, Environment.PRODUCTION)
+        else "true")).lower() == "true"
+    store = open_store(settings.database_url.reveal(), migrate_schema=auto_migrate)
+    try:
+        markets = default_markets()
+        instruments = {
+            row["instrument_id"]: instrument_from_row(row)
+            for row in store.instruments.list()
+        }
+        service = create_candidate_assessment_service(
+            store, instruments, markets)
+        if service is None:
+            print("AI candidate assessment is not configured")
+            return 2
+        opportunity = service.assess(snapshot_id)
+        print(to_json({
+            "research_only": True,
+            "execution": "NOT_SUBMITTED",
+            "risk_status": "NOT_EVALUATED",
+            "opportunity": opportunity,
+        }))
+        return 0 if opportunity.state.value == "STRATEGY_SELECTED" else 2
+    except (KeyError, ValueError) as exc:
+        print(str(exc))
+        return 2
+    finally:
+        store.db.close()
+
+
+def cmd_candidate_assessment_show(assessment_id: str) -> int:
+    settings = load_settings()
+    auto_migrate = (os.environ.get("AUTO_MIGRATE") or (
+        "false" if settings.environment in (Environment.STAGING, Environment.PRODUCTION)
+        else "true")).lower() == "true"
+    store = open_store(settings.database_url.reveal(), migrate_schema=auto_migrate)
+    try:
+        assessment = store.research_runs.get_assessment(assessment_id)
+        if assessment is None:
+            print(f"Unknown AI research assessment: {assessment_id}")
+            return 2
+        print(to_json(assessment))
+        return 0
+    finally:
+        store.db.close()
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -678,6 +737,10 @@ def main() -> int:
         return cmd_candidate_research(args.scan_id, args.limit, args.as_of)
     if args.command == "research-show":
         return cmd_candidate_research_show(args.run_id, args.snapshot_id)
+    if args.command == "research-assess":
+        return cmd_candidate_assess(args.snapshot_id)
+    if args.command == "research-assessment-show":
+        return cmd_candidate_assessment_show(args.assessment_id)
     cfg = _load_config(args.config, getattr(args, "symbol", None))
 
     if args.command == "backtest":
