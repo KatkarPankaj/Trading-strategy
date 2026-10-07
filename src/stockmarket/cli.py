@@ -259,6 +259,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Timezone-aware evaluation timestamp",
     )
 
+    risk_evaluation_parser = subparsers.add_parser(
+        "research-risk",
+        help="Size and risk-evaluate one persisted deterministic signal",
+    )
+    risk_evaluation_parser.add_argument("--run-id", required=True)
+    risk_evaluation_parser.add_argument("--candidate-id", required=True)
+    risk_evaluation_parser.add_argument(
+        "--as-of", type=_aware_datetime, default=None,
+        help="Optional timezone-aware risk evaluation timestamp",
+    )
+
     return parser
 
 
@@ -827,6 +838,48 @@ def cmd_signal_generation(
         context.store.db.close()
 
 
+def cmd_research_risk(
+    run_id: str, candidate_id: str, evaluation_as_of: datetime | None,
+) -> int:
+    context = build_context(load_settings())
+    try:
+        service = context.trade_proposals
+        if service is None:
+            print("Trade proposal risk evaluation is unavailable")
+            return 2
+        try:
+            result = service.evaluate(
+                run_id, candidate_id, evaluation_as_of=evaluation_as_of)
+        except (KeyError, ValueError, RuntimeError) as exc:
+            print(f"Risk evaluation refused: {exc}")
+            return 2
+        proposal = result.get("trade_proposal") or {}
+        decision = result.get("risk_decision") or {}
+        print(f"Instrument: {proposal.get('symbol', result.get('symbol', 'unknown'))}")
+        print(f"Strategy: {proposal.get('strategy', result.get('strategy', 'unknown'))}")
+        print(f"Signal: {result.get('signal_id', 'unknown')}")
+        print(f"Entry: {proposal.get('entry_price', result.get('entry_price', 'n/a'))}")
+        print(f"Stop: {proposal.get('stop_price', result.get('stop_price', 'n/a'))}")
+        print(f"Quantity: {proposal.get('quantity', result.get('quantity', 'n/a'))}")
+        print(f"Risk amount: {proposal.get('risk_amount', result.get('risk_amount', 'n/a'))}")
+        print(f"Risk %: {proposal.get('risk_percentage', result.get('risk_percentage', 'n/a'))}")
+        print(f"Exposure: {proposal.get('position_exposure', result.get('position_exposure', 'n/a'))}")
+        decision_status = getattr(decision, "status", None)
+        if decision_status is None and isinstance(decision, dict):
+            decision_status = decision.get("status")
+        decision_status = getattr(decision_status, "value", decision_status)
+        print(f"RiskEngine decision: {decision_status or result.get('status')}")
+        print(f"Proposal ID: {proposal.get('proposal_id', 'none')}")
+        print(f"Rejection reason: {result.get('rejection_reason') or 'none'}")
+        print("ORDER = NOT_SUBMITTED")
+        print(to_json(result))
+        return 0 if result.get("status") == "RISK_APPROVED" else 2
+    finally:
+        if context.market_data is not None:
+            context.market_data.close()
+        context.store.db.close()
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -848,6 +901,8 @@ def main() -> int:
     if args.command == "research-signal":
         return cmd_signal_generation(
             args.run_id, args.candidate_id, args.as_of)
+    if args.command == "research-risk":
+        return cmd_research_risk(args.run_id, args.candidate_id, args.as_of)
     cfg = _load_config(args.config, getattr(args, "symbol", None))
 
     if args.command == "backtest":

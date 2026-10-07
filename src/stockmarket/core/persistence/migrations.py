@@ -208,6 +208,34 @@ _V10 = [
     "CREATE INDEX idx_generated_signals_opportunity ON generated_strategy_signals (opportunity_id, strategy_version)",
 ]
 
+_V11 = [
+    """CREATE TABLE risk_evaluations (
+        evaluation_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL REFERENCES autonomous_research_runs(run_id),
+        candidate_id TEXT NOT NULL,
+        signal_id TEXT NOT NULL REFERENCES signals(signal_id),
+        generation_id TEXT NOT NULL REFERENCES generated_strategy_signals(generation_id),
+        status TEXT NOT NULL, reason TEXT NOT NULL, evaluated_at TEXT NOT NULL,
+        proposal_id TEXT, input_fingerprint TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE trade_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        evaluation_id TEXT NOT NULL UNIQUE REFERENCES risk_evaluations(evaluation_id),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        signal_id TEXT NOT NULL UNIQUE REFERENCES signals(signal_id),
+        run_id TEXT NOT NULL REFERENCES autonomous_research_runs(run_id),
+        candidate_id TEXT NOT NULL, opportunity_id TEXT NOT NULL
+            REFERENCES research_opportunities(opportunity_id),
+        snapshot_id TEXT NOT NULL REFERENCES research_snapshots(snapshot_id),
+        generation_id TEXT NOT NULL REFERENCES generated_strategy_signals(generation_id),
+        instrument_id TEXT NOT NULL, side TEXT NOT NULL, sector TEXT,
+        position_exposure DOUBLE PRECISION NOT NULL,
+        required_cash DOUBLE PRECISION NOT NULL,
+        created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+    "CREATE INDEX idx_risk_evaluations_candidate ON risk_evaluations (run_id, candidate_id, evaluated_at)",
+    "CREATE INDEX idx_trade_proposals_instrument ON trade_proposals (instrument_id, created_at)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -215,7 +243,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (6, "market_scanner", _V6), (7, "candidate_research", _V7),
     (8, "ai_research_assessment", _V8),
     (9, "autonomous_research_orchestrator", _V9),
-    (10, "deterministic_signal_generation", _V10)]
+    (10, "deterministic_signal_generation", _V10),
+    (11, "persisted_trade_proposal_risk_evaluation", _V11)]
 
 
 def applied_versions(db: Database) -> set[int]:

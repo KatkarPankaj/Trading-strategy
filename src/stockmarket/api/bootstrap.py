@@ -25,6 +25,7 @@ from ..core.signal_generation import (
     SignalGenerationService,
     parse_signal_generation_settings,
 )
+from ..core.trade_proposals import TradeProposalService, TradeProposalSettings
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.portfolio import PortfolioManager
@@ -496,6 +497,26 @@ def build_context(
         settings=parse_signal_generation_settings(
             env.get("SIGNAL_GENERATION_SETTINGS")),
     )
+    trade_proposals = TradeProposalService(
+        autonomous_repository=store.autonomous_research,
+        research_repository=store.research_runs,
+        opportunity_repository=store.research_runs,
+        signal_generation_repository=store.signal_generations,
+        signal_repository=store.signals,
+        proposal_repository=store.trade_proposals,
+        portfolio=portfolio,
+        risk_engine=risk_engine,
+        sizing_limits=sizing_limits,
+        instruments=instruments,
+        markets=registry,
+        order_manager=order_manager,
+        market_stats=market_stats,
+        sector_of=sector_of,
+        settings=TradeProposalSettings(
+            max_opportunity_age=signal_generation.settings.max_opportunity_age,
+            max_market_data_age=signal_generation.settings.max_market_data_age,
+        ),
+    )
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
@@ -568,7 +589,8 @@ def build_context(
                       candidate_research=candidate_research,
                       candidate_assessment=candidate_assessment,
                       autonomous_research=autonomous_research,
-                      signal_generation=signal_generation)
+                      signal_generation=signal_generation,
+                      trade_proposals=trade_proposals)
 
 
 def create_app_from_env() -> FastAPI:

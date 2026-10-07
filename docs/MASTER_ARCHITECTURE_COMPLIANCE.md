@@ -8,6 +8,8 @@
 
 > **Phase 2C-1 status update:** a bounded, idempotent PAPER-only research orchestrator now composes scanner → persisted snapshots → AI assessment/ranking → registered strategy selection and durably checkpoints runs/candidates. It rejects LIVE and stops before signal generation or risk/execution. This does not implement the autonomous paper order loop, prove unattended readiness, or change the NOT READY verdict; the historical score has not been recalculated.
 
+> **Phase 2C-3 status update:** persisted deterministic signals can now be sized and evaluated by the existing RiskEngine through a separate PAPER-only advisory workflow. Migration V11 stores risk outcomes and approved terminal TradeProposals; this does not submit orders, invoke brokers/executors, mutate portfolio state, implement Phase 2C-4, prove unattended readiness, or change the NOT READY verdict. The historical score has not been recalculated.
+
 ## Executive verdict
 
 **Verdict: NOT READY for autonomous trading. Suitable only for constrained, manually supervised PAPER research and order workflows through the platform API. Not suitable for live trading.**
@@ -102,8 +104,8 @@ Some risks are captured as `PARTIAL` rather than `ARCHITECTURALLY WRONG` because
 ### Before any `PAPER_AUTONOMOUS` pilot
 
 1. **One order boundary:** disable or explicitly isolate legacy order-producing dashboards, then prove every supported paper entry routes through `TradingService` and `RiskEngine`; reject entries when service, risk limits, quote, calendar, or gate state is unavailable.
-2. **Durable autonomous decision state:** Phase 2C-1 adds persistent research-run identity, request hashes, idempotency keys, scan/research stage links, candidate outcomes and timestamps. It does not yet persist proposals or orders for an autonomous execution loop. On restart, research stages can be reused; no order action is created or resumed.
-3. **Explicit, deterministic sizing:** integrate sizing constraints from validated account/portfolio/market data before the final RiskEngine evaluation. Size must be explainable, bounded, instrument-aware and reject unknown liquidity/FX/constraints.
+2. **Durable autonomous decision state:** Phase 2C-1 adds persistent research-run identity, request hashes, idempotency keys, scan/research stage links, candidate outcomes and timestamps. Phase 2C-3 separately persists risk evaluations and approved terminal TradeProposals; it does not persist or resume autonomous orders. On restart, research/risk records can be inspected; no order action is created or resumed.
+3. **Explicit, deterministic sizing:** Phase 2C-3 integrates `size_position()` before the final RiskEngine evaluation, using configured account/portfolio limits and fail-closed FX/instrument checks. Remaining gaps include timestamped FX quotes, validated liquidity inputs and atomic portfolio reservations spanning evaluation and submission.
 4. **Serialized portfolio-wide decisions:** make position and exposure checks atomic with submission, including concurrent candidates and duplicate proposals. A per-request 10-candidate loop does not supply portfolio-level ranking or reservation.
 5. **Supervised operation:** wire the kill switch and stale-data/broker/database/limit triggers into the running process; demonstrate trigger, cancellation policy, restart persistence, explicit reset and exit allowance under fault injection.
 6. **Evidence and acceptance gate:** define and meet minimum unattended PAPER duration/trade volume, operational error and reconciliation criteria, plus a human review/rollback process before expanding scope.
@@ -135,8 +137,9 @@ All PAPER_AUTONOMOUS blockers are prerequisites. In addition:
 
 ## Technically ordered implementation sequence
 
-1. **Phase 2C-1 — bounded autonomous research orchestration.** Implemented as research-only PAPER orchestration from scanner to persisted evidence to AI ranking and registered strategy selection; migration V9 stores idempotent, resumable checkpoints. This does not implement Phase 2C-2, strategy evaluation, signal generation, risk decisions, proposals, sizing, or order execution.
-3. **Phase 2C-2 — explicit later phase.** If authorized, define and validate any downstream proposal workflow separately; deterministic risk remains the final gate and execution must remain simulated PAPER. No part of this phase is implemented here.
+1. **Phase 2C-1 — bounded autonomous research orchestration.** Implemented as research-only PAPER orchestration from scanner to persisted evidence to AI ranking and registered strategy selection; migration V9 stores idempotent, resumable checkpoints.
+2. **Phase 2C-2 — deterministic signal generation.** Implemented separately; migration V10 persists deterministic signals and provenance from selected opportunities.
+3. **Phase 2C-3 — persisted signal risk evaluation.** Implemented as a distinct terminal PAPER research workflow; migration V11 stores risk evaluations and approved proposals. It does not implement Phase 2C-4 or create orders.
 4. **Execution-boundary inventory and regression coverage.** Legacy dashboard order mutators are isolated and the API remains PAPER/RiskEngine-gated. Maintain inventory and add tests proving all supported new-entry paths preserve that boundary.
 5. **Complete domain coverage and point-in-time provenance.** Obtain/version verified exchange calendars per enabled market; formalize FX quotes with timestamp, source and spread; retain data snapshots/references and policy/version identifiers needed to reproduce a decision.
 6. **Harden sizing and portfolio reservations.** Validate costs and market-specific sizing inputs, enable bounded participation sizing only with verified volume, and replace process-local reservation with cross-process coordination before multi-worker operation. RiskEngine remains the final independent gate.

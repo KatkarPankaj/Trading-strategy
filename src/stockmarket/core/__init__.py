@@ -106,6 +106,7 @@ from .signal_generation import (
     SignalGenerationService,
     SignalGenerationSettings,
 )
+from .trade_proposals import TradeProposalService, TradeProposalSettings
 from .research import (
     FundamentalEvidenceProducer,
     NewsEvidenceCollection,
@@ -145,6 +146,8 @@ __all__ = [
     "TradeProposal",
     "SignalGenerationService",
     "SignalGenerationSettings",
+    "TradeProposalService",
+    "TradeProposalSettings",
     "ResearchEvidence",
     "ResearchObservation",
     "ResearchObservationProvider",

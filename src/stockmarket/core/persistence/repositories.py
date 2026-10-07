@@ -920,6 +920,17 @@ class SignalGenerationRepository(_Repository):
         row["payload"] = json.loads(row["payload"])
         return row
 
+    def get_by_signal(self, signal_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT * FROM generated_strategy_signals
+               WHERE signal_id = ? AND status = 'SIGNAL_GENERATED'""",
+            (signal_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
     def save_result(
         self,
         *,
@@ -1035,6 +1046,177 @@ class SignalGenerationRepository(_Repository):
         return rows
 
 
+class TradeProposalRepository(_Repository):
+    """Durable risk decisions and immutable, risk-approved proposal records."""
+
+    def get_by_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT * FROM risk_evaluations WHERE idempotency_key = ?",
+            (idempotency_key,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def get_by_signal(self, signal_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT e.*, p.payload AS proposal_payload
+               FROM trade_proposals p
+               JOIN risk_evaluations e ON e.evaluation_id = p.evaluation_id
+               WHERE p.signal_id = ?""",
+            (signal_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        proposal = json.loads(row.pop("proposal_payload"))
+        row["payload"] = json.loads(row["payload"])
+        return {"evaluation": row, "payload": proposal}
+
+    def latest_for_signal_candidate(
+        self, run_id: str, candidate_id: str,
+    ) -> dict[str, Any] | None:
+        rows = self._db.query(
+            """SELECT * FROM risk_evaluations
+               WHERE run_id = ? AND candidate_id = ?
+               ORDER BY evaluated_at DESC, evaluation_id DESC LIMIT 1""",
+            (run_id, candidate_id))
+        if not rows:
+            return None
+        row = rows[0]
+        row["payload"] = json.loads(row["payload"])
+        return row
+
+    def has_approved_for_instrument(self, instrument_id: str) -> bool:
+        return bool(self._db.query(
+            "SELECT proposal_id FROM trade_proposals WHERE instrument_id = ? LIMIT 1",
+            (instrument_id,)))
+
+    def approved(self) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT proposal_id, instrument_id, side, sector, position_exposure, "
+            "required_cash, payload FROM trade_proposals ORDER BY created_at, proposal_id")
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
+
+    def save_result(
+        self,
+        *,
+        evaluation_id: str,
+        idempotency_key: str,
+        decision: Any,
+        run_id: str,
+        candidate_id: str,
+        signal_id: str,
+        generation_id: str,
+        evaluated_at: datetime,
+        input_fingerprint: str,
+        context: Mapping[str, Any],
+        sizing: Any,
+        proposal: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        with self._db.transaction():
+            existing = self.get_by_key(idempotency_key)
+            if existing is not None:
+                existing["payload"]["duplicate"] = True
+                return existing
+            existing_proposal = self.get_by_signal(signal_id)
+            if proposal is not None and existing_proposal is not None:
+                existing_proposal["evaluation"]["payload"]["duplicate"] = True
+                return existing_proposal["evaluation"]
+
+            status = decision.status.value
+            if proposal is not None and status != "APPROVED":
+                raise ValueError("a rejected risk decision cannot create a TradeProposal")
+            signal_summary = context.get("signal_summary", {})
+            result = {
+                "evaluation_id": evaluation_id,
+                "status": (
+                    "RISK_APPROVED" if status == "APPROVED" else "RISK_REJECTED"),
+                "decision": decision,
+                "risk_decision": decision,
+                "reason": decision.reason,
+                "rejection_reason": decision.reason if status == "REJECTED" else None,
+                "signal_id": signal_id,
+                "run_id": run_id,
+                "candidate_id": candidate_id,
+                "proposal_id": proposal.get("proposal_id") if proposal else None,
+                "trade_proposal": proposal,
+                "provenance": context,
+                "input_fingerprint": input_fingerprint,
+                "idempotency_key": idempotency_key,
+                "sizing": sizing,
+                "execution": "NOT_SUBMITTED",
+                "order_id": None,
+                "instrument_id": signal_summary.get("instrument_id"),
+                "symbol": signal_summary.get("symbol"),
+                "strategy": signal_summary.get("strategy"),
+                "side": signal_summary.get("side"),
+                "entry_price": signal_summary.get("entry_price"),
+                "stop_price": signal_summary.get("stop_price"),
+                "quantity": getattr(sizing, "quantity", 0),
+            }
+            entry = signal_summary.get("entry_price")
+            stop = signal_summary.get("stop_price")
+            quantity = getattr(sizing, "quantity", 0)
+            fx_rate = context.get("fx_rate_to_account")
+            equity = context.get("equity", 0.0)
+            if proposal is None and all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in (entry, stop, quantity, fx_rate, equity)
+            ) and quantity > 0 and equity > 0 and fx_rate > 0:
+                risk_amount = abs(entry - stop) * fx_rate * quantity
+                exposure = entry * fx_rate * quantity
+                result.update({
+                    "risk_amount": risk_amount,
+                    "risk_percentage": risk_amount / equity,
+                    "position_exposure": exposure,
+                    "portfolio_exposure": (
+                        float(context.get("gross_exposure", 0.0)) + exposure),
+                })
+            elif proposal is not None:
+                result.update({
+                    "risk_amount": proposal.get("risk_amount"),
+                    "risk_percentage": proposal.get("risk_percentage"),
+                    "position_exposure": proposal.get("position_exposure"),
+                    "portfolio_exposure": proposal.get("portfolio_exposure"),
+                })
+            self._db.execute(
+                """INSERT INTO risk_decisions
+                   (decision_id, status, reason, timestamp, signal_id, order_id, payload)
+                   VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+                (str(decision.decision_id), status, decision.reason,
+                 ts(evaluated_at), signal_id,
+                 to_json({"context": context, "sizing": sizing,
+                          "proposal": proposal, "input_fingerprint": input_fingerprint})))
+            self._db.execute(
+                """INSERT INTO risk_evaluations
+                   (evaluation_id, idempotency_key, run_id, candidate_id,
+                    signal_id, generation_id, status, reason, evaluated_at,
+                    proposal_id, input_fingerprint, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (evaluation_id, idempotency_key, run_id, candidate_id,
+                 signal_id, generation_id, status, decision.reason or "",
+                 ts(evaluated_at), proposal.get("proposal_id") if proposal else None,
+                 input_fingerprint, to_json(result)))
+            if proposal is not None:
+                self._db.execute(
+                    """INSERT INTO trade_proposals
+                       (proposal_id, evaluation_id, idempotency_key, signal_id,
+                        run_id, candidate_id, opportunity_id, snapshot_id,
+                        generation_id, instrument_id, side, sector,
+                        position_exposure, required_cash, created_at, payload)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (proposal["proposal_id"], evaluation_id, idempotency_key,
+                     signal_id, run_id, candidate_id, proposal["opportunity_id"],
+                     proposal["snapshot_id"], generation_id,
+                     proposal["instrument_id"], proposal["side"], proposal.get("sector"),
+                     proposal["position_exposure"], proposal["required_cash"],
+                     ts(evaluated_at), to_json(proposal)))
+            return {"payload": result, "duplicate": False}
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -1061,3 +1243,4 @@ class Store:
         self.research_runs = CandidateResearchRepository(db)
         self.autonomous_research = AutonomousResearchRepository(db)
         self.signal_generations = SignalGenerationRepository(db)
+        self.trade_proposals = TradeProposalRepository(db)

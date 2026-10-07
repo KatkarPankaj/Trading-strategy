@@ -75,6 +75,27 @@ python -m stockmarket research-signal --run-id <run-id> --candidate-id <instrume
 
 `SIGNAL_GENERATION_SETTINGS` optionally sets positive `max_opportunity_age_seconds` and `max_market_data_age_seconds`, each capped at seven days (defaults: five minutes). Evaluation does not occur automatically after opportunity selection. Historical evaluation also cannot establish that a mutable third-party data source is point-in-time immutable. This phase generates observations only: it does not create proposals, approve risk, size or submit paper orders, or establish profitability/live readiness.
 
+## Phase 2C-3: persisted signal sizing and risk evaluation
+
+`TradeProposalService` reads the persisted `SIGNAL_GENERATED` record; it does not re-run the strategy or ask AI to generate or alter a signal. Before evaluation it verifies the PAPER run, candidate, generated-signal, opportunity, snapshot and registered strategy-version links; actionable BUY/SELL side; timezone-aware, fresh and non-future timestamps; covered regular market session; tradable instrument constraints; configured FX; and current portfolio/order/proposal exposure. Unsupported SELL/short entries fail closed unless the instrument is explicitly marked shortable. HOLD remains non-actionable. Evaluation is serialized within one service process, but this does not provide cross-process portfolio reservation or support multi-worker risk evaluation.
+
+The existing deterministic `size_position()` computes account-currency quantity from the stored entry/stop, account equity and cash, configured risk and exposure limits, instrument constraints, and portfolio exposure. `RiskEngine` evaluates that sized proposal as the final deterministic gate. Migration V11 persists each risk evaluation and its input fingerprint; a `TradeProposal` row is created only for an approved decision. A persisted approved proposal for the same signal is returned on repeat rather than duplicated. FX provenance identifies `PortfolioManager.rate_to_base` as the configured source; this phase does not provide a timestamped FX quote feed.
+
+This is a terminal advisory artifact. The approved result includes the risk decision, sizing and proposal provenance and explicitly reports `execution: "NOT_SUBMITTED"` and `order_id: null`. It does not call `TradingService.submit()`, `OrderManager`, a broker or executor, create an order, or mutate portfolio positions/cash. It does not implement Phase 2C-4 or enable autonomous/paper/live order placement.
+
+Authenticated API:
+
+- `POST /research/autonomous/{run_id}/candidates/{candidate_id}/risk` evaluates the candidate's persisted signal, optionally at a required-to-be-timezone-aware `evaluation_as_of`.
+- `GET /research/autonomous/{run_id}/candidates/{candidate_id}/risk` returns the latest persisted evaluation.
+
+CLI:
+
+```powershell
+python -m stockmarket research-risk --run-id <run-id> --candidate-id <instrument-or-opportunity-id> --as-of 2026-10-05T13:50:00Z
+```
+
+The timestamp option is optional. Migration V11 must be applied before using the workflow. Automatic evaluation after signal generation is deliberately disabled. Missing calendar coverage, expired research/data, missing configured FX, unsupported instrument state, failed sizing, or a RiskEngine rejection cannot produce an approved proposal.
+
 ## API
 
 All endpoints require the configured bearer token:
@@ -135,6 +156,6 @@ Values are validated and bounded. The in-process cache is keyed by instrument, e
 
 ## Validation and future work
 
-Focused tests cover snapshot persistence and inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, future evidence rejection, AI schema/citation and provider failures, registered-strategy validation, deterministic ranking, V8 persistence and authenticated assessment API behavior. Phase 2C may proceed after `STRATEGY_SELECTED`, but must continue to preserve deterministic strategy validation and RiskEngine as the final gate.
+Focused tests cover snapshot persistence and inspection, `as_of` rejection, paper-scan rejection, source-attributed news, historical-news suppression, future evidence rejection, AI schema/citation and provider failures, registered-strategy validation, deterministic ranking, V8 persistence and authenticated assessment API behavior. Phase 2C-1 through 2C-3 are separate explicit PAPER research stages. Phase 2C-3 preserves deterministic strategy and research provenance, uses RiskEngine as the final gate, and stops at a persisted advisory proposal; Phase 2C-4 is not implemented.
 
 Historical provider revisions, point-in-time fundamentals and news archives, macro/sentiment providers, source licensing, cache/load behavior at broad-universe scale, and independent calibration remain open work. Nothing in this phase establishes profitability, live readiness, or production suitability.

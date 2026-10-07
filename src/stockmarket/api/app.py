@@ -41,6 +41,7 @@ from ..core.persistence import Store, to_json
 from ..core.recovery import RecoveryError
 from ..core.scanner import MarketScanner, ScanPersistenceError, UnknownUniverse
 from ..core.signal_generation import SignalGenerationService
+from ..core.trade_proposals import TradeProposalService
 from ..core.security import Secret
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
@@ -59,6 +60,7 @@ from .schemas import (
     ResearchRunBody,
     ResumeBody,
     SignalGenerationBody,
+    TradeProposalRiskBody,
     ScannerRunBody,
 )
 
@@ -87,6 +89,7 @@ class ApiContext:
     candidate_assessment: CandidateAssessmentService | None = None
     autonomous_research: AutonomousResearchService | None = None
     signal_generation: SignalGenerationService | None = None
+    trade_proposals: TradeProposalService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -348,6 +351,46 @@ def create_app(ctx: ApiContext) -> FastAPI:
         if result is None:
             raise HTTPException(404, "no signal generation result for candidate")
         return _plain(result["payload"])
+
+    @app.post(
+        "/research/autonomous/{run_id}/candidates/{candidate_id}/risk",
+        dependencies=[Depends(auth)],
+    )
+    def evaluate_research_signal_risk(
+        run_id: str,
+        candidate_id: str,
+        body: TradeProposalRiskBody,
+    ) -> dict[str, Any]:
+        if ctx.trade_proposals is None:
+            raise HTTPException(503, "trade proposal risk evaluation is not configured")
+        try:
+            return _plain(ctx.trade_proposals.evaluate(
+                run_id, candidate_id,
+                evaluation_as_of=body.evaluation_as_of,
+            ))
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get(
+        "/research/autonomous/{run_id}/candidates/{candidate_id}/risk",
+        dependencies=[Depends(auth)],
+    )
+    def get_research_signal_risk(
+        run_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any]:
+        if ctx.trade_proposals is None:
+            raise HTTPException(503, "trade proposal risk evaluation is not configured")
+        candidate = ctx.store.autonomous_research.get_candidate(run_id, candidate_id)
+        if candidate is None:
+            raise HTTPException(404, "unknown autonomous research candidate")
+        result = ctx.trade_proposals.get_latest(
+            run_id, candidate["instrument_id"])
+        if result is None:
+            raise HTTPException(404, "no persisted risk evaluation for candidate")
+        return _plain(result)
 
     @app.get("/research/runs/{run_id}", dependencies=[Depends(auth)])
     def get_candidate_research_run(run_id: str) -> dict[str, Any]:
