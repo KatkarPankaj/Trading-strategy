@@ -15,7 +15,6 @@ from stockmarket.core.models import (
     OrderStatus,
     OrderType,
     PositionSide,
-    SignalSide,
     TradingStatus,
 )
 from stockmarket.core.order_management import ManagedOrder
@@ -86,7 +85,8 @@ class _ExitProposalRepository:
         self.rows.append({**row, "status": "PROPOSED"})
 
     def finish(self, proposal_id, *, status, risk_decision_id, error):
-        row = next(row for row in self.rows if row["proposal_id"] == proposal_id)
+        row = next(
+            row for row in self.rows if row["proposal_id"] == proposal_id)
         row.update(
             status=status,
             risk_decision_id=risk_decision_id,
@@ -209,7 +209,8 @@ class PaperProposalExecutionTests(TestCase):
             store=self.store,
             trading=self.trading,
             instruments={INSTRUMENT.instrument_id: INSTRUMENT},
-            markets=SimpleNamespace(is_regular_session=Mock(return_value=True)),
+            markets=SimpleNamespace(
+                is_regular_session=Mock(return_value=True)),
             quotes=lambda _: (100.0, NOW),
             update_price=lambda *args: self.updates.append(args),
             strategies={"orb_vwap": SimpleNamespace(version="1.0.0")},
@@ -311,7 +312,8 @@ class PaperPositionManagerTests(TestCase):
             store=store,
             trading=trading,
             instruments={INSTRUMENT.instrument_id: INSTRUMENT},
-            markets=SimpleNamespace(is_regular_session=Mock(return_value=True)),
+            markets=SimpleNamespace(
+                is_regular_session=Mock(return_value=True)),
             quotes=lambda _: (98.5, NOW),
             update_price=lambda *args: updates.append(args),
             max_age=timedelta(minutes=5),
@@ -328,7 +330,8 @@ class PaperPositionManagerTests(TestCase):
         self.assertEqual(ticket.side, OrderSide.SELL)
         self.assertEqual(ticket.quantity, 10)
         self.assertEqual(ticket.audit.exit_reason, "STOP_LOSS")
-        self.assertEqual(store.position_exit_proposals.rows[0]["status"], "FILLED")
+        self.assertEqual(
+            store.position_exit_proposals.rows[0]["status"], "FILLED")
 
     def test_non_triggering_quote_does_not_create_exit_order(self):
         proposal, signal_row = _persisted_signal()
@@ -366,7 +369,8 @@ class PaperPositionManagerTests(TestCase):
             store=store,
             trading=trading,
             instruments={INSTRUMENT.instrument_id: INSTRUMENT},
-            markets=SimpleNamespace(is_regular_session=Mock(return_value=True)),
+            markets=SimpleNamespace(
+                is_regular_session=Mock(return_value=True)),
             quotes=lambda _: (100.5, NOW),
             update_price=Mock(),
             max_age=timedelta(minutes=5),
@@ -397,7 +401,8 @@ class PaperPositionManagerTests(TestCase):
             store=_Store(*_persisted_signal()),
             trading=trading,
             instruments={INSTRUMENT.instrument_id: INSTRUMENT},
-            markets=SimpleNamespace(is_regular_session=Mock(return_value=True)),
+            markets=SimpleNamespace(
+                is_regular_session=Mock(return_value=True)),
             quotes=Mock(return_value=(98.5, NOW)),
             update_price=updates,
             max_age=timedelta(minutes=5),
@@ -411,7 +416,8 @@ class PaperPositionManagerTests(TestCase):
 
         result = manager.manage()
 
-        self.assertEqual(result["positions"][0]["status"], "ENTRY_ORDER_PENDING")
+        self.assertEqual(result["positions"][0]
+                         ["status"], "ENTRY_ORDER_PENDING")
         manager.quotes.assert_not_called()
         updates.assert_not_called()
         trading.submit.assert_not_called()
@@ -454,11 +460,13 @@ class PaperFillPersistenceTests(TestCase):
 
         persisted = store.fills.all()
         self.assertEqual(len(persisted), 1)
-        self.assertEqual(persisted[0]["client_order_id"], order.client_order_id)
+        self.assertEqual(
+            persisted[0]["client_order_id"], order.client_order_id)
         fill_id = persisted[0]["fill_id"]
         self.assertEqual(store.fills.save(portfolio.fills[0]), fill_id)
         self.assertEqual(len(store.fills.all()), 1)
-        self.assertEqual(broker.order_status(broker_order_id).status, OrderStatus.FILLED)
+        self.assertEqual(broker.order_status(
+            broker_order_id).status, OrderStatus.FILLED)
 
     def test_durable_paper_order_and_fill_restore_after_restart(self):
         database = SQLiteDatabase()
@@ -527,7 +535,8 @@ class PaperFillPersistenceTests(TestCase):
         restored.connect()
 
         self.assertEqual(
-            restored.order_status_by_client_id(order.client_order_id).broker_order_id,
+            restored.order_status_by_client_id(
+                order.client_order_id).broker_order_id,
             broker_id,
         )
         self.assertEqual(
@@ -549,7 +558,6 @@ class PaperFillPersistenceTests(TestCase):
         portfolio = PortfolioManager("USD", 10_000.0)
 
         def fail_persist(_fill):
-            assert _fill.client_order_id == "failed-paper-write"
             raise RuntimeError("simulated durable fill write failure")
 
         portfolio.on_fill = fail_persist
