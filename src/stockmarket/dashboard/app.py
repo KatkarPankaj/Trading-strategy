@@ -84,55 +84,87 @@ def _personal_research(client: ApiClient) -> None:
     status = _safe(client, "/research/personal/status")
     if status is None:
         return
-    st.caption(
-        f"Instruments: {status['instrument_count']} | Provider: {status['provider']} | "
-        f"AI: {status['ai_status']}")
-    with st.expander("Universe discovery and configuration", expanded=not status["instrument_count"]):
-        st.json(status)
-    if status.get("empty_reason"):
-        st.error(status["empty_reason"])
+    initial = _safe(client, "/markets/status")
+    if initial is None:
         return
-    instruments = _safe(client, "/instruments")
-    universes = _safe(client, "/universes")
-    if not instruments or not universes:
-        st.error("No usable instrument universe. Inspect discovery diagnostics.")
+    labels = {"AUTO": "Auto", **{profile["market"]: profile["label"] for profile in initial["profiles"]}}
+    selection = st.selectbox(
+        "Market", list(labels), format_func=labels.get, key="personal_market_selection")
+    context = initial if selection == "AUTO" else _safe(
+        client, "/markets/status", selected_market=selection)
+    if context is None:
         return
-    options = {item["universe"]["universe_id"]: item for item in universes}
-    selected_universe = st.selectbox("Research universe", list(options))
+    resolved = context["resolved_market"]
+    st.subheader(f"Resolved market: {context['label']}")
     st.caption(
-        f"Registered: {options[selected_universe]['instrument_count']}. "
-        "Registration is not proof of tradability, data availability or calendar coverage.")
-    selected_instrument = st.selectbox(
-        "Instrument diagnostics", [item["instrument_id"] for item in instruments])
-    if st.button("Check market data and session"):
-        diagnostics = _safe(client, f"/research/personal/diagnostics/{quote(selected_instrument, safe='')}")
-        if diagnostics is not None:
-            st.json(diagnostics)
-    strategies = status["strategies"]
+        f"Exchange: {context['exchange']} | Currency: {context['currency']} | "
+        f"Timezone: {context['timezone']} | Session: {context['session']} | Status: {context['status']}")
+    st.caption(
+        f"Exchange-local time: {context['local_timestamp']} | "
+        f"Provider: {context['data_provider']} | Resolution: {context['resolution_reason']}")
+    if context["ai_status"] == "CONFIGURED":
+        st.success("AI: Configured (advisory assessment only)")
+    else:
+        st.warning("AI: Not configured - deterministic research still available; final BUY/SHORT withheld.")
+    for limitation in context["limitations"]:
+        st.warning(limitation)
+    with st.expander("Market profiles, sessions and universe discovery"):
+        st.json({"selected_market": selection, "context": context, "discovery": status["discovery"]})
+    options = {item["universe_id"]: item for item in context["universes"]}
+    if not options:
+        st.error("No single-market research universe is configured for this market.")
+        return
+    universe_keys = list(options)
+    selected_universe = st.selectbox(
+        "Research universe", universe_keys,
+        index=universe_keys.index(context["default_universe_id"]),
+        format_func=lambda key: options[key]["name"], key=f"personal_universe_{resolved}")
+    st.caption(
+        f"Registered: {options[selected_universe]['instrument_count']} | "
+        f"Active/tradable metadata: {options[selected_universe]['eligible_metadata_count']}. "
+        "Registration is not proof of data availability or a trade setup.")
+    instruments = _safe(client, "/instruments", market=resolved)
+    if instruments is None:
+        return
+    if instruments:
+        selected_instrument = st.selectbox(
+            "Instrument diagnostics", [item["instrument_id"] for item in instruments],
+            key=f"personal_diagnostics_{resolved}")
+        if st.button("Check market data and session"):
+            diagnostics = _safe(client, f"/research/personal/diagnostics/{quote(selected_instrument, safe='')}")
+            if diagnostics is not None:
+                st.json(diagnostics)
+    strategies = context["supported_strategies"]
     if not strategies:
         st.error("No deterministic strategy is registered.")
         return
-    with st.form("personal_research"):
+    with st.form(f"personal_research_{resolved}"):
         strategy = st.selectbox("Registered deterministic strategy", strategies)
         top_n = st.number_input("Maximum candidates", min_value=1, max_value=10, value=5, step=1)
         st.caption("Decision timestamp defaults to the last five-minute boundary. Future or incomplete bars are excluded.")
-        submitted = st.form_submit_button("Run personal research")
+        submitted = st.form_submit_button("Scan & Research")
     if submitted:
         try:
             result = client.post("/research/personal/runs", {
                 "universe_id": selected_universe, "strategy_name": strategy,
                 "top_n": int(top_n), "idempotency_key": uuid4().hex,
+                "selected_market": selection,
             }, timeout=300)
         except ApiError as exc:
             st.error(str(exc))
         else:
             st.session_state["personal_research_result"] = result
     result = st.session_state.get("personal_research_result")
-    if result:
+    if result and result.get("market_context", {}).get("resolved_market") == resolved:
         _recommendations(result)
 
 
 def _recommendations(result: dict[str, Any]) -> None:
+    if result.get("market_context"):
+        context = result["market_context"]
+        st.caption(
+            f"Run market: {context['label']} | Selected: {context['selected_market']} | "
+            f"{context['session']} | {context['currency']} | {context['timezone']}")
     st.caption(
         f"Run: {result['run_id']} | Status: {result['status']} | "
         f"As-of: {result['as_of']} | EXECUTION: {result['execution']}")

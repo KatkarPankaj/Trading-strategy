@@ -36,7 +36,7 @@ disabled. The development profile requires `PERSONAL_RESEARCH=true`.
 Persisted development-named metadata also prevents subsequent startup in
 execution mode; use a separate verified registry for paper execution.
 Inactive/untradable records remain registered but are rejected by the scanner.
-The development universe alias is bounded to the enabled market's registered
+The development universe alias is bounded to each market's registered
 records; preserved operator records are included, not silently replaced.
 Restart the API after importing metadata so in-memory service maps are refreshed.
 
@@ -45,6 +45,44 @@ market definition and can use a supplied master. US and Xetra have 2026 calendar
 data; India has no covered holiday years. India scans currently reject candidates
 with an explicit unsupported-calendar diagnostic. Session configuration is not
 holiday-calendar coverage and does not bypass this rejection.
+
+## Select a country in the dashboard
+
+The Market selector offers Auto and all backend-registered profiles, currently
+India (NSE/BSE), US (NYSE/NASDAQ/NYSE Arca), and Germany (Xetra).
+Normal switching does not require changes to `MARKETS`, `BASE_CURRENCY`, or
+`RESEARCH_SESSIONS`, an API restart, or a separate country database.
+Personal mode imports all registered markets from the configured master.
+
+[MarketProfileService](../src/stockmarket/core/market_profiles.py) resolves
+exchange-local time, calendar coverage, currency, session, strategy support and
+single-market universe choices. It delegates calendar/session decisions to the
+existing market definitions. The dashboard does not implement exchange clocks.
+Auto prefers regular OPEN, then PRE_MARKET, then POST_MARKET. Ties prefer the
+first configured `MARKETS` entry, then a stable market code. If none is active,
+it displays that default's actual CLOSED, HOLIDAY or UNSUPPORTED_CALENDAR status.
+Manual selection never switches to another country.
+
+US and Xetra calendar files cover 2026 only; uncovered exchange-local years
+report UNSUPPORTED_CALENDAR, including weekends in an uncovered year.
+India remains unsupported until a verified calendar is supplied.
+Germany's covered 2026 sessions can be displayed, but the development master
+contains no German instruments. Its empty universe is explicit, with no
+fabricated recommendation. Auto selects by session, not by whether a master has
+instruments; an open Germany session can therefore resolve to an empty universe.
+
+Research policy defaults use registered open/close/timezone facts: opening range
+15 minutes; India entry 09:45, cutoff 15:00, square-off 15:20; US entry 09:45,
+cutoff 15:00, square-off 15:55; Xetra entry 09:15, cutoff 16:30, square-off 17:25.
+Optional `RESEARCH_SESSIONS` entries override only the named profile's research
+policy. They never manufacture holiday coverage or override an early close.
+Future countries require a market definition, verified calendar, reviewed
+research policy and instrument master; the UI discovers their backend labels.
+
+Selection changes research context, not the persisted execution account's base
+currency, cash, risk limits or holdings. There is no FX conversion assumption.
+AI configuration remains separate and optional; its status is shown before
+research. Missing AI does not block instruments, data, signals or diagnostics.
 
 ## Start on Windows
 
@@ -72,7 +110,6 @@ $env:ENTRY_WINDOW_START = '09:45'
 $env:ENTRY_WINDOW_END = '15:00'
 $env:MAX_POSITION_QUANTITY = '20'
 $env:MAX_ORDER_NOTIONAL = '25000'
-$env:RESEARCH_SESSIONS = '{"IN":{"opening_range_minutes":15,"entry_start":"09:45","entry_cutoff":"15:00","square_off":"15:20","late_entry_start":"12:00"}}'
 .\.venv\Scripts\python.exe -m uvicorn stockmarket.api.bootstrap:create_app_from_env --factory --host 127.0.0.1 --port 8000 --workers 1
 ```
 
@@ -81,14 +118,10 @@ is disabled. The values above preserve the selected India 09:45, quantity 20 and
 INR 25,000 limits; they do not authorize orders. Simulated starting cash defaults
 to INR 100,000, separately from the max-order-notional limit.
 
-For a separate US research database, substitute:
-
-```powershell
-$env:MARKETS = 'US'
-$env:BASE_CURRENCY = 'USD'
-$env:DATABASE_URL = 'sqlite:///outputs/personal_us.db'
-$env:RESEARCH_SESSIONS = '{"US":{"opening_range_minutes":15,"entry_start":"09:45","entry_cutoff":"15:00","square_off":"15:55","late_entry_start":"12:00"}}'
-```
+`MARKETS=IN` and `BASE_CURRENCY=INR` above preserve the existing default/account
+settings, not a restriction to India. Both may be omitted for a new setup
+(defaults US/USD). Leave them unchanged when selecting US or Germany in the UI.
+No `RESEARCH_SESSIONS` setting is required in personal mode, with or without AI.
 
 These times are instrument-local, not fixed UTC. Only covered trading sessions
 and valid, completed, fresh intraday data can produce a strategy setup.
@@ -102,8 +135,10 @@ $env:API_TOKEN_FILE = 'secrets\local_dashboard.secret'
 .\.venv\Scripts\python.exe -m streamlit run dashboard_app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
 ```
 
-Open <http://127.0.0.1:8501/>. The persisted VS Code tasks provide the same India
-research setup and dashboard launch without committing secret values.
+Open <http://127.0.0.1:8501/>. VS Code tasks `Start Personal Research API` and
+`Start platform PAPER dashboard` launch the same international research setup
+while preserving the existing India account/default. They use the selected
+Python interpreter without committing secret values.
 
 ## API and dashboard workflow
 
@@ -116,9 +151,10 @@ $headers = @{Authorization = 'Bearer ' + (Get-Content 'secrets\local_dashboard.s
 Invoke-RestMethod 'http://127.0.0.1:8000/health'
 Invoke-RestMethod 'http://127.0.0.1:8000/instruments' -Headers $headers
 Invoke-RestMethod 'http://127.0.0.1:8000/universes' -Headers $headers
+Invoke-RestMethod 'http://127.0.0.1:8000/markets/status?selected_market=AUTO' -Headers $headers
 Invoke-RestMethod 'http://127.0.0.1:8000/research/personal/status' -Headers $headers
 Invoke-RestMethod 'http://127.0.0.1:8000/research/personal/diagnostics/XNSE:RELIANCE' -Headers $headers
-$body = @{universe_id='IN_LIQUID_DEVELOPMENT'; top_n=5; idempotency_key=[guid]::NewGuid().ToString('N')} | ConvertTo-Json
+$body = @{selected_market='IN'; top_n=5; idempotency_key=[guid]::NewGuid().ToString('N')} | ConvertTo-Json
 Invoke-RestMethod 'http://127.0.0.1:8000/research/personal/runs' -Method Post -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 300
 Invoke-RestMethod 'http://127.0.0.1:8000/research/personal/runs?limit=10' -Headers $headers
 ```
@@ -127,7 +163,22 @@ Alternatively, run the scanner alone with authenticated `POST /scanner/scan`
 and body `{"universe_id":"IN_ALL","mode":"RESEARCH","top_n":5}`.
 Its rejection records remain accessible through the existing scanner routes.
 
-The dashboard Research tab offers universe/registered-strategy selection,
+`GET /markets/status?selected_market=AUTO|IN|US|DE` returns selected/resolved
+market, exchange/MICs, currency, timezone, session/status, local/as-of timestamps,
+calendar coverage, all profile labels, research policy, strategy/universe choices,
+provider, limitations and AI configuration status. Unknown market codes return
+404. `GET /instruments?market=US` filters instruments regardless of the default
+country in personal mode. `GET /markets` retains its market-list envelope.
+
+`POST /research/personal/runs` accepts optional `selected_market`; omitting
+`universe_id` chooses the profile default. A supplied universe must belong only
+to the resolved country. A change of Auto resolution between display and run
+fails visibly rather than scanning a different country's supplied universe.
+Runs persist the resolved profile at the research `as_of` boundary. Idempotent
+replay uses that saved resolution, even if clocks or profiles have changed.
+Older requests supplying only `universe_id` remain compatible.
+
+The dashboard Research tab offers Market and universe/registered-strategy selection,
 individual data diagnostics and bounded research runs. Opportunities displays
 persisted runs after refresh/restart. Each row includes rank, direction, score,
 strategy, quality, AI status, risk flags and reasons. Expand details for entry,
@@ -186,7 +237,8 @@ an app API key. A native Anthropic/Claude endpoint is **not** supported by this
 adapter; do not paste a Claude key into an OpenAI endpoint. Revoke any exposed key.
 No previously pasted key is used by this workflow.
 
-An enabled AI provider also requires explicit `RESEARCH_SESSIONS`. The request
+Personal mode supplies research sessions whether or not AI is configured;
+legacy AI research still requires explicit `RESEARCH_SESSIONS`. The request
 timeout defaults to 20 seconds and is bounded to 1-120 seconds. The existing
 adapter does not implement AI quota-aware retries or a separate rate limiter;
 provider errors/rate limits result in AI_UNAVAILABLE and AVOID, not fallback
@@ -251,3 +303,24 @@ Automated validation uses `PYTHONPATH=src` and
 `python -m unittest discover -s tests`. The suite also emits expected
 rejected-case logs and existing AnyIO resource warnings; those are not evidence
 of a tested live broker or of production readiness.
+
+### International market-selector verification, 2026-10-08
+
+- 17 new focused tests cover profiles, Auto/manual selection, DST mismatch weeks,
+  holidays, early closes, exchange-local year coverage, missing calendars, future
+  registry markets, universe isolation, optional AI, API authentication, saved
+  Auto replay, session overrides and dashboard request wiring.
+- 40 related tests and the full 353-test unittest suite passed. Changed Python
+  files reported no editor diagnostics; changed signatures retained compatible
+  callers, and `git diff --check` passed.
+- Restarted both VS Code tasks. API/dashboard health endpoints responded, with
+  16 registered US/India instruments and execution disabled.
+- At verification time Auto resolved open Xetra; explicit US remained CLOSED
+  instead of switching to Germany. Explicit India stayed India and displayed
+  UNSUPPORTED_CALENDAR. All four selector choices and country-specific counts,
+  currency/timezone/session details and missing-AI messaging were verified.
+- India dashboard research and Germany API research persisted FAILED/
+  no-eligible-candidates outcomes, not fabricated recommendations. Orders and
+  fills stayed zero before and after; the order mutation endpoint returned 403.
+- AI-configured behavior was verified with offline fixtures/configuration, not
+  real credentials or a live model request.

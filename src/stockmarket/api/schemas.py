@@ -21,7 +21,8 @@ _ID = r"^[A-Za-z0-9:._\-^=&]+$"
 class PersonalResearchBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    universe_id: str = Field(min_length=1, max_length=64, pattern=_ID)
+    universe_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=_ID)
+    selected_market: str | None = Field(default=None, min_length=1, max_length=16, pattern=r"^[A-Za-z0-9_-]+$")
     idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     strategy_name: str = Field(default="orb_vwap", min_length=1, max_length=64, pattern=_ID)
     top_n: int = Field(default=10, ge=1, le=10)

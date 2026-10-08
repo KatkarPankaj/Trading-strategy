@@ -17,6 +17,7 @@ from .data.provider import DataProviderError, DataQualityError, interval_delta
 from .data.quality import validate_bars, validate_quote
 from .data.resilient import ResilientProvider
 from .market_session import MarketSession
+from .market_profiles import MarketProfileService
 from .markets import MarketRegistry, SessionPhase
 from .models import Instrument, Signal, SignalSide
 from .persistence import Store, to_json
@@ -48,12 +49,20 @@ class PersonalResearchService:
         strategies: Mapping[str, Strategy], sessions: Mapping[str, MarketSession],
         research: CandidateResearchService, assessment: CandidateAssessmentService | None,
         *, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        default_market: str | None = None,
     ) -> None:
         self.store, self.scanner, self.data = store, scanner, data
         self.instruments, self.markets = dict(instruments), markets
         self.strategies, self.sessions = dict(strategies), dict(sessions)
         self.research, self.assessment, self.clock = research, assessment, clock
         self._lock = RLock()
+        preferred_market = default_market or (
+            next(iter(self.instruments.values())).market if self.instruments else markets.codes()[0])
+        self.market_profiles = MarketProfileService(
+            markets, scanner, strategies, sessions, data_provider=data.name,
+            default_market=preferred_market,
+            clock=lambda: self.clock(),
+        )
 
     def diagnostics(self, instrument_id: str, as_of: datetime | None = None) -> dict[str, Any]:
         instrument = self.instruments.get(instrument_id)
@@ -69,7 +78,7 @@ class PersonalResearchService:
             "research_only": True, "execution": "NOT_SUBMITTED",
             "active": instrument.active, "tradable": instrument.tradable,
             "calendar_covered": covered,
-            "session": market.phase(timestamp).value if covered else "UNSUPPORTED",
+            "session": market.phase(timestamp).value if covered else "UNSUPPORTED_CALENDAR",
         }
         try:
             bars = self.data.get_ohlcv(
@@ -113,8 +122,9 @@ class PersonalResearchService:
         return result
 
     def run(
-        self, universe_id: str, idempotency_key: str, *, as_of: datetime | None = None,
+        self, universe_id: str | None, idempotency_key: str, *, as_of: datetime | None = None,
         strategy_name: str = "orb_vwap", top_n: int = 10,
+        selected_market: str | None = None,
     ) -> dict[str, Any]:
         if strategy_name not in self.strategies:
             raise ValueError("choose a registered deterministic strategy")
@@ -129,17 +139,39 @@ class PersonalResearchService:
             timestamp = self._timestamp(
                 as_of if as_of is not None else
                 datetime.fromisoformat(prior["as_of"]) if prior else None)
-            request_hash = hashlib.sha256(to_json({
+            context = None
+            if selected_market is not None:
+                if not isinstance(selected_market, str):
+                    raise ValueError("selected_market must be a market code or AUTO")
+                saved_context = prior.get("market_context") if prior else None
+                context = (
+                    saved_context if saved_context and
+                    saved_context["selected_market"] == selected_market.upper() else
+                    self.market_profiles.status(selected_market, as_of=timestamp))
+                universe_id = universe_id or context["default_universe_id"]
+                if strategy_name not in context["supported_strategies"]:
+                    raise ValueError("strategy does not support the selected market")
+            if universe_id is None:
+                raise ValueError("a universe or a market with a configured universe is required")
+            request = {
                 "universe_id": universe_id, "as_of": timestamp,
                 "strategy": strategy_name, "top_n": top_n,
-            }).encode()).hexdigest()
+            }
+            if context is not None:
+                request["selected_market"] = context["selected_market"]
+                request["resolved_market"] = context["resolved_market"]
+            request_hash = hashlib.sha256(to_json(request).encode()).hexdigest()
             if prior:
                 if prior["request_hash"] != request_hash:
                     raise ValueError("idempotency key belongs to a different request")
                 if prior["status"] == "RUNNING":
                     raise ValueError("interrupted research run requires a new key; no execution occurred")
                 return prior
-            self.scanner.get_universe(universe_id)
+            definition, _ = self.scanner.get_universe(universe_id)
+            if context is not None and tuple(
+                market.upper() for market in definition.markets
+            ) != (context["resolved_market"],):
+                raise ValueError("universe does not belong to the selected/resolved market; refresh market status")
             run_id = uuid5(NAMESPACE_URL, f"personal-research:{idempotency_key}").hex
             result: dict[str, Any] = {
                 "run_id": run_id, "idempotency_key": idempotency_key,
@@ -152,6 +184,8 @@ class PersonalResearchService:
                 "ranking_method": "existing AI ranking for aligned actionable setups; rejected or AI-unavailable setups score zero",
                 "recommendations": [],
             }
+            if context is not None:
+                result["market_context"] = {key: value for key, value in context.items() if key != "profiles"}
             self.store.personal_research.create(result)
             completed = False
             try:

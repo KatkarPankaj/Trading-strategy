@@ -19,6 +19,16 @@ mutations and halts the entry gate. India remains unsupported by the available
 holiday-calendar coverage, and no real AI access or usable market data should be
 inferred from registry population. See [Personal Research](PERSONAL_RESEARCH.md).
 
+International personal-research update: backend MarketProfileService composes
+existing market definitions, calendar coverage, research-session policy,
+registered strategies and single-country universes. Authenticated market status
+drives Auto/manual dashboard selection, including DST and visible unsupported
+years. Personal startup enables registered research markets independently of the
+execution-account default and supplies overridable research policies without
+requiring AI. Runs persist selected/resolved context; replay retains it.
+US/Xetra coverage remains 2026 only; India is unsupported and the development
+master has no German instruments. No broker/order safety boundary was relaxed.
+
 The repository is a working paper-trading/research simulator with useful features (strategy scoring, backtest, parameter sweep, paper portfolio, and Streamlit dashboards), but it is currently a monolith around India intraday assumptions and UI-driven orchestration.
 
 It is not yet production-grade for live execution and not yet globally extensible by architecture. The highest-risk gaps are:

@@ -227,6 +227,15 @@ def create_app(ctx: ApiContext) -> FastAPI:
 
     @app.get("/markets", dependencies=[Depends(auth)])
     def markets() -> dict[str, Any]:
+        if ctx.personal_research_mode and ctx.personal_research is not None:
+            profiles = ctx.personal_research.market_profiles.status()["profiles"]
+            return {"trading_mode": ctx.mode, "markets": [
+                {**profile, "phase": profile["session"],
+                 "instruments": sum(
+                     instrument.market == profile["market"]
+                     for instrument in ctx.personal_research.instruments.values())}
+                for profile in profiles
+            ]}
         rows = ctx.store.instruments.list()
         counts: dict[str, int] = {}
         for r in rows:
@@ -239,15 +248,36 @@ def create_app(ctx: ApiContext) -> FastAPI:
             if ctx.markets is not None:
                 definition = ctx.markets.get(m)
                 row.update(phase=definition.phase(now).value, currency=definition.currency,
-                           timezone=definition.timezone, calendar_covered=definition.is_covered(now.date()))
+                           timezone=definition.timezone, calendar_covered=definition.is_covered(
+                               now.astimezone(ZoneInfo(definition.timezone)).date()))
             out.append(row)
         return {"trading_mode": ctx.mode, "markets": out}
+
+    @app.get("/markets/status", dependencies=[Depends(auth)])
+    def market_status(
+        selected_market: str = Query(default="AUTO", min_length=1, max_length=16),
+    ) -> dict[str, Any]:
+        if ctx.personal_research is None:
+            raise HTTPException(503, "personal market profiles are not configured")
+        try:
+            result = ctx.personal_research.market_profiles.status(selected_market)
+        except UnknownMarket as exc:
+            raise HTTPException(404, "unknown market") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return _plain({
+            **result,
+            "ai_status": "CONFIGURED" if ctx.personal_research.assessment else "CONFIGURATION_MISSING",
+            "execution": "NOT_SUBMITTED",
+        })
 
     @app.get("/instruments", dependencies=[Depends(auth)])
     def instruments(market: str | None = Query(default=None, max_length=16)) -> list[dict[str, Any]]:
         return _plain([
             row for row in ctx.store.instruments.list(market.upper() if market else None)
-            if row["market"] in ctx.settings.markets])
+            if row["market"] in (
+                ctx.personal_research.markets.codes()
+                if ctx.personal_research_mode and ctx.personal_research else ctx.settings.markets)])
 
     @app.get("/research/personal/status", dependencies=[Depends(auth)])
     def personal_status() -> dict[str, Any]:
@@ -286,6 +316,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
             return ctx.personal_research.run(**body.model_dump())
         except UnknownUniverse as exc:
             raise HTTPException(404, "unknown universe") from exc
+        except UnknownMarket as exc:
+            raise HTTPException(404, "unknown market") from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 

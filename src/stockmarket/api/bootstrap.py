@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from ..core.brokers import PaperBroker
 from ..core.instrument_master import bootstrap_instruments
 from ..core.personal_research import PersonalResearchService
+from ..core.market_profiles import default_research_sessions
 from ..core.executors import TradingMode
 from ..core.models import AssetClass, Instrument, TradingStatus
 from ..core.observability import CheckResult, ErrorCounter, HealthMonitor
@@ -104,6 +105,8 @@ def _research_from_env(
     env: Mapping[str, str],
     registry: MarketRegistry,
     configured_markets: tuple[str, ...],
+    *,
+    default_sessions: Mapping[str, MarketSession] | None = None,
 ) -> tuple[AIAnalyst | None, dict[str, MarketSession], list[str]]:
     errors: list[str] = []
     base_url = (env.get("AI_BASE_URL") or "").strip()
@@ -130,7 +133,7 @@ def _research_from_env(
             except (SecurityError, TypeError, ValueError) as exc:
                 errors.append(f"invalid AI provider configuration: {exc}")
 
-    sessions: dict[str, MarketSession] = {}
+    sessions: dict[str, MarketSession] = dict(default_sessions or {})
     session_data = (env.get("RESEARCH_SESSIONS") or "").strip()
     if session_data:
         try:
@@ -192,7 +195,7 @@ def _research_from_env(
                         errors.append(f"invalid RESEARCH_SESSIONS for {code}: {exc}")
                         continue
                     sessions[code] = session
-    elif ai_configured and analyst is not None:
+    elif ai_configured and analyst is not None and default_sessions is None:
         errors.append(
             "RESEARCH_SESSIONS is required when an AI provider is configured")
 
@@ -251,15 +254,19 @@ def build_context(
               ("ENTRY_WINDOW_START", "ENTRY_WINDOW_END", "MAX_POSITION_QUANTITY", "MAX_ORDER_NOTIONAL")}
     errors += [f"{n} is required" for n, v in needed.items() if not v]
     registry = default_markets()
+    research_markets = registry.codes() if personal_research_mode else settings.markets
     errors += [f"MARKETS lists unknown market {m!r}; known: {list(registry.codes())}"
                for m in settings.markets if m not in registry.codes()]
     env_analyst, env_sessions, research_errors = _research_from_env(
-        env, registry, settings.markets)
+        env, registry, research_markets,
+        default_sessions=default_research_sessions(registry) if personal_research_mode else None)
     errors.extend(research_errors)
     if research_analyst is None:
         research_analyst = env_analyst
     if research_sessions is None:
         research_sessions = env_sessions
+    elif personal_research_mode:
+        research_sessions = {**env_sessions, **research_sessions}
     fundamental_provider_name = (env.get("FUNDAMENTAL_PROVIDER") or "").strip().lower()
     if fundamental_provider_name not in ("", "yahoo"):
         errors.append("FUNDAMENTAL_PROVIDER must be 'yahoo' when set")
@@ -299,7 +306,7 @@ def build_context(
     if sector_provider_name == "nse" and not sector_map:
         errors.append(
             "NSE_SECTOR_INDEX_MAP is required when SECTOR_PROVIDER=nse")
-    if sector_provider_name == "nse" and "IN" not in settings.markets:
+    if sector_provider_name == "nse" and "IN" not in research_markets:
         errors.append("MARKETS must include IN when SECTOR_PROVIDER=nse")
     if sector_map and sector_provider_name != "nse":
         errors.append("NSE_SECTOR_INDEX_MAP requires SECTOR_PROVIDER=nse")
@@ -333,7 +340,7 @@ def build_context(
                         errors.append(
                             f"FINNHUB_SYMBOL_MAP contains invalid key {key!r}")
                         break
-                    if market_code not in settings.markets:
+                    if market_code not in research_markets:
                         errors.append(
                             f"FINNHUB_SYMBOL_MAP market {market_code!r} "
                             "must be included in MARKETS")
@@ -403,7 +410,7 @@ def build_context(
             settings.database_url.reveal(), migrate_schema=auto_migrate)
     except SchemaOutOfDate as exc:
         raise ConfigurationError([str(exc)]) from exc
-    discovery = bootstrap_instruments(store, registry, settings.markets, env)
+    discovery = bootstrap_instruments(store, registry, research_markets, env)
     instruments = {r["instrument_id"]: instrument_from_row(
         r) for r in store.instruments.list()}
     if not personal_research_mode and any(
@@ -418,12 +425,12 @@ def build_context(
         definitions = parse_universe_definitions(configured_universes)
         for definition in definitions:
             if not set(market.upper() for market in definition.markets).issubset(
-                    set(settings.markets)):
+                    set(research_markets)):
                 raise ValueError(
                     f"universe {definition.universe_id!r} contains a market not enabled in MARKETS")
         universe_provider = StaticUniverseProvider(definitions, instruments)
     else:
-        universe_provider = RegistryUniverseProvider(instruments, settings.markets)
+        universe_provider = RegistryUniverseProvider(instruments, research_markets)
         if discovery["development_only"]:
             universe_provider = StaticUniverseProvider(
                 tuple(universe_provider.list_universes()) + tuple(
@@ -433,7 +440,7 @@ def build_context(
                         markets=(code,),
                         instrument_ids=tuple(
                             item.instrument_id for item in instruments.values() if item.market == code),
-                    ) for code in settings.markets
+                    ) for code in research_markets
                 ), instruments)
     fx_rates: dict[str, float] = {}
     for pair in (env.get("FX_RATES") or "").split(","):
@@ -634,10 +641,11 @@ def build_context(
         gate.halt("PERSONAL_RESEARCH", "recommendations only; execution is disabled")
     personal_research = PersonalResearchService(
         store, scanner, market_data,
-        {key: instrument for key, instrument in instruments.items() if instrument.market in settings.markets},
+        {key: instrument for key, instrument in instruments.items() if instrument.market in research_markets},
         registry,
         registered_research_strategies, research_sessions or {},
         candidate_research, candidate_assessment,
+        default_market=settings.markets[0],
     )
 
     live_strategies = tuple(s.strip() for s in (

@@ -357,7 +357,7 @@ class PersonalBootstrapTests(unittest.TestCase):
         }
         context = build_context(load_settings(env), env, store=store)
         self.addCleanup(context.market_data.close)
-        self.assertEqual(len(context.instruments), 10)
+        self.assertEqual(len(context.instruments), 16)
         self.assertIn("PERSONAL_RESEARCH", context.gate.reasons())
         self.assertIsNone(context.autonomous_paper_trading)
         self.assertIsNotNone(context.personal_research)

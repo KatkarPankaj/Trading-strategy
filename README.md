@@ -20,6 +20,10 @@ startup. The dashboard then uses the existing scanner, deterministic ORB/VWAP
 strategy, candidate research and optional AI assessment/ranking. Missing AI does
 not disable discovery, data or strategy signals; it withholds final BUY/SHORT
 recommendations and is shown explicitly. No recommendation guarantees profit.
+Choose Auto, India, US or Germany in the dashboard. Backend profiles resolve
+exchange-local sessions and single-country universes without per-switch
+environment changes. US/Xetra calendar coverage is limited to 2026; India
+remains unsupported and Germany's development universe is empty.
 
 See [Personal Research Setup](docs/PERSONAL_RESEARCH.md) for exact launch commands,
 configuration, diagnostics, API workflow and current India calendar limitations.
@@ -88,7 +92,7 @@ Then open the local URL shown in terminal (usually http://localhost:8501).
 ## Launch API-backed platform dashboard
 This separate Streamlit page reads data from the platform API. It includes advisory research and opportunity ranking, server-backed order review, and an explicit paper-only proposal acceptance form. It cannot create arbitrary orders or bypass the platform RiskEngine.
 
-The API must be running and `API_TOKEN` must match its configured bearer token. `API_BASE_URL` defaults to `http://127.0.0.1:8000` for local use; non-loopback API URLs must use HTTPS. Research requires an approved OpenAI-compatible endpoint configured through `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`/`AI_API_KEY_FILE`, plus explicit `RESEARCH_SESSIONS` for each enabled market. The dashboard does not supply credentials or invent session boundaries; if the API's research components or calendar coverage are unavailable, it reports an API error.
+The API must be running and `API_TOKEN` must match its configured bearer token. `API_BASE_URL` defaults to `http://127.0.0.1:8000` for local use; non-loopback API URLs must use HTTPS. The legacy advisory `/research` route requires an approved OpenAI-compatible endpoint configured through `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`/`AI_API_KEY_FILE`, plus explicit `RESEARCH_SESSIONS` for each enabled market. Personal Research instead supplies backend market-profile sessions and permits deterministic research without AI. The dashboard does not supply credentials or invent session boundaries; if research components or calendar coverage are unavailable, it reports an error or diagnostic.
 
 ```powershell
 $env:PYTHONPATH = "src"

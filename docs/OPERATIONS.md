@@ -97,7 +97,7 @@ NSE may block or rate-limit automated requests; failures make research
 unavailable rather than substituting guessed data. The endpoint is not a
 guaranteed data feed, so verify access and usage terms before operational use.
 
-When AI is configured, set `RESEARCH_SESSIONS` to a JSON object keyed by
+For legacy AI research outside personal mode, set `RESEARCH_SESSIONS` to a JSON object keyed by
 configured market code. Each market entry must explicitly supply
 `opening_range_minutes`, `entry_cutoff`, `square_off`, and `late_entry_start`
 as minutes or local `HH:MM` values respectively. `entry_start` is optional;
@@ -258,6 +258,11 @@ restore in an isolated environment.
 For an explicitly populated development universe, data diagnostics, deterministic
 signals and optional AI-supported recommendations without any paper/live broker
 execution, see [Personal Research Setup](PERSONAL_RESEARCH.md). This mode requires
-`PERSONAL_RESEARCH=true`, an explicit master, and per-market sessions. Migration
+`PERSONAL_RESEARCH=true` and an explicit master. Backend market profiles supply
+default research sessions; dashboard selection switches countries without
+changing environment variables. `MARKETS` sets the Auto tie-break/fallback
+preference and `BASE_CURRENCY` remains an execution-account setting, not a
+research-country switch. Optional `RESEARCH_SESSIONS` overrides policy only;
+calendar validation remains mandatory. Migration
 V15 persists advisory runs; existing execution/recovery workflows below apply
 only when personal mode is disabled and instrument metadata has been verified.
