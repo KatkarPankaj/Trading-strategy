@@ -253,3 +253,11 @@ restore in an isolated environment.
 - The legacy Streamlit applications persist local paper state separately from
   the platform database; back up and migrate those files only through an
   explicit, reviewed process.
+# Personal recommendation-only setup
+
+For an explicitly populated development universe, data diagnostics, deterministic
+signals and optional AI-supported recommendations without any paper/live broker
+execution, see [Personal Research Setup](PERSONAL_RESEARCH.md). This mode requires
+`PERSONAL_RESEARCH=true`, an explicit master, and per-market sessions. Migration
+V15 persists advisory runs; existing execution/recovery workflows below apply
+only when personal mode is disabled and instrument metadata has been verified.

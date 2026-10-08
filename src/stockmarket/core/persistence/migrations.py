@@ -336,6 +336,13 @@ _V14 = [
        ADD COLUMN lease_until TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'""",
 ]
 
+_V15 = [
+    """CREATE TABLE personal_research_runs (
+        run_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+        request_hash TEXT NOT NULL, status TEXT NOT NULL,
+        created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -347,7 +354,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (11, "persisted_trade_proposal_risk_evaluation", _V11),
     (12, "paper_position_exit_proposals", _V12),
     (13, "durable_paper_execution_and_autonomous_cycles", _V13),
-    (14, "autonomous_paper_cycle_lock_leases", _V14)]
+    (14, "autonomous_paper_cycle_lock_leases", _V14),
+    (15, "personal_research_recommendations", _V15)]
 
 
 def applied_versions(db: Database) -> set[int]:

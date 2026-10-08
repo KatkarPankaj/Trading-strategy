@@ -35,6 +35,7 @@ from ..core.paper_lifecycle import (
     PaperPositionManager,
     PaperProposalExecutionService,
 )
+from ..core.personal_research import PersonalResearchService
 from ..core.autonomous_paper_trading import (
     AutonomousPaperCycleError,
     AutonomousPaperTradingService,
@@ -58,6 +59,7 @@ from ..core.trading_service import (
     summarize_trades,
 )
 from .schemas import (
+    PersonalResearchBody,
     CandidateResearchRunBody,
     AutonomousPaperCycleBody,
     AutonomousResearchRunBody,
@@ -103,6 +105,9 @@ class ApiContext:
     paper_proposal_execution: PaperProposalExecutionService | None = None
     paper_position_manager: PaperPositionManager | None = None
     autonomous_paper_trading: AutonomousPaperTradingService | None = None
+    personal_research: PersonalResearchService | None = None
+    personal_research_mode: bool = False
+    instrument_discovery: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def primary(self) -> TradingService:
@@ -127,8 +132,24 @@ def create_app(ctx: ApiContext) -> FastAPI:
 
     @app.middleware("http")
     async def show_mode(request: Request, call_next):  # the trading mode is never hidden
-        response = await call_next(request)
+        path = request.url.path.rstrip("/")
+        execution_path = (
+            path in {"/paper/orders", "/live/orders", "/paper/positions/manage",
+                     "/paper/cycles", "/recovery/resume", "/recovery/reconcile",
+                     "/kill-switch/reset", "/kill-switch/trigger"}
+            or (path.startswith("/paper/cycles/") and path.endswith("/recover"))
+            or (path.startswith("/intelligence/proposals/") and path.endswith("/submit"))
+            or (path.startswith("/orders/") and path.endswith("/cancel"))
+        )
+        if ctx.personal_research_mode and request.method != "GET" and execution_path:
+            response = JSONResponse(
+                {"detail": "PERSONAL_RESEARCH: recommendations only; execution is disabled"},
+                status_code=403)
+        else:
+            response = await call_next(request)
         response.headers["X-Trading-Mode"] = ctx.mode
+        response.headers["X-Application-Mode"] = (
+            "PERSONAL_RESEARCH" if ctx.personal_research_mode else ctx.mode)
         return response
 
     def auth(authorization: str | None = Header(default=None)) -> None:
@@ -197,6 +218,11 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def health() -> JSONResponse:
         report = ctx.health.report()
         report["trading_mode"] = ctx.mode
+        report["application_mode"] = "PERSONAL_RESEARCH" if ctx.personal_research_mode else ctx.mode
+        report["execution_enabled"] = not ctx.personal_research_mode
+        report["instrument_count"] = len(
+            ctx.personal_research.instruments if ctx.personal_research else ctx.instruments)
+        report["ai_research_configured"] = ctx.candidate_assessment is not None
         return JSONResponse(report, status_code=200 if report["status"] != "DOWN" else 503)
 
     @app.get("/markets", dependencies=[Depends(auth)])
@@ -219,7 +245,60 @@ def create_app(ctx: ApiContext) -> FastAPI:
 
     @app.get("/instruments", dependencies=[Depends(auth)])
     def instruments(market: str | None = Query(default=None, max_length=16)) -> list[dict[str, Any]]:
-        return _plain(ctx.store.instruments.list(market.upper() if market else None))
+        return _plain([
+            row for row in ctx.store.instruments.list(market.upper() if market else None)
+            if row["market"] in ctx.settings.markets])
+
+    @app.get("/research/personal/status", dependencies=[Depends(auth)])
+    def personal_status() -> dict[str, Any]:
+        return {
+            "mode": "PERSONAL_RESEARCH" if ctx.personal_research_mode else ctx.mode,
+            "configured": ctx.personal_research is not None,
+            "discovery": dict(ctx.instrument_discovery),
+            "instrument_count": len(
+                ctx.personal_research.instruments if ctx.personal_research else ctx.instruments),
+            "provider": ctx.market_data.name if ctx.market_data else "NOT_CONFIGURED",
+            "ai_status": "CONFIGURED" if ctx.candidate_assessment else "CONFIGURATION_MISSING",
+            "sessions": list(ctx.research_sessions),
+            "strategies": list(ctx.personal_research.strategies) if ctx.personal_research else [],
+            "execution": "NOT_SUBMITTED",
+            "empty_reason": None if (
+                ctx.personal_research.instruments if ctx.personal_research else ctx.instruments
+            ) else "EMPTY_REGISTRY: configure an instrument master and restart API",
+        }
+
+    @app.get("/research/personal/diagnostics/{instrument_id}", dependencies=[Depends(auth)])
+    def personal_diagnostics(instrument_id: str, as_of: datetime | None = None) -> dict[str, Any]:
+        if ctx.personal_research is None:
+            raise HTTPException(503, "personal research service is not configured")
+        try:
+            return _plain(ctx.personal_research.diagnostics(instrument_id, as_of))
+        except KeyError as exc:
+            raise HTTPException(404, "unknown instrument") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/research/personal/runs", dependencies=[Depends(auth)])
+    def personal_run(body: PersonalResearchBody) -> dict[str, Any]:
+        if ctx.personal_research is None:
+            raise HTTPException(503, "personal research service is not configured")
+        try:
+            return ctx.personal_research.run(**body.model_dump())
+        except UnknownUniverse as exc:
+            raise HTTPException(404, "unknown universe") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/research/personal/runs", dependencies=[Depends(auth)])
+    def personal_runs(limit: int = Query(default=10, ge=1, le=100)) -> list[dict[str, Any]]:
+        return ctx.store.personal_research.recent(limit)
+
+    @app.get("/research/personal/runs/{run_id}", dependencies=[Depends(auth)])
+    def personal_run_detail(run_id: str) -> dict[str, Any]:
+        result = ctx.store.personal_research.get(run_id)
+        if result is None:
+            raise HTTPException(404, "unknown personal research run")
+        return result
 
     @app.get("/universes", dependencies=[Depends(auth)])
     def universes() -> list[dict[str, Any]]:

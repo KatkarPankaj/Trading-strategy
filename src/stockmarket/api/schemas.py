@@ -18,6 +18,27 @@ from ..core.risk import OrderIntent
 _ID = r"^[A-Za-z0-9:._\-^=&]+$"
 
 
+class PersonalResearchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    universe_id: str = Field(min_length=1, max_length=64, pattern=_ID)
+    idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    strategy_name: str = Field(default="orb_vwap", min_length=1, max_length=64, pattern=_ID)
+    top_n: int = Field(default=10, ge=1, le=10)
+    as_of: datetime | None = None
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def aware_as_of(cls, value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+        return value
+
+
 def _price() -> Any:
     return Field(default=None, gt=0, allow_inf_nan=False)
 

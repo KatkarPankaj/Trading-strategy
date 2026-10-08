@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import quote
+from uuid import uuid4
 
 import streamlit as st
 
@@ -47,7 +48,12 @@ def main() -> None:
         st.error(str(exc))
     label, level = views.mode_banner(health)
     _banner(label, level)
+    personal = bool(health and health.get("application_mode") == "PERSONAL_RESEARCH")
+    if personal:
+        _banner("PERSONAL RESEARCH - RECOMMENDATION ONLY - EXECUTION DISABLED", "paper")
     st.caption(
+        "Research uses the platform API. Human decision only; no orders are submitted."
+        if personal else
         "Research and order review use the platform API. Only explicit PAPER proposal "
         "acceptance is available here; arbitrary orders cannot be entered.")
     if st.sidebar.button("Refresh"):
@@ -57,7 +63,8 @@ def main() -> None:
                     "Signals", "Portfolio", "Orders", "PnL & drawdown",
                     "Strategies", "News & AI", "Risk", "System health", "Audit log"])
     renderers: list[Callable[[], None]] = [
-        lambda: _research(client), lambda: _opportunities(client),
+        lambda: _personal_research(client) if personal else _research(client),
+        lambda: _personal_results(client) if personal else _opportunities(client),
         lambda: _markets(client), lambda: _signals(client),
         lambda: _portfolio(client), lambda: _orders(client),
         lambda: _pnl(client), lambda: _strategies(client),
@@ -67,6 +74,101 @@ def main() -> None:
     for tab, render in zip(tabs, renderers):
         with tab:
             render()
+
+
+def _personal_research(client: ApiClient) -> None:
+    st.subheader("Personal market research")
+    st.warning(
+        "RECOMMENDATION ONLY. EXECUTION: NOT SUBMITTED. RISK: NOT FINAL EXECUTION AUTHORITY. "
+        "AI confidence is not a probability of profit. Missing AI withholds final BUY/SHORT recommendations.")
+    status = _safe(client, "/research/personal/status")
+    if status is None:
+        return
+    st.caption(
+        f"Instruments: {status['instrument_count']} | Provider: {status['provider']} | "
+        f"AI: {status['ai_status']}")
+    with st.expander("Universe discovery and configuration", expanded=not status["instrument_count"]):
+        st.json(status)
+    if status.get("empty_reason"):
+        st.error(status["empty_reason"])
+        return
+    instruments = _safe(client, "/instruments")
+    universes = _safe(client, "/universes")
+    if not instruments or not universes:
+        st.error("No usable instrument universe. Inspect discovery diagnostics.")
+        return
+    options = {item["universe"]["universe_id"]: item for item in universes}
+    selected_universe = st.selectbox("Research universe", list(options))
+    st.caption(
+        f"Registered: {options[selected_universe]['instrument_count']}. "
+        "Registration is not proof of tradability, data availability or calendar coverage.")
+    selected_instrument = st.selectbox(
+        "Instrument diagnostics", [item["instrument_id"] for item in instruments])
+    if st.button("Check market data and session"):
+        diagnostics = _safe(client, f"/research/personal/diagnostics/{quote(selected_instrument, safe='')}")
+        if diagnostics is not None:
+            st.json(diagnostics)
+    strategies = status["strategies"]
+    if not strategies:
+        st.error("No deterministic strategy is registered.")
+        return
+    with st.form("personal_research"):
+        strategy = st.selectbox("Registered deterministic strategy", strategies)
+        top_n = st.number_input("Maximum candidates", min_value=1, max_value=10, value=5, step=1)
+        st.caption("Decision timestamp defaults to the last five-minute boundary. Future or incomplete bars are excluded.")
+        submitted = st.form_submit_button("Run personal research")
+    if submitted:
+        try:
+            result = client.post("/research/personal/runs", {
+                "universe_id": selected_universe, "strategy_name": strategy,
+                "top_n": int(top_n), "idempotency_key": uuid4().hex,
+            }, timeout=300)
+        except ApiError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state["personal_research_result"] = result
+    result = st.session_state.get("personal_research_result")
+    if result:
+        _recommendations(result)
+
+
+def _recommendations(result: dict[str, Any]) -> None:
+    st.caption(
+        f"Run: {result['run_id']} | Status: {result['status']} | "
+        f"As-of: {result['as_of']} | EXECUTION: {result['execution']}")
+    if result.get("failure"):
+        st.error(result["failure"])
+    rows = result.get("recommendations", [])
+    _table(views.frame([{
+        "Rank": row["rank"], "Instrument": row["instrument_id"],
+        "Direction": row["direction"], "Score": row["score"],
+        "Strategy": row["strategy"], "Data": row["data_quality"],
+        "AI": row["ai_status"], "Risk flags": ", ".join(row["risk_flags"]),
+        "Reason": row["reason"],
+    } for row in rows]), "No eligible recommendations. See scanner diagnostics below.")
+    for row in rows:
+        with st.expander(f"{row['instrument_id']} - signal, prices, AI, regime and evidence"):
+            st.json(row)
+    with st.expander("Scanner diagnostics", expanded=not rows):
+        _table(views.frame([{
+            "Instrument": item["instrument_id"],
+            "Data": item.get("ohlcv_status", item.get("quality_status")),
+            "Provider": item.get("provider_status", item.get("payload", {}).get("provider_status")),
+            "Calendar covered": item.get("calendar_covered", False),
+            "Reasons": ", ".join(item.get("reasons", item.get("payload", {}).get("rejection_reasons", []))),
+        } for item in result.get("diagnostics", [])]))
+    with st.expander("Full persisted provenance"):
+        st.json(result)
+
+
+def _personal_results(client: ApiClient) -> None:
+    st.subheader("Persisted personal recommendations")
+    runs = _safe(client, "/research/personal/runs", limit=10)
+    if not runs:
+        st.info("Run personal research to persist recommendations and rejected-case diagnostics.")
+        return
+    selected = st.selectbox("Research run", [run["run_id"] for run in runs])
+    _recommendations(next(run for run in runs if run["run_id"] == selected))
 
 
 def _research(client: ApiClient) -> None:
@@ -166,7 +268,7 @@ def _opportunities(client: ApiClient) -> None:
     st.subheader("Rank market opportunities")
     st.warning(
         "AI and research evidence are advisory. Proposals are not risk-approved. "
-        "Acceptance is explicit, PAPER-only, and requires an operator-supplied quantity.")
+        "Acceptance is explicit and PAPER-only; sizing and risk checks remain deterministic.")
     instruments = _safe(client, "/instruments")
     if instruments is None:
         return

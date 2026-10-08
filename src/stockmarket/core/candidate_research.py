@@ -21,7 +21,7 @@ import pandas as pd
 from ..news import NewsEvent, NewsProvider, NewsQuery
 from .data.quality import validate_bars
 from .data.provider import DataQualityError, MarketDataProvider, interval_delta
-from .models import Instrument
+from .models import Instrument, Signal
 from .regime import MarketRegimeEvaluator, RegimeConfig, RegimeUnavailable
 from .research import ResearchEvidence, ResearchObservation, ResearchObservationProvider
 
@@ -231,6 +231,7 @@ class CandidateResearchService:
         limit: int = 50,
         run_id: str | None = None,
         max_concurrency: int | None = None,
+        strategy_signals: Mapping[str, Signal] | None = None,
     ) -> tuple[CandidateResearchRun, tuple[ResearchSnapshot, ...]]:
         if not isinstance(scan_id, str) or not scan_id.strip():
             raise ValueError("scan_id must be a non-empty string")
@@ -299,6 +300,33 @@ class CandidateResearchService:
                     failures.append(
                         f"{instrument.instrument_id}:{type(exc).__name__}")
         snapshots.sort(key=lambda item: item.scanner_rank)
+        if strategy_signals:
+            enriched = []
+            for snapshot in snapshots:
+                signal = strategy_signals.get(snapshot.instrument_id)
+                if signal is None:
+                    enriched.append(snapshot)
+                    continue
+                if signal.instrument_id != snapshot.instrument_id or signal.timestamp > timestamp:
+                    raise ValueError("strategy evidence identity or timestamp mismatch")
+                record = ResearchEvidenceRecord(
+                    evidence_id=str(uuid4()), instrument_id=snapshot.instrument_id,
+                    component="strategy", as_of=timestamp, observed_at=signal.timestamp,
+                    retrieved_at=now, source=f"strategy:{signal.strategy}",
+                    quality=EvidenceQuality.VALID,
+                    payload={
+                        "signal_id": str(signal.signal_id), "side": signal.side.value,
+                        "entry_price": signal.entry_price, "stop_loss": signal.stop_loss,
+                        "take_profit": signal.take_profit, "reasons": signal.reasons,
+                    },
+                    provenance={"kind": "deterministic_strategy", "execution": "NOT_SUBMITTED"},
+                )
+                enriched.append(replace(
+                    snapshot, evidence=(*snapshot.evidence, record),
+                    components=(*snapshot.components,
+                                ComponentAssessment("strategy", EvidenceStatus.AVAILABLE, 1, record.source)),
+                ))
+            snapshots = enriched
         status = "FAILED" if not snapshots else ("PARTIAL" if failures or any(
             snapshot.status != "COMPLETE" for snapshot in snapshots) else "COMPLETE")
         run = CandidateResearchRun(

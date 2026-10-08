@@ -54,7 +54,9 @@ class ApiClient:
             raise ApiError(f"API unreachable: {type(exc).__name__}") from exc
         return self._response_json(response, path)
 
-    def post(self, path: str, payload: Mapping[str, Any]) -> Any:
+    def post(self, path: str, payload: Mapping[str, Any], *, timeout: float | None = None) -> Any:
+        if timeout is not None and not 0 < timeout <= 600:
+            raise ValueError("request timeout must be between 0 and 600 seconds")
         headers = self._headers()
         headers["Content-Type"] = "application/json"
         try:
@@ -62,7 +64,7 @@ class ApiClient:
                 f"{self._base}{path}",
                 json=dict(payload),
                 headers=headers,
-                timeout=self._timeout,
+                timeout=self._timeout if timeout is None else timeout,
             )
         except requests.RequestException as exc:
             raise ApiError(f"API unreachable: {type(exc).__name__}") from exc
@@ -92,6 +94,13 @@ class ApiClient:
                 "Proposal submission was rejected as stale or conflicting (409); "
                 "regenerate and review the proposal.", 409)
         if not response.ok:
+            if path.startswith("/research/personal/"):
+                try:
+                    detail = response.json().get("detail", "Request rejected")
+                except requests.exceptions.JSONDecodeError:
+                    detail = "Server returned a non-JSON error; inspect API logs and persisted run status"
+                raise ApiError(
+                    f"Personal research error {response.status_code}: {detail}", response.status_code)
             raise ApiError(
                 f"API error {response.status_code} for {path}", response.status_code)
         return response.json()

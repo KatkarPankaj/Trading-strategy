@@ -1724,12 +1724,43 @@ class PositionExitEvaluationRepository(_Repository):
         return rows
 
 
+class PersonalResearchRepository(_Repository):
+    def get(self, run_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT payload FROM personal_research_runs WHERE run_id = ?", (run_id,))
+        return json.loads(rows[0]["payload"]) if rows else None
+
+    def get_by_key(self, key: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT payload FROM personal_research_runs WHERE idempotency_key = ?", (key,))
+        return json.loads(rows[0]["payload"]) if rows else None
+
+    def recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT payload FROM personal_research_runs ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [json.loads(row["payload"]) for row in rows]
+
+    def create(self, payload: Mapping[str, Any]) -> None:
+        self._db.execute(
+            """INSERT INTO personal_research_runs
+               (run_id, idempotency_key, request_hash, status, created_at, payload)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (payload["run_id"], payload["idempotency_key"], payload["request_hash"],
+             payload["status"], payload["created_at"], to_json(payload)))
+
+    def finish(self, payload: Mapping[str, Any]) -> None:
+        self._db.execute(
+            "UPDATE personal_research_runs SET status = ?, payload = ? WHERE run_id = ?",
+            (payload["status"], to_json(payload), payload["run_id"]))
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
     def __init__(self, db: Database) -> None:
         self.db = db
         self.instruments = InstrumentRepository(db)
+        self.personal_research = PersonalResearchRepository(db)
         self.market_data = MarketDataMetadataRepository(db)
         self.signals = SignalRepository(db)
         self.risk_decisions = RiskDecisionRepository(db)

@@ -1,0 +1,18 @@
+[
+  {"market":"US","mic":"XNAS","symbol":"AAPL","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"AAPL","shortable":false,"name":"DEVELOPMENT: Apple"},
+  {"market":"US","mic":"XNAS","symbol":"MSFT","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"MSFT","shortable":false,"name":"DEVELOPMENT: Microsoft"},
+  {"market":"US","mic":"XNAS","symbol":"NVDA","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"NVDA","shortable":false,"name":"DEVELOPMENT: NVIDIA"},
+  {"market":"US","mic":"XNAS","symbol":"AMZN","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"AMZN","shortable":false,"name":"DEVELOPMENT: Amazon"},
+  {"market":"US","mic":"XNAS","symbol":"META","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"META","shortable":false,"name":"DEVELOPMENT: Meta"},
+  {"market":"US","mic":"XNAS","symbol":"GOOGL","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"GOOGL","shortable":false,"name":"DEVELOPMENT: Alphabet"},
+  {"market":"US","mic":"XNAS","symbol":"TSLA","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"TSLA","shortable":false,"name":"DEVELOPMENT: Tesla"},
+  {"market":"US","mic":"XNAS","symbol":"AMD","asset_class":"EQUITY","tick_size":0.01,"provider_symbol":"AMD","shortable":false,"name":"DEVELOPMENT: AMD"},
+  {"market":"US","mic":"ARCX","symbol":"SPY","asset_class":"ETF","tick_size":0.01,"provider_symbol":"SPY","shortable":false,"name":"DEVELOPMENT: SPDR S&P 500 ETF"},
+  {"market":"US","mic":"XNAS","symbol":"QQQ","asset_class":"ETF","tick_size":0.01,"provider_symbol":"QQQ","shortable":false,"name":"DEVELOPMENT: Invesco QQQ ETF"},
+  {"market":"IN","mic":"XNSE","symbol":"RELIANCE","asset_class":"EQUITY","tick_size":0.05,"provider_symbol":"RELIANCE.NS","shortable":false,"name":"DEVELOPMENT: Reliance"},
+  {"market":"IN","mic":"XNSE","symbol":"TCS","asset_class":"EQUITY","tick_size":0.05,"provider_symbol":"TCS.NS","shortable":false,"name":"DEVELOPMENT: Tata Consultancy Services"},
+  {"market":"IN","mic":"XNSE","symbol":"INFY","asset_class":"EQUITY","tick_size":0.05,"provider_symbol":"INFY.NS","shortable":false,"name":"DEVELOPMENT: Infosys"},
+  {"market":"IN","mic":"XNSE","symbol":"HDFCBANK","asset_class":"EQUITY","tick_size":0.05,"provider_symbol":"HDFCBANK.NS","shortable":false,"name":"DEVELOPMENT: HDFC Bank"},
+  {"market":"IN","mic":"XNSE","symbol":"ICICIBANK","asset_class":"EQUITY","tick_size":0.05,"provider_symbol":"ICICIBANK.NS","shortable":false,"name":"DEVELOPMENT: ICICI Bank"},
+  {"market":"IN","mic":"XNSE","symbol":"SBIN","asset_class":"EQUITY","tick_size":0.05,"provider_symbol":"SBIN.NS","shortable":false,"name":"DEVELOPMENT: State Bank of India"}
+]

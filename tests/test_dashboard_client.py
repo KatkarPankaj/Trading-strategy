@@ -108,6 +108,23 @@ class ApiClientTests(unittest.TestCase):
         self.assertIn("API unreachable: ConnectionError", str(raised.exception))
         self.assertNotIn("private connection detail", str(raised.exception))
 
+    @patch("stockmarket.dashboard.client.requests.post")
+    def test_personal_research_has_bounded_timeout_and_clear_rejection(self, post):
+        post.return_value = self.response(status_code=409, payload={
+            "detail": "idempotency key belongs to a different request"})
+        with self.assertRaisesRegex(ApiError, "different request"):
+            self.client.post("/research/personal/runs", {}, timeout=300)
+        self.assertEqual(post.call_args.kwargs["timeout"], 300)
+        with self.assertRaises(ValueError):
+            self.client.post("/research/personal/runs", {}, timeout=601)
+
+    @patch("stockmarket.dashboard.client.requests.post")
+    def test_personal_non_json_error_is_visible_without_crashing_json_parser(self, post):
+        post.return_value = self.response(status_code=500)
+        post.return_value.json.side_effect = requests.exceptions.JSONDecodeError("invalid", "", 0)
+        with self.assertRaisesRegex(ApiError, "persisted run status"):
+            self.client.post("/research/personal/runs", {})
+
 
 if __name__ == "__main__":
     unittest.main()

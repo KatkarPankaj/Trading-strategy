@@ -8,6 +8,17 @@ Scope: Non-destructive audit of the legacy implementation (baseline). Revised af
 
 ## 1) Executive Summary
 
+Current personal-research update: the empty instrument selector was traced to
+API startup reading an unpopulated instrument repository; registry universes and
+price providers do not discover a master. Explicit development/configured JSON
+bootstrap now imports validated canonical records transactionally through the
+existing repository and preserves existing metadata. Personal recommendation
+composition reuses scanner, ORB/VWAP, candidate snapshots and optional existing
+AI assessment/ranking; V15 persists runs. PERSONAL_RESEARCH blocks execution
+mutations and halts the entry gate. India remains unsupported by the available
+holiday-calendar coverage, and no real AI access or usable market data should be
+inferred from registry population. See [Personal Research](PERSONAL_RESEARCH.md).
+
 The repository is a working paper-trading/research simulator with useful features (strategy scoring, backtest, parameter sweep, paper portfolio, and Streamlit dashboards), but it is currently a monolith around India intraday assumptions and UI-driven orchestration.
 
 It is not yet production-grade for live execution and not yet globally extensible by architecture. The highest-risk gaps are:

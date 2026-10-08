@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start India PAPER API",
+			"type": "shell",
+			"command": "$env:PYTHONPATH='src'; $env:APP_ENV='development'; $env:TRADING_MODE='paper'; $env:ENABLE_LIVE_TRADING='false'; $env:PERSONAL_RESEARCH='true'; $env:INSTRUMENT_BOOTSTRAP='development'; $env:MARKETS='IN'; $env:BASE_CURRENCY='INR'; $env:DATA_PROVIDER='yahoo'; $env:DATABASE_URL='sqlite:///outputs/paper_india.db'; $env:ENTRY_WINDOW_START='09:45'; $env:ENTRY_WINDOW_END='15:00'; $env:MAX_POSITION_QUANTITY='20'; $env:MAX_ORDER_NOTIONAL='25000'; $env:RESEARCH_SESSIONS=(@{IN=@{opening_range_minutes=15;entry_start='09:45';entry_cutoff='15:00';square_off='15:20';late_entry_start='12:00'}} | ConvertTo-Json -Compress); $env:API_TOKEN_FILE='secrets\\local_dashboard.secret'; & '${command:python.interpreterPath}' -m uvicorn stockmarket.api.bootstrap:create_app_from_env --factory --host 127.0.0.1 --port 8000 --workers 1",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Start platform PAPER dashboard",
+			"type": "shell",
+			"command": "$env:PYTHONPATH='src'; $env:API_BASE_URL='http://127.0.0.1:8000'; $env:API_TOKEN_FILE='secrets\\local_dashboard.secret'; & '${command:python.interpreterPath}' -m streamlit run dashboard_app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

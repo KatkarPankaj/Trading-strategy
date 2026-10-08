@@ -10,6 +10,8 @@ from typing import Any, Callable, Mapping
 from fastapi import FastAPI
 
 from ..core.brokers import PaperBroker
+from ..core.instrument_master import bootstrap_instruments
+from ..core.personal_research import PersonalResearchService
 from ..core.executors import TradingMode
 from ..core.models import AssetClass, Instrument, TradingStatus
 from ..core.observability import CheckResult, ErrorCounter, HealthMonitor
@@ -53,6 +55,7 @@ from ..core.scanner import (
     MarketScanner,
     RegistryUniverseProvider,
     StaticUniverseProvider,
+    UniverseDefinition,
     parse_scanner_settings,
     parse_universe_definitions,
 )
@@ -108,7 +111,7 @@ def _research_from_env(
     api_key_value = (env.get("AI_API_KEY") or "").strip()
     api_key_file = (env.get("AI_API_KEY_FILE") or "").strip()
     timeout_value = (env.get("AI_TIMEOUT_SECONDS") or "").strip()
-    ai_configured = any((base_url, model, api_key_value, timeout_value))
+    ai_configured = any((base_url, model, api_key_value, api_key_file, timeout_value))
     analyst: AIAnalyst | None = None
 
     if ai_configured:
@@ -238,6 +241,12 @@ def build_context(
     """`market_stats` supplies liquidity, slippage and correlation per instrument; without it, entries are rejected (fail closed)."""
     env = os.environ if env is None else env
     errors: list[str] = []
+    personal_value = (env.get("PERSONAL_RESEARCH") or "false").lower()
+    if personal_value not in {"true", "false"}:
+        errors.append("PERSONAL_RESEARCH must be true or false")
+    personal_research_mode = personal_value == "true"
+    if personal_research_mode and settings.execution.mode is not TradingMode.PAPER:
+        errors.append("PERSONAL_RESEARCH requires PAPER mode")
     needed = {n: (env.get(n) or "").strip() for n in
               ("ENTRY_WINDOW_START", "ENTRY_WINDOW_END", "MAX_POSITION_QUANTITY", "MAX_ORDER_NOTIONAL")}
     errors += [f"{n} is required" for n, v in needed.items() if not v]
@@ -394,8 +403,14 @@ def build_context(
             settings.database_url.reveal(), migrate_schema=auto_migrate)
     except SchemaOutOfDate as exc:
         raise ConfigurationError([str(exc)]) from exc
+    discovery = bootstrap_instruments(store, registry, settings.markets, env)
     instruments = {r["instrument_id"]: instrument_from_row(
         r) for r in store.instruments.list()}
+    if not personal_research_mode and any(
+            (instrument.name or "").startswith("DEVELOPMENT") for instrument in instruments.values()):
+        raise ConfigurationError([
+            "development instrument metadata requires PERSONAL_RESEARCH=true; "
+            "verify exchange metadata before using a separate paper-execution registry"])
     scanner_settings = parse_scanner_settings(
         (env.get("SCANNER_SETTINGS") or "").strip())
     configured_universes = (env.get("SCANNER_UNIVERSES") or "").strip()
@@ -409,6 +424,17 @@ def build_context(
         universe_provider = StaticUniverseProvider(definitions, instruments)
     else:
         universe_provider = RegistryUniverseProvider(instruments, settings.markets)
+        if discovery["development_only"]:
+            universe_provider = StaticUniverseProvider(
+                tuple(universe_provider.list_universes()) + tuple(
+                    UniverseDefinition(
+                        universe_id=f"{code}_LIQUID_DEVELOPMENT",
+                        name=f"Bounded {code} development research universe (not an authoritative master)",
+                        markets=(code,),
+                        instrument_ids=tuple(
+                            item.instrument_id for item in instruments.values() if item.market == code),
+                    ) for code in settings.markets
+                ), instruments)
     fx_rates: dict[str, float] = {}
     for pair in (env.get("FX_RATES") or "").split(","):
         if "=" in pair:
@@ -572,7 +598,7 @@ def build_context(
             gate=gate,
             max_candidates=autonomous_research.settings.max_candidates,
         )
-        if autonomous_research is not None else None
+        if autonomous_research is not None and not personal_research_mode else None
     )
     research_pipeline = None
     market_intelligence = None
@@ -604,6 +630,15 @@ def build_context(
                                broker=broker, gate=gate)
     # connects the broker, restores orders, and halts entries on any discrepancy
     recovery.recover()
+    if personal_research_mode:
+        gate.halt("PERSONAL_RESEARCH", "recommendations only; execution is disabled")
+    personal_research = PersonalResearchService(
+        store, scanner, market_data,
+        {key: instrument for key, instrument in instruments.items() if instrument.market in settings.markets},
+        registry,
+        registered_research_strategies, research_sessions or {},
+        candidate_research, candidate_assessment,
+    )
 
     live_strategies = tuple(s.strip() for s in (
         env.get("LIVE_STRATEGIES") or "").split(",") if s.strip())
@@ -620,7 +655,7 @@ def build_context(
         unexpected_positions=lambda: [
             d.subject for d in reconcile_positions(portfolio, broker)],
         cancel_open_orders=(env.get("KILL_SWITCH_CANCEL_ORDERS") or "").lower() == "true")
-    if (env.get("KILL_SWITCH_AUTO") or "").lower() == "true":
+    if not personal_research_mode and (env.get("KILL_SWITCH_AUTO") or "").lower() == "true":
         monitor.start(float(env.get("KILL_SWITCH_INTERVAL_SECONDS") or 5))
     checker = LiveReadinessChecker(
         settings=settings, broker=broker, store=store, health=health, recovery=recovery, gate=gate,
@@ -640,7 +675,10 @@ def build_context(
                       trade_proposals=trade_proposals,
                       paper_proposal_execution=paper_proposal_execution,
                       paper_position_manager=paper_position_manager,
-                      autonomous_paper_trading=autonomous_paper_trading)
+                      autonomous_paper_trading=None if personal_research_mode else autonomous_paper_trading,
+                      personal_research=personal_research,
+                      personal_research_mode=personal_research_mode,
+                      instrument_discovery=discovery)
 
 
 def create_app_from_env() -> FastAPI:

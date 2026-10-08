@@ -11,6 +11,21 @@ See [Platform Architecture](docs/ARCHITECTURE.md) for system boundaries and
 [Platform Operations](docs/OPERATIONS.md) for API setup, secrets, deployment,
 backup, and recovery.
 
+## Personal research and human decisions
+
+Use `PERSONAL_RESEARCH=true` for a recommendation-only application with no broker
+execution, including no paper order submission. An explicit development master
+or configurable JSON master populates the existing instrument repository at
+startup. The dashboard then uses the existing scanner, deterministic ORB/VWAP
+strategy, candidate research and optional AI assessment/ranking. Missing AI does
+not disable discovery, data or strategy signals; it withholds final BUY/SHORT
+recommendations and is shown explicitly. No recommendation guarantees profit.
+
+See [Personal Research Setup](docs/PERSONAL_RESEARCH.md) for exact launch commands,
+configuration, diagnostics, API workflow and current India calendar limitations.
+The older research and paper-execution paths below remain available when this
+mode is disabled, using separately verified instrument metadata.
+
 ## Product Goal
 - Start with a defined budget. Default budget is `Rs 200000`.
 - Scan market data and generate actionable intraday buy/sell candidates.
