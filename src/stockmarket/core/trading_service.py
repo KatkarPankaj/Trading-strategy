@@ -13,7 +13,7 @@ from .audit_trail import AuditContext, live_gaps
 from .executors import TradingMode
 from .models import (
     Instrument, OrderSide, OrderType, PositionSide, RiskDecision,
-    RiskDecisionStatus, Signal, SignalSide,
+    RiskDecisionStatus, Signal, SignalSide, TradeIntent, coerce_trade_intent,
 )
 from .order_management import (
     ManagedOrder,
@@ -58,6 +58,35 @@ class OrderTicket:
     parameters_hash: str | None = None
     audit: AuditContext | None = None
     signal: Signal | None = None
+    # explicit BUY / SELL_TO_CLOSE / SHORT_SELL / COVER; required for SELL entries
+    trade_intent: TradeIntent | None = None
+
+
+class AmbiguousTradeIntent(ValueError):
+    """A ticket's trade intent cannot be established without guessing."""
+
+
+def ticket_trade_intent(ticket: OrderTicket) -> TradeIntent:
+    """Explicit intent from the ticket or its signal; never inferred from current position.
+
+    A BUY entry or a SELL/BUY exit is unambiguous given the declared ENTRY/EXIT purpose.
+    A SELL entry must state SHORT_SELL explicitly.
+    """
+    declared = {value for value in (
+        coerce_trade_intent(ticket.trade_intent),
+        ticket.signal.intent if ticket.signal is not None else None,
+    ) if value is not None}
+    if len(declared) > 1:
+        raise AmbiguousTradeIntent("ticket and signal declare different trade intents")
+    if declared:
+        return declared.pop()
+    if ticket.intent is OrderIntent.EXIT:
+        return (TradeIntent.COVER if ticket.side is OrderSide.BUY
+                else TradeIntent.SELL_TO_CLOSE)
+    if ticket.side is OrderSide.BUY:
+        return TradeIntent.BUY
+    raise AmbiguousTradeIntent(
+        "a SELL entry must declare trade_intent SHORT_SELL; SELL alone is ambiguous")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +178,9 @@ class TradingService:
             ):
                 raise ValueError(
                     "strategy decision identity and action must match the audited signal")
+        trade_intent = ticket_trade_intent(ticket)
+        if ticket.trade_intent is not trade_intent:
+            ticket = replace(ticket, trade_intent=trade_intent)
         now = self._clock()
         client_order_id = ticket.client_order_id or new_client_order_id()
 
@@ -160,12 +192,14 @@ class TradingService:
                 instrument, side=ticket.side, quantity=ticket.quantity, order_type=ticket.order_type,
                 created_at=now, context=self._context(ticket, instrument, now, market_data),
                 limit_price=ticket.limit_price, stop_price=ticket.stop_price,
-                strategy=ticket.strategy, signal_id=ticket.signal_id)
+                strategy=ticket.strategy, signal_id=ticket.signal_id,
+                intent=trade_intent)
         request = OrderRequest(
             client_order_id=client_order_id, instrument_id=instrument.instrument_id,
             symbol=instrument.symbol, side=ticket.side, quantity=ticket.quantity,
             order_type=ticket.order_type, timestamp=now, strategy=ticket.strategy,
-            signal_id=ticket.signal_id, limit_price=ticket.limit_price, stop_price=ticket.stop_price)
+            signal_id=ticket.signal_id, limit_price=ticket.limit_price, stop_price=ticket.stop_price,
+            trade_intent=trade_intent)
         self._record_provenance(client_order_id, ticket, now, market_data)
         self._record_audit(
             client_order_id, ticket, now, decision, market_data, strategy_decision)
@@ -300,8 +334,8 @@ class TradingService:
             raise RuntimeError("signal submission is currently restricted to PAPER mode")
         if not isinstance(signal, Signal):
             raise TypeError("signal must be a Signal")
-        if signal.side not in (SignalSide.BUY, SignalSide.SELL):
-            raise ValueError("only BUY or SELL signals can be submitted")
+        if signal.side not in (SignalSide.BUY, SignalSide.SELL) or not signal.intent.is_entry:
+            raise ValueError("only BUY or SHORT_SELL entry signals can be submitted")
         if signal.entry_price is None:
             raise ValueError("a priced signal is required")
         if audit is not None and not isinstance(audit, AuditContext):
@@ -322,6 +356,7 @@ class TradingService:
                 signal=signal,
                 market_regime=signal.regime,
                 audit=audit,
+                trade_intent=signal.intent,
             ),
             actor=actor,
             strategy_decision=strategy_decision,
@@ -397,7 +432,8 @@ class TradingService:
             sizing=dict(a.sizing) or None, data_reference=a.data_reference, exit_reason=a.exit_reason,
             risk_inputs={"risk_decision_id": decision.decision_id, "status": decision.status,
                          "reason": decision.reason, "assessed_at": now, "stop_loss": ticket.stop_loss,
-                         "take_profit": ticket.take_profit, "intent": ticket.intent})
+                         "take_profit": ticket.take_profit, "intent": ticket.intent,
+                         "trade_intent": ticket.trade_intent})
 
     def _record_broker_response(self, order: ManagedOrder) -> None:
         if self._store is None or order.broker_order_id is None:
@@ -431,7 +467,12 @@ class TradingService:
     ) -> RiskContext:
         position = self.portfolio.positions().get(inst.instrument_id)
         orders = self.order_manager.orders()
-        open_orders = self.order_manager.open_orders()
+        # A recovery-authorized identical resubmission must not reserve its own exposure twice.
+        pending_retry = getattr(self.order_manager, "pending_safe_retry", None)
+        retrying = pending_retry(t.client_order_id) if pending_retry is not None else None
+        excluded = retrying.client_order_id if retrying is not None else None
+        open_orders = tuple(
+            o for o in self.order_manager.open_orders() if o.client_order_id != excluded)
         stats = dict(self._stats(inst.instrument_id))
         stats.setdefault("orders_last_minute",
                          sum(1 for o in orders if now - o.timestamp <= timedelta(minutes=1)))
@@ -479,6 +520,7 @@ class TradingService:
             sector=self._sector_of(inst.instrument_id),
             reference_quote=quote,
             now=now,
+            exclude_client_order_id=excluded,
         )
         if reservations is None:
             portfolio_state = replace(
@@ -518,7 +560,8 @@ class TradingService:
                 1 for f in self.portfolio.fills if f.timestamp.date() == today),
             intent=t.intent, stop_loss=t.stop_loss, take_profit=t.take_profit,
             signal=t.signal,
-            portfolio=portfolio_state)
+            portfolio=portfolio_state,
+            trade_intent=coerce_trade_intent(t.trade_intent))
 
     def _open_order_reservations(
         self,
@@ -528,6 +571,7 @@ class TradingService:
         sector: str | None,
         reference_quote: tuple[float, datetime] | None,
         now: datetime,
+        exclude_client_order_id: str | None = None,
     ) -> tuple[float, dict[str, float], float, float] | None:
         total = 0.0
         sector_totals: dict[str, float] = {}
@@ -536,6 +580,8 @@ class TradingService:
         risk_limits = self._risk.limits
         max_age = risk_limits.max_market_data_age if risk_limits is not None else None
         for order in self.order_manager.open_orders():
+            if order.client_order_id == exclude_client_order_id:
+                continue
             order_instrument = self.instruments.get(order.instrument_id)
             if order_instrument is None:
                 return None

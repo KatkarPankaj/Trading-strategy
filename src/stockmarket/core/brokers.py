@@ -498,6 +498,9 @@ class PaperBroker(BrokerAdapter):
                 "risk_decision_id": (
                     str(rec.order.risk_decision_id)
                     if rec.order.risk_decision_id else None),
+                "trade_intent": (
+                    rec.order.trade_intent.value
+                    if rec.order.trade_intent is not None else None),
             },
         )
 
@@ -567,6 +570,7 @@ class PaperBroker(BrokerAdapter):
                 UUID(str(payload["risk_decision_id"]))
                 if payload.get("risk_decision_id") else None),
             status=OrderStatus.SUBMITTED,
+            trade_intent=payload.get("trade_intent"),
         )
         rec = _PaperOrder(
             managed,

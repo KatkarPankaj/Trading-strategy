@@ -8,8 +8,10 @@ from typing import Mapping
 from ..markets import MarketRegistry
 from ..models import Instrument
 from ..security import get_secret
+from .capabilities import configured_entitlements
 from .mock import MockProvider
 from .provider import MarketDataProvider
+from .routing import RoutedMarketDataProvider
 from .twelvedata import TwelveDataProvider
 from .yahoo import YahooProvider
 
@@ -20,14 +22,45 @@ def create_market_data_provider(
     *,
     markets: MarketRegistry,
     env: Mapping[str, str] | None = None,
+    routes: Mapping[str, str] | None = None,
 ) -> MarketDataProvider:
-    """Create an explicitly supported provider; all current choices are research-only."""
+    """Create the configured provider; all current choices are research-only.
+
+    With no per-market ``routes`` and no declared entitlements the plain provider is returned, so the
+    single-provider configuration behaves exactly as before. Otherwise a router validates market,
+    exchange, interval, history depth and declared entitlements before each call.
+    """
+    env = os.environ if env is None else env
+    routes = {market.upper(): provider.lower() for market, provider in (routes or {}).items()}
+    cache: dict[str, MarketDataProvider] = {}
+
+    def build(provider_name: str) -> MarketDataProvider:
+        if provider_name not in cache:
+            cache[provider_name] = _create_single(provider_name, instruments, markets=markets, env=env)
+        return cache[provider_name]
+
+    default = build(name)
+    entitlements = {
+        n: configured_entitlements(n, env) for n in {name, *routes.values()}}
+    if not routes and all(value is None for value in entitlements.values()):
+        return default
+    return RoutedMarketDataProvider(
+        default, {market: build(provider) for market, provider in routes.items()},
+        entitlements=entitlements)
+
+
+def _create_single(
+    name: str,
+    instruments: Mapping[str, Instrument],
+    *,
+    markets: MarketRegistry,
+    env: Mapping[str, str],
+) -> MarketDataProvider:
     if name == "mock":
         return MockProvider(instruments, markets=markets)
     if name == "yahoo":
         return YahooProvider(instruments, markets=markets)
     if name == "twelvedata":
-        env = os.environ if env is None else env
         key = get_secret("TWELVEDATA_API_KEY", env, required=False)
         if key is None:
             raise ValueError(

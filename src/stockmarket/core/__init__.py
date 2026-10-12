@@ -13,6 +13,7 @@ from .models import (
     RiskDecisionStatus,
     Signal,
     SignalSide,
+    TradeIntent,
     TradingStatus,
 )
 from .risk import OrderIntent, RiskContext, RiskEngine, RiskLimits
@@ -245,5 +246,6 @@ __all__ = [
     "RiskLimits",
     "Signal",
     "SignalSide",
+    "TradeIntent",
     "TradingStatus",
 ]

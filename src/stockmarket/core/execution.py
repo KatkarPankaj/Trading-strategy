@@ -16,6 +16,7 @@ from .models import (
     PositionSide,
     RiskDecision,
     RiskDecisionStatus,
+    TradeIntent,
 )
 from .risk import OrderIntent
 
@@ -177,6 +178,10 @@ class PaperExecutor:
             )
         if not isinstance(intent, OrderIntent):
             raise TypeError("intent must be an OrderIntent")
+        trade_intent = getattr(order, "intent", None)
+        if trade_intent is not None and trade_intent.is_exit != (intent is OrderIntent.EXIT):
+            raise PaperExecutionError(
+                f"Order trade intent {trade_intent.value} contradicts {intent.value} execution")
         if order.instrument_id != instrument.instrument_id or order.symbol != instrument.symbol:
             raise PaperExecutionError(
                 "Order and instrument identities do not match")
@@ -220,6 +225,9 @@ class PaperExecutor:
                 raise PaperExecutionError(
                     "A short position must be exited with BUY")
             action = _exit_action(current.side)
+            if trade_intent is not None and trade_intent is not TradeIntent.close_for(current.side):
+                raise PaperExecutionError(
+                    f"{trade_intent.value} cannot close a {current.side.value} position")
             new_position, realized, margin_delta, cash_delta = self._apply_exit(
                 order,
                 current,

@@ -11,7 +11,7 @@ from uuid import UUID
 from .aggregation import AggregatedAction
 from .ai.analyst import StrategySelection
 from .market_session import MarketSession
-from .models import Instrument, SignalSide
+from .models import Instrument, OrderSide, SignalSide, TradeIntent
 from .regime import RegimeAssessment
 from .research import ResearchEvidence
 from .strategy_pipeline import (
@@ -95,6 +95,11 @@ class TradeProposal:
             raise ValueError("proposal evidence must be instrument-matched and not future-dated")
         if self.risk_status != "NOT_EVALUATED":
             raise ValueError("research proposals cannot claim a risk decision")
+
+    @property
+    def intent(self) -> TradeIntent:
+        """Research proposals only open positions: SELL means SHORT_SELL, never close."""
+        return TradeIntent.entry_for(OrderSide(self.side.value))
 
 
 @dataclass(frozen=True, slots=True)

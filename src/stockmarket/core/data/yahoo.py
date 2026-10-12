@@ -18,6 +18,8 @@ from .provider import (
     MarketDataProvider,
     Quote,
     RateLimited,
+    UnsupportedMarket,
+    UnsupportedSymbol,
     interval_delta,
 )
 
@@ -30,7 +32,7 @@ def yahoo_symbol(instrument: Instrument) -> str:
     try:
         return instrument.symbol + SUFFIX[instrument.exchange]
     except KeyError:
-        raise DataUnavailable(
+        raise UnsupportedMarket(
             f"no Yahoo symbol mapping for exchange {instrument.exchange}") from None
 
 
@@ -78,7 +80,7 @@ class YahooProvider(MarketDataProvider):
         for inst in self._instruments.values():
             if (inst.symbol == symbol or inst.instrument_id == symbol) and (market is None or inst.market == market.upper()):
                 return inst
-        raise DataUnavailable(f"unknown instrument {symbol!r}")
+        raise UnsupportedSymbol(f"unknown instrument {symbol!r}")
 
     def get_quote(self, instrument: Instrument) -> Quote:
         df = self._fetch(instrument, "1m", start=None, end=None, period="1d")

@@ -320,28 +320,55 @@ class TradeProposalServiceTests(unittest.TestCase):
         self.assertEqual(len(self.db.query("SELECT * FROM risk_evaluations")), 1)
         self.assertEqual(len(self.db.query("SELECT * FROM trade_proposals")), 1)
 
-    def test_short_entry_uses_persisted_sell_signal_and_is_terminal(self) -> None:
+    def _persist_sell_signal(self, intent: str | None) -> None:
+        payload = {
+            "entry_price": 100.0,
+            "stop_loss": 101.0,
+            "take_profit": 98.0,
+            "reward_risk": 2.0,
+            "expected_edge": 100.0,
+            "regime": "TRENDING_DOWN",
+            "reasons": [],
+            "invalidation_conditions": [],
+        }
+        if intent is not None:
+            payload["intent"] = intent
         self.db.execute(
             "UPDATE signals SET side = ?, payload = ? WHERE signal_id = ?",
-            ("SELL", to_json({
-                "entry_price": 100.0,
-                "stop_loss": 101.0,
-                "take_profit": 98.0,
-                "reward_risk": 2.0,
-                "expected_edge": 100.0,
-                "regime": "TRENDING_DOWN",
-                "reasons": [],
-                "invalidation_conditions": [],
-            }), str(SIGNAL_ID)),
+            ("SELL", to_json(payload), str(SIGNAL_ID)),
         )
+
+    def test_short_entry_uses_persisted_sell_signal_and_is_terminal(self) -> None:
+        self._persist_sell_signal("SHORT_SELL")
 
         result = self.service.evaluate(RUN_ID, INSTRUMENT.instrument_id)
 
-        self.assertEqual(result["status"], "RISK_APPROVED", result["rejection_reason"])
+        self.assertEqual(result["status"], "RISK_APPROVED", result.get("rejection_reason"))
         self.assertEqual(result["trade_proposal"]["side"], "SELL")
+        self.assertEqual(result["trade_proposal"]["intent"], "SHORT_SELL")
         self.assertEqual(result["execution"], "NOT_SUBMITTED")
         self.assertEqual(self.db.query("SELECT * FROM orders"), [])
         self.assertEqual(self.portfolio.positions(), {})
+
+    def test_legacy_sell_signal_without_intent_is_rejected_not_guessed(self) -> None:
+        self._persist_sell_signal(None)
+
+        result = self.service.evaluate(RUN_ID, INSTRUMENT.instrument_id)
+
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertTrue(result["reason"].startswith("AMBIGUOUS_LEGACY_INTENT"))
+        self.assertIsNone(result["trade_proposal"])
+        self.assertEqual(self.db.query("SELECT * FROM trade_proposals"), [])
+        self.assertEqual(self.db.query("SELECT * FROM orders"), [])
+
+    def test_persisted_close_intent_cannot_become_research_proposal(self) -> None:
+        self._persist_sell_signal("SELL_TO_CLOSE")
+
+        result = self.service.evaluate(RUN_ID, INSTRUMENT.instrument_id)
+
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertTrue(result["reason"].startswith("EXIT_INTENT_NOT_PROPOSABLE"))
+        self.assertEqual(self.db.query("SELECT * FROM trade_proposals"), [])
 
     def test_risk_rejection_is_persisted_without_a_proposal(self) -> None:
         self.service.risk_engine = self.make_engine(minimum_expected_edge=101.0)

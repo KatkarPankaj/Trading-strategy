@@ -9,9 +9,10 @@ from stockmarket.core import (
     SignalAggregator,
     SignalInputs,
     SignalSide,
+    TradeIntent,
 )
 
-NOW = datetime(2026, 10, 5, 5, 0, tzinfo=timezone.utc)
+NOW =  datetime(2026, 10, 5, 5, 0, tzinfo=timezone.utc)
 
 
 def inputs(**overrides):
@@ -46,6 +47,7 @@ def strategy_signal(side=SignalSide.BUY, **overrides):
         entry_price=100.0 if side is not SignalSide.HOLD else None,
         stop_loss=98.0 if side is SignalSide.BUY else 102.0 if side is SignalSide.SELL else None,
         take_profit=102.0 if side is SignalSide.BUY else 98.0 if side is SignalSide.SELL else None,
+        intent=TradeIntent.SHORT_SELL if side is SignalSide.SELL else None,
     )
     values.update(overrides)
     return Signal(**values)

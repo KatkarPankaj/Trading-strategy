@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,7 +24,15 @@ _IMPACT_WEIGHT = {"low": 0.4, "medium": 0.7, "high": 1.0, "unknown": 0.3}
 
 
 class AIUnavailable(RuntimeError):
-    """Raised by a provider that cannot serve requests (no key, outage, rate limit)."""
+    """Raised by a provider that cannot serve requests (no key, outage, rate limit).
+
+    ``retryable`` marks transient failures (timeouts, 408/429/5xx); the analyst
+    never retries non-retryable failures such as authentication errors.
+    """
+
+    def __init__(self, message: str = "", *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class AIProvider(Protocol):
@@ -51,6 +60,23 @@ class AIResult:
     response_hash: str | None
     created_at: datetime
     latency_seconds: float
+    attempts: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    usage_estimated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AIUsage:
+    """Cumulative provider usage for one analyst instance (process-local)."""
+
+    calls: int
+    attempts: int
+    prompt_tokens: int
+    completion_tokens: int
+    estimated_calls: int
+    token_budget: int | None
+    budget_exhausted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,13 +123,48 @@ class AIAnalyst:
         breaker: CircuitBreaker | None = None,
         max_input_chars: int = 6000,
         clock: Callable[[], datetime] | None = None,
+        max_retries: int = 0,
+        retry_backoff_seconds: float = 1.0,
+        sleep: Callable[[float], None] | None = None,
+        token_budget: int | None = None,
     ) -> None:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) \
+                or not 0 <= max_retries <= 3:
+            raise ValueError("max_retries must be an integer from 0 to 3")
+        if isinstance(retry_backoff_seconds, bool) \
+                or not isinstance(retry_backoff_seconds, (int, float)) \
+                or not isfinite(retry_backoff_seconds) \
+                or not 0 <= retry_backoff_seconds <= 30:
+            raise ValueError("retry_backoff_seconds must be from 0 to 30")
+        if token_budget is not None and (
+                isinstance(token_budget, bool) or not isinstance(token_budget, int)
+                or token_budget <= 0):
+            raise ValueError("token_budget must be a positive integer or None")
         self._provider = provider
         self._enabled = enabled
         self._log = logger
         self._breaker = breaker or CircuitBreaker()
         self._max_chars = max_input_chars
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._max_retries = max_retries
+        self._backoff = float(retry_backoff_seconds)
+        self._sleep = sleep or time.sleep
+        self._token_budget = token_budget
+        self._usage_lock = threading.Lock()
+        self._calls = 0
+        self._attempts = 0
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
+        self._estimated_calls = 0
+
+    @property
+    def usage(self) -> AIUsage:
+        with self._usage_lock:
+            used = self._prompt_tokens + self._completion_tokens
+            return AIUsage(
+                self._calls, self._attempts, self._prompt_tokens,
+                self._completion_tokens, self._estimated_calls, self._token_budget,
+                self._token_budget is not None and used >= self._token_budget)
 
     @property
     def max_input_chars(self) -> int:
@@ -133,15 +194,45 @@ class AIAnalyst:
 
         if not self._enabled:
             return self._result(task, False, None, "AI_DISABLED", prompt_hash, None, now, started)
-        try:
-            raw = self._breaker.call(
-                lambda: self._provider.complete(system, user))
-        except CircuitOpenError:
-            return self._result(task, False, None, "AI_CIRCUIT_OPEN", prompt_hash, None, now, started)
-        except Exception as exc:
-            return self._result(task, False, None, f"AI_PROVIDER_ERROR: {type(exc).__name__}",
-                                prompt_hash, None, now, started)
+        estimated_prompt = _estimate_tokens(system) + _estimate_tokens(user)
+        if not self._reserve_budget(estimated_prompt):
+            return self._result(task, False, None, "AI_BUDGET_EXHAUSTED", prompt_hash, None, now,
+                                started)
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                raw, usage = self._breaker.call(
+                    lambda: self._complete(system, user))
+                break
+            except CircuitOpenError:
+                self._record_usage(attempts, None, None, False)
+                return self._result(task, False, None, "AI_CIRCUIT_OPEN", prompt_hash, None, now,
+                                    started, attempts=attempts)
+            except AIUnavailable as exc:
+                if exc.retryable and attempts <= self._max_retries:
+                    self._sleep(self._backoff * (2 ** (attempts - 1)))
+                    continue
+                self._record_usage(attempts, None, None, False)
+                return self._result(task, False, None, f"AI_PROVIDER_ERROR: {type(exc).__name__}",
+                                    prompt_hash, None, now, started, attempts=attempts)
+            except Exception as exc:
+                self._record_usage(attempts, None, None, False)
+                return self._result(task, False, None, f"AI_PROVIDER_ERROR: {type(exc).__name__}",
+                                    prompt_hash, None, now, started, attempts=attempts)
 
+        prompt_tokens = usage.get("prompt_tokens") if usage else None
+        completion_tokens = usage.get("completion_tokens") if usage else None
+        estimated = prompt_tokens is None or completion_tokens is None
+        if prompt_tokens is None:
+            prompt_tokens = estimated_prompt
+        if completion_tokens is None:
+            completion_tokens = _estimate_tokens(str(raw))
+        self._record_usage(attempts, prompt_tokens, completion_tokens, estimated)
+        token_fields = {
+            "attempts": attempts, "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens, "usage_estimated": estimated,
+        }
         response_hash = hashlib.sha256(str(raw).encode("utf-8")).hexdigest()
         try:
             match = _FENCE.match(str(raw))
@@ -149,8 +240,32 @@ class AIAnalyst:
                 match.group(1) if match else str(raw))
         except (ValidationError, ValueError) as exc:
             return self._result(task, False, None, f"SCHEMA_VALIDATION_FAILED: {type(exc).__name__}",
-                                prompt_hash, response_hash, now, started)
-        return self._result(task, True, output, None, prompt_hash, response_hash, now, started)
+                                prompt_hash, response_hash, now, started, **token_fields)
+        return self._result(task, True, output, None, prompt_hash, response_hash, now, started,
+                            **token_fields)
+
+    def _complete(self, system: str, user: str) -> tuple[str, Mapping[str, Any] | None]:
+        with_usage = getattr(self._provider, "complete_with_usage", None)
+        if callable(with_usage):
+            raw, usage = with_usage(system, user)
+            return raw, _validated_usage(usage)
+        return self._provider.complete(system, user), None
+
+    def _reserve_budget(self, estimated_prompt_tokens: int) -> bool:
+        if self._token_budget is None:
+            return True
+        with self._usage_lock:
+            used = self._prompt_tokens + self._completion_tokens
+            return used + estimated_prompt_tokens <= self._token_budget
+
+    def _record_usage(self, attempts: int, prompt_tokens: int | None,
+                      completion_tokens: int | None, estimated: bool) -> None:
+        with self._usage_lock:
+            self._calls += 1
+            self._attempts += attempts
+            self._prompt_tokens += prompt_tokens or 0
+            self._completion_tokens += completion_tokens or 0
+            self._estimated_calls += 1 if estimated else 0
 
     def select_strategies(
         self,
@@ -233,14 +348,34 @@ class AIAnalyst:
                                 result.prompt_hash, result.response_hash, result.created_at, time.monotonic()), None
 
     def _result(self, task: str, ok: bool, output: BaseModel | None, error: str | None, prompt_hash: str,
-                response_hash: str | None, created: datetime, started: float) -> AIResult:
+                response_hash: str | None, created: datetime, started: float, *, attempts: int = 0,
+                prompt_tokens: int | None = None, completion_tokens: int | None = None,
+                usage_estimated: bool = False) -> AIResult:
         result = AIResult(task, ok, output, error, self._provider.name, prompt_hash, response_hash,
-                          created, time.monotonic() - started)
+                          created, time.monotonic() - started, attempts, prompt_tokens,
+                          completion_tokens, usage_estimated)
         if self._log is not None:
             (self._log.info if ok else self._log.warning)(
                 f"ai {task} {'ok' if ok else 'failed'}", task=task, ai_error=error, provider=self._provider.name,
-                prompt_hash=prompt_hash, response_hash=response_hash)
+                prompt_hash=prompt_hash, response_hash=response_hash, attempts=attempts,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
         return result
+
+
+def _estimate_tokens(text: str) -> int:
+    """Coarse ~4 characters/token estimate used only when a provider reports no usage."""
+    return max(1, (len(text) + 3) // 4)
+
+
+def _validated_usage(usage: Any) -> dict[str, int] | None:
+    if not isinstance(usage, Mapping):
+        return None
+    out = {}
+    for key in ("prompt_tokens", "completion_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            out[key] = value
+    return out or None
 
 
 def news_score(result: AIResult | None) -> float | None:

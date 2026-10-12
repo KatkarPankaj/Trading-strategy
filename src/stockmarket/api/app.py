@@ -55,7 +55,7 @@ from ..core.security import Secret
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.trading_service import (
-    OrderTicket, TradingService, UnknownInstrument,
+    AmbiguousTradeIntent, OrderTicket, TradingService, UnknownInstrument,
     summarize_trades,
 )
 from .schemas import (
@@ -180,6 +180,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
         ticket = OrderTicket(**fields)
         try:
             result = service.submit(ticket, actor=actor)
+        except AmbiguousTradeIntent as exc:
+            raise HTTPException(422, str(exc)) from exc
         except UnknownInstrument as exc:
             raise HTTPException(404, f"unknown instrument {exc}") from exc
         except IdempotencyConflict as exc:
@@ -764,7 +766,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
             "ranking_method": (
                 "deterministic aggregate confidence descending; "
                 "absolute aggregate score descending; instrument_id ascending"),
-            "proposals": [_plain(item) for item in result.proposals],
+            "proposals": [
+                {**_plain(item), "intent": item.intent.value} for item in result.proposals],
             "assessments": [_plain(item) for item in result.assessments],
         }
 

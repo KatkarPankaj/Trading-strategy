@@ -67,6 +67,10 @@ def _opt(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
+def _intent_value(value: Any) -> str | None:
+    return None if value is None else str(getattr(value, "value", value))
+
+
 class _Repository:
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -137,7 +141,8 @@ class SignalRepository(_Repository):
             "payload": to_json({
                 "entry_price": s.entry_price, "stop_loss": s.stop_loss, "take_profit": s.take_profit,
                 "reward_risk": s.reward_risk, "expected_edge": s.expected_edge, "regime": s.regime,
-                "reasons": s.reasons, "invalidation_conditions": s.invalidation_conditions})})
+                "reasons": s.reasons, "invalidation_conditions": s.invalidation_conditions,
+                "intent": _intent_value(getattr(s, "intent", None))})})
 
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._db.query("SELECT * FROM signals ORDER BY timestamp DESC LIMIT ?", (limit,))
@@ -186,6 +191,7 @@ class OrderRepository(_Repository):
             "signal_id": _opt(o.signal_id), "risk_decision_id": _opt(o.risk_decision_id),
             "status": o.status.value, "filled_quantity": o.filled_quantity,
             "average_fill_price": o.average_fill_price, "error": o.error,
+            "trade_intent": _intent_value(getattr(o, "trade_intent", None)),
             "updated_at": ts(datetime.now(timezone.utc))})
 
     def save_with_events(self, order: Any, events: Iterable[Any]) -> None:
@@ -368,8 +374,12 @@ class TradeRepository(_Repository):
 
 
 class PnLRepository(_Repository):
-    def snapshot(self, portfolio: Any, timestamp: datetime) -> str:
-        snapshot_id = str(uuid4())
+    def snapshot(self, portfolio: Any, timestamp: datetime,
+                 snapshot_id: str | None = None) -> str:
+        snapshot_id = snapshot_id or str(uuid4())
+        if self._db.query(
+                "SELECT 1 FROM pnl_snapshots WHERE snapshot_id = ?", (snapshot_id,)):
+            return snapshot_id
         self._upsert("pnl_snapshots", "snapshot_id", {
             "snapshot_id": snapshot_id, "timestamp": ts(timestamp),
             "base_currency": portfolio.base_currency, "equity": portfolio.equity,
@@ -1155,6 +1165,7 @@ class SignalGenerationRepository(_Repository):
                         "regime": signal.regime,
                         "reasons": signal.reasons,
                         "invalidation_conditions": signal.invalidation_conditions,
+                        "intent": _intent_value(signal.intent),
                     }),
                 })
             elif signal is not None:

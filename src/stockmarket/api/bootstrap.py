@@ -52,6 +52,7 @@ from ..core.observability import AlertManager, StructuredLogger
 from ..core.live_readiness import LiveReadinessChecker
 from ..core.markets import MarketRegistry, default_markets
 from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
+from ..core.data.provider import MarketDataProvider
 from ..core.scanner import (
     MarketScanner,
     RegistryUniverseProvider,
@@ -101,6 +102,16 @@ def _parse_time(value: str, name: str, errors: list[str]) -> time:
         return time(0, 0)
 
 
+def _optional_int(env: Mapping[str, str], name: str, default: int | None) -> int | None:
+    value = (env.get(name) or "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer") from None
+
+
 def _research_from_env(
     env: Mapping[str, str],
     registry: MarketRegistry,
@@ -127,9 +138,14 @@ def _research_from_env(
                 if key is None:
                     raise SecurityError("AI_API_KEY is required")
                 timeout = float(timeout_value or "20")
+                max_retries = _optional_int(env, "AI_MAX_RETRIES", 0)
+                token_budget = _optional_int(env, "AI_TOKEN_BUDGET", None)
+                max_output_tokens = _optional_int(env, "AI_MAX_OUTPUT_TOKENS", None)
                 provider = OpenAICompatibleProvider(
-                    base_url, model, key, timeout=timeout)
-                analyst = AIAnalyst(provider)
+                    base_url, model, key, timeout=timeout,
+                    max_output_tokens=max_output_tokens)
+                analyst = AIAnalyst(
+                    provider, max_retries=max_retries, token_budget=token_budget)
             except (SecurityError, TypeError, ValueError) as exc:
                 errors.append(f"invalid AI provider configuration: {exc}")
 
@@ -210,6 +226,7 @@ def create_candidate_assessment_service(
     env: Mapping[str, str] | None = None,
     research_analyst: AIAnalyst | None = None,
     research_strategies: Mapping[str, Strategy] | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> CandidateAssessmentService | None:
     """Create the snapshot-only AI service without starting data or execution services."""
     env = os.environ if env is None else env
@@ -227,6 +244,7 @@ def create_candidate_assessment_service(
         registry,
         research_strategies or {"orb_vwap": OrbVwapStrategy()},
         model_version=(env.get("AI_MODEL") or "unspecified").strip(),
+        clock=clock,
     )
 
 
@@ -240,9 +258,17 @@ def build_context(
     research_analyst: AIAnalyst | None = None,
     research_strategies: Mapping[str, Strategy] | None = None,
     research_sessions: Mapping[str, MarketSession] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    market_data_provider: MarketDataProvider | None = None,
 ) -> ApiContext:
-    """`market_stats` supplies liquidity, slippage and correlation per instrument; without it, entries are rejected (fail closed)."""
+    """`market_stats` supplies liquidity, slippage and correlation per instrument; without it, entries are rejected (fail closed).
+
+    `clock` and `market_data_provider` exist for deterministic integration tests; production
+    callers leave them unset so the wall clock and the configured DATA_PROVIDER are used.
+    An injected provider must still be research-only unless a live feed is separately approved.
+    """
     env = os.environ if env is None else env
+    now = clock or (lambda: datetime.now(timezone.utc))
     errors: list[str] = []
     personal_value = (env.get("PERSONAL_RESEARCH") or "false").lower()
     if personal_value not in {"true", "false"}:
@@ -453,31 +479,38 @@ def build_context(
         store.fills.save(fill)
         store.positions.replace_all(
             portfolio.positions().values(), fill.timestamp)
+        snapshot_id = (
+            f"fill:{fill.client_order_id}:{fill.fill_sequence}"
+            if fill.client_order_id is not None and fill.fill_sequence is not None
+            else None)
+        store.pnl.snapshot(portfolio, fill.timestamp, snapshot_id=snapshot_id)
 
     portfolio.on_fill = persist_paper_fill
-    broker = PaperBroker(portfolio, instruments, market_status_fn=lambda m: registry.is_regular_session(
-        m, datetime.now(timezone.utc)),
+    broker = PaperBroker(portfolio, instruments, clock=now,
+        market_status_fn=lambda m: registry.is_regular_session(m, now()),
         execution_repository=store.paper_execution,
         fills_repository=store.fills)
-    gate = TradingGate()
-    order_manager = OrderManager(broker)
+    gate = TradingGate(clock=now)
+    order_manager = OrderManager(broker, clock=now)
     strategies = StrategyConfigRegistry(store.strategy_configs)
     risk_engine = RiskEngine(limits, settings.risk.to_portfolio_limits())
     health = HealthMonitor(max_market_data_age=timedelta(seconds=settings.max_market_data_age_seconds),
-                           errors=ErrorCounter())
+                           errors=ErrorCounter(), clock=now)
     health.register_check("database", store.db.healthy)
     health.register_check("broker", lambda: broker.is_connected)
     health.register_check("trading_gate", lambda: CheckResult(
         not gate.halted, gate.blocked_reason() or "open"))
     logger = StructuredLogger("platform", errors=health.errors)
-    raw_market_data = create_market_data_provider(
-        settings.data_provider, instruments, markets=registry, env=env)
+    raw_market_data = market_data_provider or create_market_data_provider(
+        settings.data_provider, instruments, markets=registry, env=env,
+        routes=dict(settings.data_provider_routes))
     market_data = ResilientProvider(
         raw_market_data,
         policy=DataPolicy(max_quote_age=timedelta(
             seconds=settings.max_market_data_age_seconds)),
         health=health,
         logger=logger,
+        clock=now,
     )
     fundamental_observation_provider = (
         YahooEarningsObservationProvider()
@@ -491,6 +524,7 @@ def build_context(
     scanner = MarketScanner(
         market_data, universe_provider, registry, repository=store.scanner_runs,
         settings=scanner_settings,
+        clock=now,
     )
     candidate_research = CandidateResearchService(
         market_data,
@@ -502,6 +536,7 @@ def build_context(
         sector_provider=sector_observation_provider,
         settings=parse_candidate_research_settings(
             (env.get("CANDIDATE_RESEARCH_SETTINGS") or "").strip()),
+        clock=now,
     )
     registered_research_strategies = (
         research_strategies or {"orb_vwap": OrbVwapStrategy()})
@@ -513,6 +548,7 @@ def build_context(
             env=env,
             research_analyst=research_analyst,
             research_strategies=registered_research_strategies,
+            clock=now,
         )
         if research_analyst is not None else None
     )
@@ -527,6 +563,7 @@ def build_context(
         autonomous_research = AutonomousResearchService(
             scanner, candidate_research, candidate_assessment,
             store.autonomous_research, registry, autonomous_settings,
+            clock=now,
         )
     signal_generation = SignalGenerationService(
         market_data,
@@ -540,6 +577,7 @@ def build_context(
         research_sessions,
         settings=parse_signal_generation_settings(
             env.get("SIGNAL_GENERATION_SETTINGS")),
+        clock=now,
     )
     trade_proposals = TradeProposalService(
         autonomous_repository=store.autonomous_research,
@@ -560,6 +598,7 @@ def build_context(
             max_opportunity_age=signal_generation.settings.max_opportunity_age,
             max_market_data_age=signal_generation.settings.max_market_data_age,
         ),
+        clock=now,
     )
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
@@ -571,7 +610,7 @@ def build_context(
         quotes=quotes,
         market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
         strategy_approval=strategies.check_live, provenance_source=strategies.version_info,
-        sizing_limits=sizing_limits)
+        sizing_limits=sizing_limits, clock=now)
     max_execution_data_age = timedelta(
         seconds=settings.max_market_data_age_seconds)
     paper_proposal_execution = PaperProposalExecutionService(
@@ -583,6 +622,7 @@ def build_context(
         update_price=broker.update_price,
         strategies=registered_research_strategies,
         max_age=max_execution_data_age,
+        clock=now,
     )
     paper_position_manager = PaperPositionManager(
         store=store,
@@ -593,6 +633,7 @@ def build_context(
         update_price=broker.update_price,
         max_age=max_execution_data_age,
         evaluation_repository=store.position_exit_evaluations,
+        clock=now,
     )
     autonomous_paper_trading = (
         AutonomousPaperTradingService(
@@ -604,6 +645,7 @@ def build_context(
             positions=paper_position_manager,
             gate=gate,
             max_candidates=autonomous_research.settings.max_candidates,
+            clock=now,
         )
         if autonomous_research is not None and not personal_research_mode else None
     )
@@ -646,20 +688,21 @@ def build_context(
         registered_research_strategies, research_sessions or {},
         candidate_research, candidate_assessment,
         default_market=settings.markets[0],
+        clock=now,
     )
 
     live_strategies = tuple(s.strip() for s in (
         env.get("LIVE_STRATEGIES") or "").split(",") if s.strip())
     alerts = AlertManager(logger)
     kill_switch = KillSwitch(gate, services=lambda: [
-                             paper], store=store, logger=logger, alerts=alerts)
+                             paper], store=store, logger=logger, alerts=alerts, clock=now)
     kill_switch.restore()  # an engaged kill switch survives restarts
     monitor = AutoTriggerMonitor(
         kill_switch, portfolio=portfolio, health=health,
         policy=AutoTriggerPolicy(
             settings.risk.max_daily_loss_pct, settings.risk.max_drawdown_pct),
         data_expected=lambda: any(registry.is_regular_session(
-            m, datetime.now(timezone.utc)) for m in settings.markets),
+            m, now()) for m in settings.markets),
         unexpected_positions=lambda: [
             d.subject for d in reconcile_positions(portfolio, broker)],
         cancel_open_orders=(env.get("KILL_SWITCH_CANCEL_ORDERS") or "").lower() == "true")
@@ -668,7 +711,7 @@ def build_context(
     checker = LiveReadinessChecker(
         settings=settings, broker=broker, store=store, health=health, recovery=recovery, gate=gate,
         risk_engine=risk_engine, risk_limits=limits, registry=strategies, live_strategies=live_strategies,
-        kill_switch_available=kill_switch.available)
+        kill_switch_available=kill_switch.available, clock=now)
     return ApiContext(settings=settings, paper=paper, live=None, store=store, health=health,
                       api_token=token, gate=gate, recovery=recovery, markets=registry, readiness=checker,
                       kill_switch=kill_switch, monitor=monitor, market_data=market_data,

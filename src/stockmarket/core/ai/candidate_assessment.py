@@ -9,17 +9,19 @@ from datetime import datetime, timezone
 from enum import Enum
 from math import isfinite
 from typing import Any, Callable, Mapping, Protocol
+from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from .analyst import AIAnalyst
+from .analyst import AIAnalyst, AIResult
 from .schemas import CandidateAssessmentSchema
 from ..markets import MarketRegistry
 from ..models import Instrument
 from ..strategies.base import Strategy
 
-PROMPT_VERSION = "candidate-assessment-v2"
-SCHEMA_VERSION = "candidate-assessment-v1"
+PROMPT_VERSION = "candidate-assessment-v3"
+SCHEMA_VERSION = "candidate-assessment-v2"
+_MAX_URL_LENGTH = 2048
 _COMPONENT_WEIGHTS = {
     "technical": 0.25,
     "regime": 0.25,
@@ -37,6 +39,7 @@ class AssessmentStatus(str, Enum):
     AI_INVALID = "AI_INVALID"
     NO_VALID_STRATEGY = "NO_VALID_STRATEGY"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    NO_TRADE = "NO_TRADE"
 
 
 class OpportunityState(str, Enum):
@@ -138,6 +141,18 @@ class AIResearchAssessment:
     response_hash: str | None = None
     strategy_selection_prompt_hash: str | None = None
     strategy_selection_response_hash: str | None = None
+    # ``outcome`` is the model's CANDIDATE/NO_TRADE judgement; NO_TRADE never
+    # reaches strategy selection. ``qualitative_confidence`` is model-reported;
+    # ``calibrated_probability`` stays None until a validated calibration exists.
+    outcome: str = "CANDIDATE"
+    evidence_quality: str | None = None
+    contradictory_evidence: tuple[str, ...] = ()
+    rejection_reasons: tuple[str, ...] = ()
+    component_scores: Mapping[str, float | None] | None = None
+    qualitative_confidence: str | None = None
+    calibrated_probability: float | None = None
+    sources: tuple[Mapping[str, Any], ...] = ()
+    ai_usage: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +184,7 @@ class OpportunityRankingConfig:
     strategy_weight: float = 0.10
     risk_flag_penalty: float = 5.0
     maximum_risk_penalty: float = 25.0
+    contradiction_penalty: float = 5.0
 
     def __post_init__(self) -> None:
         weights = (
@@ -188,7 +204,11 @@ class OpportunityRankingConfig:
                 or isinstance(self.maximum_risk_penalty, bool) \
                 or not isinstance(self.maximum_risk_penalty, (int, float)) \
                 or not isfinite(self.maximum_risk_penalty) \
-                or self.maximum_risk_penalty < 0:
+                or self.maximum_risk_penalty < 0 \
+                or isinstance(self.contradiction_penalty, bool) \
+                or not isinstance(self.contradiction_penalty, (int, float)) \
+                or not isfinite(self.contradiction_penalty) \
+                or self.contradiction_penalty < 0:
             raise ValueError("risk penalties must be finite and non-negative")
 
 
@@ -317,7 +337,8 @@ class CandidateAssessmentService:
                 context, status, assessment_result.provider, assessed_at,
                 assessment_result.error or status.value,
                 prompt_hash=assessment_result.prompt_hash,
-                response_hash=assessment_result.response_hash)
+                response_hash=assessment_result.response_hash,
+                ai_usage=_usage(assessment_result))
             return self._persist(self._opportunity(
                 assessment, OpportunityState.REJECTED, None, assessed_at))
         if not self._result_time_is_valid(assessment_result.created_at, assessed_at):
@@ -325,20 +346,23 @@ class CandidateAssessmentService:
                 context, AssessmentStatus.AI_INVALID, assessment_result.provider,
                 assessed_at, "AI assessment timestamp is invalid",
                 prompt_hash=assessment_result.prompt_hash,
-                response_hash=assessment_result.response_hash)
+                response_hash=assessment_result.response_hash,
+                ai_usage=_usage(assessment_result))
             return self._persist(self._opportunity(
                 assessment, OpportunityState.REJECTED, None, assessed_at))
         output = assessment_result.output
+        evidence_ids = {str(item["evidence_id"]) for item in context.evidence}
         if not isinstance(output, CandidateAssessmentSchema) \
                 or output.snapshot_id != context.snapshot_id \
                 or output.instrument_id != context.instrument_id \
-                or not set(output.key_evidence).issubset(
-                    {str(item["evidence_id"]) for item in context.evidence}):
+                or not set(output.key_evidence).issubset(evidence_ids) \
+                or not set(output.contradictory_evidence).issubset(evidence_ids):
             assessment = self._failed_assessment(
                 context, AssessmentStatus.AI_INVALID, assessment_result.provider,
                 assessed_at, "AI assessment identity or evidence citations failed validation",
                 prompt_hash=assessment_result.prompt_hash,
-                response_hash=assessment_result.response_hash)
+                response_hash=assessment_result.response_hash,
+                ai_usage=_usage(assessment_result))
             return self._persist(self._opportunity(
                 assessment, OpportunityState.REJECTED, None, assessed_at))
 
@@ -349,13 +373,17 @@ class CandidateAssessmentService:
                 context, AssessmentStatus.AI_INVALID, assessment_result.provider,
                 assessed_at, "AI assessment contradicted missing critical evidence",
                 prompt_hash=assessment_result.prompt_hash,
-                response_hash=assessment_result.response_hash)
+                response_hash=assessment_result.response_hash,
+                ai_usage=_usage(assessment_result))
             return self._persist(self._opportunity(
                 assessment, OpportunityState.REJECTED, None, assessed_at))
+        no_trade = output.outcome == "NO_TRADE"
+        insufficient = bias is DirectionalBias.INSUFFICIENT_EVIDENCE \
+            or output.evidence_quality == "INSUFFICIENT"
         selection_error = None
         selection_result = None
         selection = None
-        if strategies and bias is not DirectionalBias.INSUFFICIENT_EVIDENCE:
+        if strategies and not no_trade and not insufficient:
             selection_context = {
                 **context.as_mapping(),
                 "registered_strategies": [
@@ -366,6 +394,8 @@ class CandidateAssessmentService:
                     "opportunity_score": output.opportunity_score,
                     "risk_flags": output.risk_flags,
                     "key_evidence": output.key_evidence,
+                    "contradictory_evidence": output.contradictory_evidence,
+                    "evidence_quality": output.evidence_quality,
                     "invalidating_conditions": output.invalidating_conditions,
                 },
             }
@@ -389,9 +419,11 @@ class CandidateAssessmentService:
                     selection_error = "AI strategy-selection timestamp is invalid"
         strategy = selection.ranked_strategies[0] if selection else None
         if strategy is None:
-            if selection_error is not None:
+            if no_trade:
+                status = AssessmentStatus.NO_TRADE
+            elif selection_error is not None:
                 status = AssessmentStatus.AI_INVALID
-            elif bias is DirectionalBias.INSUFFICIENT_EVIDENCE:
+            elif insufficient:
                 status = AssessmentStatus.INSUFFICIENT_EVIDENCE
             elif selection_result is not None and not selection_result.ok \
                     and selection_result.error:
@@ -404,9 +436,14 @@ class CandidateAssessmentService:
             else:
                 status = AssessmentStatus.NO_VALID_STRATEGY
             state = OpportunityState.REJECTED
-            error = selection_error or (
-                selection_result.error if selection_result is not None
-                else "insufficient evidence or no registered strategies")
+            if no_trade:
+                error = "NO_TRADE: " + "; ".join(output.rejection_reasons)
+            elif insufficient and selection_error is None:
+                error = "insufficient evidence for a candidate assessment"
+            else:
+                error = selection_error or (
+                    selection_result.error if selection_result is not None
+                    else "insufficient evidence or no registered strategies")
         else:
             status = AssessmentStatus.COMPLETE
             state = OpportunityState.STRATEGY_SELECTED
@@ -438,6 +475,18 @@ class CandidateAssessmentService:
             strategy_selection_response_hash=(
                 selection_result.response_hash if selection_result is not None else None),
             error=error,
+            outcome=output.outcome,
+            evidence_quality=output.evidence_quality,
+            contradictory_evidence=tuple(output.contradictory_evidence),
+            rejection_reasons=tuple(output.rejection_reasons),
+            component_scores=(
+                output.component_scores.model_dump()
+                if output.component_scores is not None else None),
+            qualitative_confidence=output.qualitative_confidence,
+            calibrated_probability=None,
+            sources=_cited_sources(
+                context, (*output.key_evidence, *output.contradictory_evidence)),
+            ai_usage=_usage(assessment_result, selection_result),
         )
         ranking = self.rank(
             assessment, context, strategy_names=frozenset(strategies)
@@ -499,11 +548,14 @@ class CandidateAssessmentService:
         )
         penalty = min(
             cfg.maximum_risk_penalty,
-            cfg.risk_flag_penalty * len(assessment.risk_flags))
+            cfg.risk_flag_penalty * len(assessment.risk_flags)
+            + cfg.contradiction_penalty * len(assessment.contradictory_evidence))
         score = round(max(0.0, min(100.0, score - penalty)), 4)
         explanation = (
             "Advisory ranking (0-100; not a probability): "
             + ", ".join(f"{name}={value:.3f}" for name, value in parts.items())
+            + f"; risk_flags={len(assessment.risk_flags)}"
+            + f"; contradictory_evidence={len(assessment.contradictory_evidence)}"
             + f"; risk_penalty={penalty:.2f}; final={score:.4f}."
         )
         return OpportunityRanking(score, parts, penalty, explanation)
@@ -720,7 +772,7 @@ class CandidateAssessmentService:
     def _failed_assessment(
         self, context: AIResearchContext, status: AssessmentStatus, provider: str,
         assessed_at: datetime, error: str, *, prompt_hash: str | None = None,
-        response_hash: str | None = None,
+        response_hash: str | None = None, ai_usage: Mapping[str, Any] | None = None,
     ) -> AIResearchAssessment:
         return AIResearchAssessment(
             assessment_id=str(uuid4()), snapshot_id=context.snapshot_id,
@@ -733,7 +785,7 @@ class CandidateAssessmentService:
             model_version=self.model_version, prompt_version=PROMPT_VERSION,
             schema_version=SCHEMA_VERSION, assessed_at=assessed_at,
             input_context=context, error=error[:500],
-            prompt_hash=prompt_hash, response_hash=response_hash,
+            prompt_hash=prompt_hash, response_hash=response_hash, ai_usage=ai_usage,
         )
 
     def _opportunity(
@@ -805,3 +857,48 @@ class CandidateAssessmentService:
         if bias is DirectionalBias.BEARISH:
             return (1.0 - average) / 2.0
         return 1.0 - abs(average)
+
+def _usage(*results: AIResult | None) -> dict[str, Any]:
+    """Aggregate per-call attempts and model token counts for persistence and cost review.
+
+    Keys use ``*_units`` because the persistence layer refuses keys containing
+    secret markers such as "token"; values are model token counts.
+    """
+    calls = [r for r in results if r is not None]
+    prompt = [r.prompt_tokens for r in calls if r.prompt_tokens is not None]
+    completion = [r.completion_tokens for r in calls if r.completion_tokens is not None]
+    return {
+        "calls": len(calls),
+        "attempts": sum(r.attempts for r in calls),
+        "prompt_units": sum(prompt) if prompt else None,
+        "completion_units": sum(completion) if completion else None,
+        "estimated": any(r.usage_estimated for r in calls),
+    }
+
+
+def _cited_sources(
+    context: AIResearchContext, evidence_ids: tuple[str, ...],
+) -> tuple[dict[str, Any], ...]:
+    """Derive sources from persisted evidence only; the model cannot supply URLs."""
+    by_id = {str(item["evidence_id"]): item for item in context.evidence}
+    sources = []
+    for evidence_id in dict.fromkeys(evidence_ids):
+        item = by_id.get(evidence_id)
+        if item is None:
+            continue
+        url = None
+        for container, key in (("provenance", "url"), ("payload", "reference"),
+                               ("payload", "url")):
+            candidate = (item.get(container) or {}).get(key)
+            if isinstance(candidate, str) and len(candidate) <= _MAX_URL_LENGTH \
+                    and urlsplit(candidate).scheme in {"http", "https"} \
+                    and urlsplit(candidate).netloc:
+                url = candidate
+                break
+        sources.append({
+            "evidence_id": evidence_id,
+            "component": item.get("component"),
+            "source": item.get("source"),
+            "url": url,
+        })
+    return tuple(sources)

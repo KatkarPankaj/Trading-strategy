@@ -31,6 +31,10 @@ from .sizing import SizingLimits, size_position
 logger = logging.getLogger(__name__)
 
 
+class AmbiguousLegacyIntent(ValueError):
+    """A persisted SELL signal has no explicit SHORT_SELL/SELL_TO_CLOSE intent."""
+
+
 @dataclass(frozen=True, slots=True)
 class TradeProposalSettings:
     max_opportunity_age: timedelta = timedelta(minutes=5)
@@ -134,12 +138,34 @@ class TradeProposalService:
                 or signal_row.get("signal_id") != signal_id_value):
             raise ValueError(
                 "persisted generated signal identity does not match its research candidate")
-        signal = self._signal_from_row(signal_row)
+        try:
+            signal = self._signal_from_row(signal_row)
+        except AmbiguousLegacyIntent as exc:
+            # Fail closed: never guess whether a legacy SELL meant short or close.
+            return {
+                "status": "REJECTED",
+                "reason": f"AMBIGUOUS_LEGACY_INTENT: {exc}.",
+                "signal_id": str(signal_id_value),
+                "execution": "NOT_SUBMITTED",
+                "trade_proposal": None,
+                "duration_seconds": perf_counter() - started,
+            }
 
-        if signal.side is SignalSide.HOLD:
+        if signal.side is SignalSide.HOLD or not signal.intent.is_executable:
             return {
                 "status": "NON_ACTIONABLE",
-                "reason": "NO_SIGNAL: HOLD signals cannot create a TradeProposal.",
+                "reason": "NO_SIGNAL: HOLD/NO_TRADE signals cannot create a TradeProposal.",
+                "signal_id": str(signal.signal_id),
+                "execution": "NOT_SUBMITTED",
+                "trade_proposal": None,
+                "duration_seconds": perf_counter() - started,
+            }
+        if not signal.intent.is_entry:
+            return {
+                "status": "REJECTED",
+                "reason": (
+                    "EXIT_INTENT_NOT_PROPOSABLE: research proposals only open positions; "
+                    "exits are managed from existing positions."),
                 "signal_id": str(signal.signal_id),
                 "execution": "NOT_SUBMITTED",
                 "trade_proposal": None,
@@ -184,6 +210,7 @@ class TradeProposalService:
                 "symbol": signal.symbol,
                 "strategy": signal.strategy,
                 "side": signal.side.value,
+                "intent": signal.intent.value,
                 "entry_price": signal.entry_price,
                 "stop_price": signal.stop_loss,
                 "target_price": signal.take_profit,
@@ -348,6 +375,7 @@ class TradeProposalService:
                 == now_local_day
             ),
             intent=OrderIntent.ENTRY,
+            trade_intent=signal.intent,
             signal=base_signal,
             portfolio=position_state,
         )
@@ -360,6 +388,7 @@ class TradeProposalService:
             context=risk_context,
             strategy=signal.strategy,
             signal_id=signal.signal_id,
+            intent=signal.intent,
         )
         decision = self._stable_decision(decision, key)
         if decision.status is RiskDecisionStatus.REJECTED:
@@ -384,6 +413,7 @@ class TradeProposalService:
             "market": instrument.market,
             "asset_class": instrument.asset_class.value,
             "side": side.value,
+            "intent": signal.intent.value,
             "quantity": sizing.quantity,
             "entry_price": entry,
             "stop_price": stop,
@@ -745,6 +775,7 @@ class TradeProposalService:
                 "symbol": signal.symbol,
                 "strategy": signal.strategy,
                 "side": signal.side.value,
+                "intent": signal.intent.value,
                 "entry_price": signal.entry_price,
                 "stop_price": signal.stop_loss,
                 "target_price": signal.take_profit,
@@ -857,13 +888,19 @@ class TradeProposalService:
     @staticmethod
     def _signal_from_row(row: Mapping[str, Any]) -> Signal:
         payload = TradeProposalService._payload_mapping(row.get("payload"))
+        side = SignalSide(row["side"])
+        intent = payload.get("intent")
+        if side is SignalSide.SELL and intent is None:
+            raise AmbiguousLegacyIntent(
+                "persisted SELL signal predates explicit trade intent; "
+                "it cannot be interpreted as SHORT_SELL or SELL_TO_CLOSE")
         return Signal(
             instrument_id=row["instrument_id"],
             symbol=row["symbol"],
             timestamp=TradeProposalService._parse_time(
                 row["timestamp"], "signal timestamp"),
             strategy=row["strategy"],
-            side=SignalSide(row["side"]),
+            side=side,
             entry_price=payload.get("entry_price"),
             stop_loss=payload.get("stop_loss"),
             take_profit=payload.get("take_profit"),
@@ -875,6 +912,7 @@ class TradeProposalService:
             invalidation_conditions=tuple(
                 payload.get("invalidation_conditions", ())),
             signal_id=UUID(row["signal_id"]),
+            intent=intent,
         )
 
     @staticmethod

@@ -10,7 +10,7 @@ import pandas as pd
 from ..brokers import MarketStatus
 from ..markets import MarketRegistry, default_markets
 from ..models import Instrument
-from .provider import DataUnavailable, MarketDataProvider, Quote, interval_delta
+from .provider import DataUnavailable, MarketDataProvider, Quote, UnsupportedSymbol, interval_delta
 
 
 class MockProvider(MarketDataProvider):
@@ -42,7 +42,7 @@ class MockProvider(MarketDataProvider):
         for inst in self._instruments.values():
             if (inst.symbol == symbol or inst.instrument_id == symbol) and (market is None or inst.market == market.upper()):
                 return inst
-        raise DataUnavailable(f"unknown instrument {symbol!r}")
+        raise UnsupportedSymbol(f"unknown instrument {symbol!r}")
 
     def get_quote(self, instrument: Instrument) -> Quote:
         try:

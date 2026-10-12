@@ -622,7 +622,8 @@ def cmd_scan(universe_id: str, mode: str, top_n: int | None) -> int:
             for row in store.instruments.list()
         }
         raw_provider = create_market_data_provider(
-            settings.data_provider, instruments, markets=markets)
+            settings.data_provider, instruments, markets=markets,
+            routes=dict(settings.data_provider_routes))
         market_data = ResilientProvider(
             raw_provider,
             policy=DataPolicy(
@@ -687,7 +688,8 @@ def cmd_candidate_research(
             for row in store.instruments.list()
         }
         raw_provider = create_market_data_provider(
-            settings.data_provider, instruments, markets=markets)
+            settings.data_provider, instruments, markets=markets,
+            routes=dict(settings.data_provider_routes))
         market_data = ResilientProvider(
             raw_provider,
             policy=DataPolicy(

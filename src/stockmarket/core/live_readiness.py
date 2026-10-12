@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .data.capabilities import is_live_eligible
 from .executors import (
     LIVE_CONFIRMATION_PHRASE,
     ExecutionSettings,
@@ -20,7 +21,6 @@ from .executors import (
 )
 
 _NTP_EPOCH_OFFSET = 2208988800
-_RESEARCH_ONLY = {"yahoo", "mock", "twelvedata"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +137,13 @@ class LiveReadinessChecker:
         return True, f"account {account.account_id} verified"
 
     def _market_data(self) -> tuple[bool, str]:
-        if self._s.data_provider in _RESEARCH_ONLY:
-            return False, f"data provider {self._s.data_provider!r} is research-only"
+        configured = [("DATA_PROVIDER", self._s.data_provider), *(
+            (f"DATA_PROVIDER_{market}", name)
+            for market, name in getattr(self._s, "data_provider_routes", ()))]
+        for label, name in configured:
+            # Allowlist: an unknown provider is treated exactly like a research-only one.
+            if not is_live_eligible(name):
+                return False, f"{label}={name!r} is research-only or not approved for live trading"
         stale = self._health.data_is_stale()
         return (not stale), "market data is stale or missing" if stale else "fresh"
 

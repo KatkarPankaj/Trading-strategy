@@ -17,6 +17,7 @@ from .models import (
     PositionSide,
     Signal,
     SignalSide,
+    TradeIntent,
 )
 from .risk import OrderIntent
 from .order_management import UnknownOrder
@@ -25,6 +26,11 @@ from .trading_service import AutomaticSizingRejected, OrderTicket, TradingServic
 
 QuoteSource = Callable[[str], tuple[float, datetime] | None]
 PriceUpdate = Callable[[str, float, datetime], None]
+
+_SUBMISSION_OUTCOME = {
+    OrderStatus.REJECTED: "PAPER_ORDER_REJECTED",
+    OrderStatus.FAILED: "PAPER_ORDER_FAILED",
+}
 
 
 class PaperLifecycleError(ValueError):
@@ -108,10 +114,15 @@ class PaperProposalExecutionService:
                 raise PaperLifecycleError(
                     f"proposal was rejected before order creation: {prior['error']}")
             if prior["state"] == "RETRYABLE":
+                # Automatic sizing persists the sized quantity at finish(); the retry
+                # must still request automatic sizing rather than a manual quantity.
+                quantity_matches = (
+                    quantity is None if sizing_mode == "AUTOMATIC_SIZING"
+                    else prior["quantity"] == quantity)
                 if (
                     prior["operator"] != operator
                     or prior["sizing_mode"] != sizing_mode
-                    or prior["quantity"] != quantity
+                    or not quantity_matches
                 ):
                     raise PaperLifecycleError(
                         "safe retry must use the original operator and sizing parameters")
@@ -148,6 +159,7 @@ class PaperProposalExecutionService:
             raise PaperLifecycleError("position already exists for proposal instrument")
         if any(
             order.instrument_id == instrument.instrument_id
+            and not (retry and order.client_order_id == client_order_id)
             for order in self.trading.order_manager.open_orders()
         ):
             raise PaperLifecycleError("an open order already targets the instrument")
@@ -196,7 +208,17 @@ class PaperProposalExecutionService:
             data_reference=f"trade-proposal:{proposal_id}",
         )
         try:
-            if sizing_mode == "AUTOMATIC_SIZING":
+            if sizing_mode == "AUTOMATIC_SIZING" and retry and prior["quantity"] is not None:
+                # A safe retry re-sends the identical order; risk is still re-evaluated.
+                submitted_quantity = int(prior["quantity"])
+                result = self.trading.submit_signal(
+                    signal,
+                    submitted_quantity,
+                    actor=f"api:{operator}",
+                    audit=audit,
+                    client_order_id=client_order_id,
+                )
+            elif sizing_mode == "AUTOMATIC_SIZING":
                 result, sizing = self.trading.submit_sized_signal(
                     signal,
                     actor=f"api:{operator}",
@@ -242,7 +264,8 @@ class PaperProposalExecutionService:
             "order": result.order,
             "risk_decision": result.risk,
             "duplicate": result.duplicate,
-            "execution": "PAPER_ORDER_CREATED",
+            "execution": _SUBMISSION_OUTCOME.get(
+                result.order.status, "PAPER_ORDER_CREATED"),
         }
 
     def _validate_provenance(
@@ -294,9 +317,15 @@ class PaperProposalExecutionService:
             current_version = getattr(getattr(strategy, "metadata", None), "version", None)
         if current_version != proposal.get("strategy_version"):
             raise PaperLifecycleError("proposal strategy version is not currently registered")
-        signal = TradeProposalService._signal_from_row(signal_row)
-        if signal.side not in (SignalSide.BUY, SignalSide.SELL):
-            raise PaperLifecycleError("only persisted actionable signals may be submitted")
+        try:
+            signal = TradeProposalService._signal_from_row(signal_row)
+        except ValueError as exc:
+            raise PaperLifecycleError(
+                f"AMBIGUOUS_LEGACY_INTENT: persisted signal cannot be submitted: {exc}") from exc
+        if signal.side not in (SignalSide.BUY, SignalSide.SELL) or not signal.intent.is_entry:
+            raise PaperLifecycleError("only persisted actionable entry signals may be submitted")
+        if proposal.get("intent") not in (None, signal.intent.value):
+            raise PaperLifecycleError("proposal trade intent does not match its signal")
         if (
             proposal.get("signal_id") != str(signal.signal_id)
             or proposal.get("side") != signal.side.value
@@ -553,6 +582,7 @@ class PaperPositionManager:
         ))
         client_order_id = str(uuid5(NAMESPACE_URL, f"paper-exit-order:{proposal_id}"))
         side = OrderSide.SELL if position.side is PositionSide.LONG else OrderSide.BUY
+        trade_intent = TradeIntent.close_for(position.side)
         signal_side = SignalSide(side.value)
         signal_id = uuid5(NAMESPACE_URL, f"paper-exit-signal:{proposal_id}")
         signal = Signal(
@@ -564,6 +594,7 @@ class PaperPositionManager:
             entry_price=price,
             reasons=(reason,),
             signal_id=signal_id,
+            intent=trade_intent,
         )
         self.store.position_exit_proposals.prepare(
             proposal_id=proposal_id,
@@ -582,6 +613,7 @@ class PaperPositionManager:
                 "proposal_id": entry["proposal"].get("proposal_id"),
                 "signal_id": str(signal_id),
                 "execution": "PAPER",
+                "trade_intent": trade_intent.value,
             },
         )
         ticket = OrderTicket(
@@ -593,6 +625,7 @@ class PaperPositionManager:
             client_order_id=client_order_id,
             signal_id=signal_id,
             intent=OrderIntent.EXIT,
+            trade_intent=trade_intent,
             audit=AuditContext(
                 exit_reason=reason,
                 data_reference=f"position-exit:{proposal_id}",

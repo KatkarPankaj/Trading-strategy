@@ -12,7 +12,7 @@ import pandas as pd
 from ..data import DataQualityError, validate_bars
 from ..data.provider import interval_delta
 from ..market_session import MarketSession
-from ..models import AssetClass, Instrument, Signal, SignalSide
+from ..models import AssetClass, Instrument, Signal, SignalSide, TradeIntent
 from .base import StrategyMetadata
 
 
@@ -188,6 +188,8 @@ class OrbVwapStrategy:
             reward_risk=reward / risk,
             reasons=reasons,
             invalidation_conditions=("Closing price crosses VWAP against the signal",),
+            # a breakdown below the range is a short entry, never an exit of a long
+            intent=TradeIntent.BUY if side is SignalSide.BUY else TradeIntent.SHORT_SELL,
         )
 
     def _hold(self, instrument: Instrument, timestamp: datetime, reason: str) -> Signal:

@@ -55,7 +55,8 @@ def order_from_row(row: Mapping[str, Any]) -> ManagedOrder:
         timestamp=datetime.fromisoformat(row["timestamp"]), strategy=row["strategy"],
         signal_id=_uuid(row["signal_id"]), risk_decision_id=_uuid(row["risk_decision_id"]),
         status=OrderStatus(row["status"]), filled_quantity=row["filled_quantity"],
-        average_fill_price=row["average_fill_price"], error=row["error"])
+        average_fill_price=row["average_fill_price"], error=row["error"],
+        trade_intent=row.get("trade_intent"))
 
 
 def _uuid(value: str | None) -> Any:

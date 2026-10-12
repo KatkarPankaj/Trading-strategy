@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from .data.capabilities import capabilities_for, is_known_provider, is_live_eligible
 from .executors import ExecutionConfigError, ExecutionSettings, TradingMode
 from .risk_portfolio import PortfolioRiskLimits
 from .security import (
@@ -30,7 +31,6 @@ class Environment(str, Enum):
 
 
 _STRICT_ENVS = frozenset({Environment.STAGING, Environment.PRODUCTION})
-_RESEARCH_ONLY_PROVIDERS = frozenset({"yahoo", "mock", "twelvedata"})
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
@@ -90,7 +90,8 @@ class AppSettings:
     risk: RiskSettings
     log_level: str
     max_market_data_age_seconds: float
-
+    # Per-market overrides of data_provider, from DATA_PROVIDER_<MARKET>; empty means one provider.
+    data_provider_routes: tuple[tuple[str, str], ...] = ()
     def to_public_dict(self) -> dict[str, Any]:
         """Safe to log or show in a UI: secrets are masked."""
         return {
@@ -101,6 +102,7 @@ class AppSettings:
             "base_currency": self.base_currency,
             "markets": list(self.markets),
             "data_provider": self.data_provider,
+            "data_provider_routes": dict(self.data_provider_routes),
             "broker": self.broker,
             "broker_credentials_configured": self.broker_api_key is not None and self.broker_api_secret is not None,
             "risk": {k: getattr(self.risk, k) for k in self.risk.__slots__},
@@ -207,14 +209,35 @@ def load_settings(
         r.errors.append("MARKETS must list at least one market")
 
     data_provider = (r.text("DATA_PROVIDER", "mock") or "mock").lower()
+    if not is_known_provider(data_provider):
+        r.errors.append(
+            f"DATA_PROVIDER={data_provider!r} is not a supported provider")
+    routes: list[tuple[str, str]] = []
+    for key in sorted(values):
+        if not key.startswith("DATA_PROVIDER_"):
+            continue
+        market = key[len("DATA_PROVIDER_"):]
+        route = (values[key] or "").strip().lower()
+        if market not in markets:
+            r.errors.append(f"{key} routes market {market!r}, which is not listed in MARKETS")
+        elif not is_known_provider(route):
+            r.errors.append(f"{key}={route!r} is not a supported provider")
+        else:
+            caps = capabilities_for(route)
+            if caps is not None and caps.markets is not None and market not in caps.markets:
+                r.errors.append(f"{key}={route} does not serve market {market}")
+            routes.append((market, route))
     broker = (r.text("BROKER", "paper") or "paper").lower()
     if execution.mode is TradingMode.LIVE:
         if broker == "paper":
             r.errors.append(
                 "BROKER must be a real broker when TRADING_MODE=live")
-        if data_provider in _RESEARCH_ONLY_PROVIDERS:
-            r.errors.append(
-                f"DATA_PROVIDER={data_provider} is research-only and cannot feed live trading")
+        # Allowlist: unknown or research-only providers can never feed live trading.
+        for label, name in (("DATA_PROVIDER", data_provider),
+                            *((f"DATA_PROVIDER_{m}", p) for m, p in routes)):
+            if not is_live_eligible(name):
+                r.errors.append(
+                    f"{label}={name} is research-only or not approved and cannot feed live trading")
 
     api_key = api_secret = None
     needs_credentials = broker != "paper" and (
@@ -251,5 +274,5 @@ def load_settings(
         base_currency=base_currency, markets=markets, data_provider=data_provider, broker=broker,
         broker_api_key=api_key, broker_api_secret=api_secret,
         broker_account_id=r.text("BROKER_ACCOUNT_ID"), risk=risk, log_level=log_level,
-        max_market_data_age_seconds=max_age,
+        max_market_data_age_seconds=max_age, data_provider_routes=tuple(routes),
     )

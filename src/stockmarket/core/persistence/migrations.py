@@ -343,6 +343,11 @@ _V15 = [
         created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
 ]
 
+# Legacy rows keep NULL: their intent is unknown and must never be guessed for a SELL.
+_V16 = [
+    "ALTER TABLE orders ADD COLUMN trade_intent TEXT",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -355,7 +360,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (12, "paper_position_exit_proposals", _V12),
     (13, "durable_paper_execution_and_autonomous_cycles", _V13),
     (14, "autonomous_paper_cycle_lock_leases", _V14),
-    (15, "personal_research_recommendations", _V15)]
+    (15, "personal_research_recommendations", _V15),
+    (16, "explicit_trade_intent", _V16)]
 
 
 def applied_versions(db: Database) -> set[int]:

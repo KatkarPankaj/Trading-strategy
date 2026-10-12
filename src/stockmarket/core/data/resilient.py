@@ -23,6 +23,7 @@ from .provider import (
     ProviderTimeout,
     Quote,
     RateLimited,
+    expected_provider_name,
     interval_delta,
 )
 from .quality import validate_bars, validate_quote
@@ -86,6 +87,9 @@ class ResilientProvider:
     def research_only(self) -> bool:
         return self._p.research_only
 
+    def provider_name_for(self, instrument: Instrument) -> str:
+        return expected_provider_name(self._p, instrument)
+
     @property
     def breaker_state(self) -> str:
         return self._breaker.state
@@ -97,7 +101,7 @@ class ResilientProvider:
             issues = ("INSTRUMENT_MISMATCH",)
             self._warn("quote rejected", instrument, issues)
             raise DataQualityError(issues)
-        if isinstance(quote, Quote) and quote.provider != self._p.name:
+        if isinstance(quote, Quote) and quote.provider != expected_provider_name(self._p, instrument):
             issues = ("PROVIDER_MISMATCH",)
             self._warn("quote rejected", instrument, issues)
             raise DataQualityError(issues)

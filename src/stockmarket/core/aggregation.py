@@ -11,7 +11,7 @@ from math import isfinite
 from typing import Any, Mapping
 from uuid import UUID, uuid5
 
-from .models import Signal, SignalSide
+from .models import Signal, SignalSide, TradeIntent
 
 EXPLANATION_VERSION = 1
 _NAMESPACE = UUID("6f1c2b0e-3d4a-4b8e-9a57-0c1d2e3f4a5b")
@@ -239,6 +239,11 @@ class AggregatedDecision:
             regime=regime,
             reasons=self.reason_codes or ("NO_REASON",),
             signal_id=self.decision_id,
+            # aggregated strategy actions are entries; exits come from the position lifecycle
+            intent={
+                SignalSide.BUY: TradeIntent.BUY,
+                SignalSide.SELL: TradeIntent.SHORT_SELL,
+            }.get(side, TradeIntent.NO_TRADE),
         )
 
 

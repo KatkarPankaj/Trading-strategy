@@ -352,6 +352,7 @@ def _opportunities(client: ApiClient) -> None:
                 "symbol": item["symbol"],
                 "market": item["market"],
                 "side": item["side"],
+                "intent": item.get("intent", "UNSPECIFIED"),
                 "strategy": item["strategy"],
                 "opportunity_score": item["opportunity_score"],
                 "aggregate_score": item["aggregate_score"],

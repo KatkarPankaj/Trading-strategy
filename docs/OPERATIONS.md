@@ -29,6 +29,12 @@ OpenAI-compatible endpoint with `AI_BASE_URL` (base URL ending in `/v1` where
 applicable), `AI_MODEL`, and `AI_API_KEY` or `AI_API_KEY_FILE`. The endpoint
 must use HTTPS; HTTP is accepted only for loopback development.
 `AI_TIMEOUT_SECONDS` defaults to 20 and is bounded to 1-120 seconds.
+Optional cost controls: `AI_MAX_RETRIES` (0-3, default 0) retries only
+timeouts and HTTP 408/429/5xx; `AI_TOKEN_BUDGET` caps per-process token use
+and fails closed with `AI_BUDGET_EXHAUSTED` (it resets on restart);
+`AI_MAX_OUTPUT_TOKENS` (1-32768) is sent as `max_tokens`, which some reasoning
+models reject. Each persisted assessment records `ai_usage` (calls, attempts,
+prompt/completion counts, and whether counts were estimated).
 Compose mounts `secrets/ai_api_key.txt` as the key-file secret. Keep the
 non-secret endpoint, model, and session settings in the ignored host `.env`.
 

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from .ai.candidate_assessment import CandidateAssessmentService, CandidateAssessmentError
 from .candidate_research import CandidateResearchService
-from .data.provider import DataProviderError, DataQualityError, interval_delta
+from .data.provider import DataProviderError, DataQualityError, expected_provider_name, interval_delta
 from .data.quality import validate_bars, validate_quote
 from .data.resilient import ResilientProvider
 from .market_session import MarketSession
@@ -103,7 +103,8 @@ class PersonalResearchService:
             try:
                 quote = self.data.get_quote(instrument)
                 report = validate_quote(quote, timestamp, timedelta(minutes=5))
-                identity_ok = quote.instrument_id == instrument_id and quote.provider == self.data.name
+                identity_ok = quote.instrument_id == instrument_id \
+                    and quote.provider == expected_provider_name(self.data, instrument)
                 issues = report.issues + (() if identity_ok else ("QUOTE_IDENTITY_MISMATCH",))
                 result["quote"] = {
                     "status": "AVAILABLE" if not issues else data_status(issues),

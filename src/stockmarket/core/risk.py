@@ -20,6 +20,7 @@ from .models import (
     RiskDecisionStatus,
     Signal,
     SignalSide,
+    TradeIntent,
     TradingStatus,
 )
 from .market_session import MarketSession
@@ -111,6 +112,38 @@ class RiskContext:
     take_profit: Any = None
     signal: Signal | None = None
     portfolio: Any = None  # PortfolioRiskState; required when portfolio limits are set
+    trade_intent: TradeIntent | None = None
+
+
+def resolve_trade_intent(order: Order, context: RiskContext) -> TradeIntent:
+    """Resolve the explicit trade intent, raising ValueError on any contradiction.
+
+    Explicit values (context.trade_intent, order.intent) win. Only when neither is given
+    is the intent derived from the explicitly declared ENTRY/EXIT purpose plus side.
+    """
+    declared = [
+        value for value in (context.trade_intent, order.intent) if value is not None]
+    for value in declared:
+        if not isinstance(value, TradeIntent):
+            raise ValueError("trade intent must be a TradeIntent")
+    if len(set(declared)) > 1:
+        raise ValueError("order and context declare different trade intents")
+    if declared:
+        intent = declared[0]
+    elif context.intent is OrderIntent.EXIT:
+        intent = (TradeIntent.COVER if order.side is OrderSide.BUY
+                  else TradeIntent.SELL_TO_CLOSE)
+    else:
+        intent = TradeIntent.entry_for(order.side)
+    if not intent.is_executable:
+        return intent
+    if intent.order_side is not order.side:
+        raise ValueError(
+            f"trade intent {intent.value} contradicts order side {order.side.value}")
+    if intent.is_exit != (context.intent is OrderIntent.EXIT):
+        raise ValueError(
+            f"trade intent {intent.value} contradicts order purpose {context.intent.value}")
+    return intent
 
 
 def _is_aware(value: object) -> bool:
@@ -190,6 +223,7 @@ class RiskEngine:
         stop_price: object = None,
         strategy: str = "",
         signal_id: object = None,
+        intent: object = None,
     ) -> RiskDecision:
         """Validate raw order fields and return a decision instead of raising."""
         if self._limits is None:
@@ -204,6 +238,12 @@ class RiskEngine:
                 "A matching instrument definition is required.",
                 context=context,
             )
+        if intent == TradeIntent.NO_TRADE.value:
+            return self._reject(
+                "NO_TRADE_NOT_EXECUTABLE",
+                "A NO_TRADE outcome can never be approved as an order.",
+                context=context,
+            )
         try:
             order = Order(
                 instrument_id=instrument.instrument_id,
@@ -216,6 +256,7 @@ class RiskEngine:
                 stop_price=stop_price,  # type: ignore[arg-type]
                 strategy=strategy,
                 signal_id=signal_id,  # type: ignore[arg-type]
+                intent=intent,  # type: ignore[arg-type]
             )
         except (TypeError, ValueError) as exc:
             return self._reject(
@@ -300,6 +341,22 @@ class RiskEngine:
             return self._reject(
                 "ORDER_INTENT_INVALID",
                 "Order intent must be ENTRY or EXIT.",
+                order,
+                context,
+            )
+        if context.trade_intent is TradeIntent.NO_TRADE:
+            return self._reject(
+                "NO_TRADE_NOT_EXECUTABLE",
+                "A NO_TRADE outcome can never be approved as an order.",
+                order,
+                context,
+            )
+        try:
+            trade_intent = resolve_trade_intent(order, context)
+        except ValueError as exc:
+            return self._reject(
+                "TRADE_INTENT_CONTRADICTORY",
+                f"Trade intent is inconsistent: {exc}.",
                 order,
                 context,
             )
@@ -411,6 +468,14 @@ class RiskEngine:
                 return self._reject(
                     "SIGNAL_DATA_MISMATCH",
                     "Signal is newer than the market-data snapshot being assessed.",
+                    order,
+                    context,
+                )
+            if signal.intent is not trade_intent:
+                return self._reject(
+                    "SIGNAL_INTENT_MISMATCH",
+                    f"Signal intent {signal.intent.value} does not match order intent "
+                    f"{trade_intent.value}.",
                     order,
                     context,
                 )

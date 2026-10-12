@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..core.models import OrderSide, OrderType
+from ..core.models import OrderSide, OrderType, TradeIntent
 from ..core.research import ResearchEvidence
 from ..core.risk import OrderIntent
 
@@ -73,11 +73,29 @@ class OrderBody(BaseModel):
     take_profit: float | None = _price()
     signal_id: UUID | None = None
     intent: OrderIntent = OrderIntent.ENTRY
+    trade_intent: TradeIntent | None = None
     market_regime: str | None = Field(
         default=None, max_length=32, pattern=r"^[A-Z_]+$")
     parameters_hash: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$")
     audit: AuditBody | None = None
+
+    @model_validator(mode="after")
+    def explicit_trade_intent(self) -> "OrderBody":
+        intent = self.trade_intent
+        if intent is None:
+            if self.side is OrderSide.SELL and self.intent is OrderIntent.ENTRY:
+                raise ValueError(
+                    "a SELL entry is ambiguous: set trade_intent to SHORT_SELL "
+                    "(or use intent EXIT with SELL_TO_CLOSE to close a long)")
+            return self
+        if not intent.is_executable:
+            raise ValueError("NO_TRADE cannot be submitted as an order")
+        if intent.order_side is not self.side:
+            raise ValueError(f"trade_intent {intent.value} contradicts side {self.side.value}")
+        if intent.is_exit != (self.intent is OrderIntent.EXIT):
+            raise ValueError(f"trade_intent {intent.value} contradicts intent {self.intent.value}")
+        return self
 
 
 class ResearchEvidenceBody(BaseModel):

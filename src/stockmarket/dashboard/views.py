@@ -35,8 +35,9 @@ def top_signals(signals: list[dict[str, Any]], limit: int = 20) -> pd.DataFrame:
     if df.empty:
         return df
     df["regime"] = [_payload(s).get("regime") for s in signals]
+    df["intent"] = [_payload(s).get("intent") or "UNSPECIFIED" for s in signals]
     return df.sort_values("confidence", ascending=False).head(limit)[
-        ["timestamp", "symbol", "strategy", "side", "confidence", "regime"]]
+        ["timestamp", "symbol", "strategy", "side", "intent", "confidence", "regime"]]
 
 
 def regime_counts(signals: list[dict[str, Any]]) -> pd.DataFrame:

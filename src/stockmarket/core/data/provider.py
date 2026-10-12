@@ -20,27 +20,90 @@ OHLCV = ("open", "high", "low", "close", "volume")
 
 
 class DataProviderError(Exception):
-    pass
+    """Base provider failure. `code` is a stable machine-readable reason for callers and audits."""
+
+    code = "DATA_PROVIDER_ERROR"
 
 
 class DataUnavailable(DataProviderError):
     """No usable data (outage, unknown instrument, open circuit). Callers must not trade."""
 
+    code = "DATA_UNAVAILABLE"
+
+
+class ProviderAuthenticationFailed(DataUnavailable):
+    """The provider rejected the configured credentials."""
+
+    code = "AUTHENTICATION_FAILED"
+
+
+class EntitlementMissing(DataUnavailable):
+    """The account/plan is not entitled to this exchange, symbol, interval or depth."""
+
+    code = "ENTITLEMENT_MISSING"
+
+
+class UnsupportedSymbol(DataUnavailable):
+    """The provider does not know the requested symbol on the requested venue."""
+
+    code = "UNSUPPORTED_SYMBOL"
+
+
+class UnsupportedMarket(DataUnavailable):
+    """The provider (or its configured route) does not serve this market or exchange."""
+
+    code = "UNSUPPORTED_MARKET"
+
+
+class UnsupportedInterval(DataUnavailable, ValueError):
+    """The provider does not supply this bar interval (also a ValueError for older callers)."""
+
+    code = "UNSUPPORTED_INTERVAL"
+
+
+class HistoryDepthUnavailable(DataUnavailable):
+    """The requested history lies beyond what the provider can serve for that interval."""
+
+    code = "HISTORY_DEPTH_UNAVAILABLE"
+
 
 class DataQualityError(DataProviderError):
+    code = "DATA_QUALITY_FAILED"
+
     def __init__(self, issues: tuple[str, ...]) -> None:
         self.issues = issues
+        if any(issue.startswith("STALE_") for issue in issues):
+            self.code = "STALE_DATA"
         super().__init__("data failed validation: " + ", ".join(issues))
 
 
 class RateLimited(DataProviderError):
+    code = "RATE_LIMITED"
+
     def __init__(self, retry_after: float = 1.0) -> None:
         self.retry_after = retry_after
         super().__init__(f"rate limited; retry after {retry_after}s")
 
 
 class ProviderTimeout(TimeoutError, DataProviderError):
-    pass
+    code = "PROVIDER_TIMEOUT"
+
+
+def provider_error_code(error: BaseException) -> str:
+    """Stable reason code for any provider failure; unknown failures stay distinguishable."""
+    if isinstance(error, DataProviderError):
+        return error.code
+    if isinstance(error, TimeoutError):
+        return "PROVIDER_TIMEOUT"
+    if isinstance(error, ConnectionError):
+        return "PROVIDER_CONNECTION_FAILED"
+    return "PROVIDER_ERROR"
+
+
+def expected_provider_name(provider: object, instrument: Instrument) -> str:
+    """The provenance name a quote for ``instrument`` must carry; per-market routers override it."""
+    resolve = getattr(provider, "provider_name_for", None)
+    return resolve(instrument) if callable(resolve) else getattr(provider, "name")
 
 
 @dataclass(frozen=True, slots=True)

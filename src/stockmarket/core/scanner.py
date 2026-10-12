@@ -21,6 +21,7 @@ from .data.provider import (
     DataQualityError,
     MarketDataProvider,
     Quote,
+    expected_provider_name,
     interval_delta,
 )
 from .data.quality import validate_bars, validate_quote
@@ -696,7 +697,7 @@ class MarketScanner:
                 quote = self._data.get_quote(instrument)
                 quote_report = validate_quote(quote, as_of, self._settings.maximum_quote_age)
                 if not quote_report.ok or quote.instrument_id != instrument.instrument_id \
-                        or quote.provider != self._data.name \
+                        or quote.provider != expected_provider_name(self._data, instrument) \
                         or not instrument.is_valid_price(quote.price):
                     issues = quote_report.issues or ("QUOTE_ID_PROVIDER_OR_TICK_MISMATCH",)
                     timestamp = quote.timestamp if isinstance(quote, Quote) else None

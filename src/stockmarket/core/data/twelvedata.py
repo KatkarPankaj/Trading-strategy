@@ -24,10 +24,15 @@ from ..models import Instrument
 from .provider import (
     OHLCV,
     DataUnavailable,
+    EntitlementMissing,
     MarketDataProvider,
+    ProviderAuthenticationFailed,
     ProviderTimeout,
     Quote,
     RateLimited,
+    UnsupportedInterval,
+    UnsupportedMarket,
+    UnsupportedSymbol,
     interval_delta,
 )
 
@@ -117,7 +122,7 @@ class TwelveDataProvider(MarketDataProvider):
             if (inst.symbol == symbol or inst.instrument_id == symbol) and (
                     market is None or inst.market == market.upper()):
                 return inst
-        raise DataUnavailable(f"unknown instrument {symbol!r}")
+        raise UnsupportedSymbol(f"unknown instrument {symbol!r}")
 
     def get_quote(self, instrument: Instrument) -> Quote:
         df = self._fetch(instrument, {"interval": "1min", "outputsize": "5"})
@@ -132,7 +137,7 @@ class TwelveDataProvider(MarketDataProvider):
                   end: datetime) -> pd.DataFrame:
         step = interval_delta(interval)
         if interval not in INTERVALS:
-            raise ValueError(f"Twelve Data does not support interval {interval!r}")
+            raise UnsupportedInterval(f"Twelve Data does not support interval {interval!r}")
         if start.tzinfo is None or end.tzinfo is None:
             raise ValueError("start and end must be timezone-aware")
         if end <= start:
@@ -164,7 +169,7 @@ class TwelveDataProvider(MarketDataProvider):
 
     def _fetch(self, instrument: Instrument, extra: Mapping[str, str]) -> pd.DataFrame:
         if instrument.exchange not in SUPPORTED_MICS:
-            raise DataUnavailable(
+            raise UnsupportedMarket(
                 f"no Twelve Data mapping for exchange {instrument.exchange}")
         venue = ({"exchange": _EXCHANGE_PARAM[instrument.exchange]}
                  if instrument.exchange in _EXCHANGE_PARAM
@@ -201,13 +206,18 @@ class TwelveDataProvider(MarketDataProvider):
             raise RateLimited(60.0)
         lowered = message.lower()
         if "plan" in lowered and ("upgrad" in lowered or "available starting" in lowered):
-            raise DataUnavailable(
+            raise EntitlementMissing(
                 "Twelve Data plan does not include this exchange/symbol (paid plan required)")
-        if code in (401, 403):
-            raise DataUnavailable(
-                "Twelve Data rejected the API key or the plan lacks this exchange/data")
-        if code == 400 or code == 404:
-            raise DataUnavailable("Twelve Data has no data for this symbol/MIC/range")
+        if code == 401:
+            raise ProviderAuthenticationFailed("Twelve Data rejected the API key")
+        if code == 403:
+            raise EntitlementMissing(
+                "Twelve Data denied access: the plan lacks this exchange/data")
+        if code == 404 or (code == 400 and "symbol" in lowered and (
+                "not found" in lowered or "invalid" in lowered)):
+            raise UnsupportedSymbol("Twelve Data has no data for this symbol/MIC/range")
+        if code == 400:
+            raise DataUnavailable("Twelve Data rejected the request parameters")
         if code >= 500:
             raise ConnectionError(f"Twelve Data server error {code}")
         raise DataUnavailable(f"Twelve Data request failed with code {code}")

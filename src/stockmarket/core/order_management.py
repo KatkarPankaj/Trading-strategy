@@ -14,6 +14,8 @@ from .models import (
     OrderType,
     RiskDecision,
     RiskDecisionStatus,
+    TradeIntent,
+    coerce_trade_intent,
 )
 
 TERMINAL_STATUSES = frozenset({
@@ -82,8 +84,15 @@ class OrderRequest:
     signal_id: UUID | None = None
     limit_price: float | None = None
     stop_price: float | None = None
+    trade_intent: TradeIntent | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "trade_intent", coerce_trade_intent(self.trade_intent))
+        if self.trade_intent is not None and (
+            not self.trade_intent.is_executable
+            or self.trade_intent.order_side is not self.side
+        ):
+            raise ValueError("trade_intent must be executable and match the order side")
         for name in ("client_order_id", "instrument_id", "symbol", "strategy"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -118,7 +127,15 @@ class OrderRequest:
     def fingerprint(self) -> tuple:
         """Everything except the idempotency key and timestamp."""
         return (self.instrument_id, self.symbol, self.side, self.quantity, self.order_type,
-                self.limit_price, self.stop_price, self.strategy, self.signal_id)
+                self.limit_price, self.stop_price, self.strategy, self.signal_id,
+                self.trade_intent)
+
+    def same_request(self, other: "OrderRequest") -> bool:
+        """Equal fingerprints; a legacy record without trade_intent matches on the rest."""
+        mine, theirs = self.fingerprint(), other.fingerprint()
+        if self.trade_intent is None or other.trade_intent is None:
+            return mine[:-1] == theirs[:-1]
+        return mine == theirs
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +167,10 @@ class ManagedOrder:
     filled_quantity: int = 0
     average_fill_price: float | None = None
     error: str | None = None
+    trade_intent: TradeIntent | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "trade_intent", coerce_trade_intent(self.trade_intent))
 
     @property
     def remaining_quantity(self) -> int:
@@ -210,6 +231,17 @@ class OrderManager:
         with self._lock:
             return tuple(o for o in self._orders.values() if not o.is_terminal)
 
+    def pending_safe_retry(self, client_order_id: str | None) -> ManagedOrder | None:
+        """Return the NEW order authorized for an identical resubmission, if any."""
+        if client_order_id is None:
+            return None
+        with self._lock:
+            order = self._orders.get(client_order_id)
+            if (client_order_id in self._safe_retry and order is not None
+                    and order.status is OrderStatus.NEW):
+                return order
+            return None
+
     def events(self, client_order_id: str) -> tuple[OrderEvent, ...]:
         with self._lock:
             if client_order_id not in self._events:
@@ -227,7 +259,7 @@ class OrderManager:
                 and self._orders[request.client_order_id].status is OrderStatus.NEW
             )
             if known is not None:
-                if known.fingerprint() != request.fingerprint():
+                if not known.same_request(request):
                     raise IdempotencyConflict(
                         f"client_order_id {request.client_order_id} was used for a different request")
                 if not retry:
@@ -241,7 +273,8 @@ class OrderManager:
                     side=request.side, quantity=request.quantity, order_type=request.order_type,
                     limit_price=request.limit_price, stop_price=request.stop_price,
                     timestamp=request.timestamp, strategy=request.strategy,
-                    signal_id=request.signal_id, risk_decision_id=None, status=OrderStatus.NEW)
+                    signal_id=request.signal_id, risk_decision_id=None, status=OrderStatus.NEW,
+                    trade_intent=request.trade_intent)
                 self._requests[request.client_order_id] = request
                 self._orders[request.client_order_id] = order
                 self._events[request.client_order_id] = []
@@ -383,7 +416,8 @@ class OrderManager:
                 client_order_id=order.client_order_id, instrument_id=order.instrument_id,
                 symbol=order.symbol, side=order.side, quantity=order.quantity,
                 order_type=order.order_type, timestamp=order.timestamp, strategy=order.strategy,
-                signal_id=order.signal_id, limit_price=order.limit_price, stop_price=order.stop_price)
+                signal_id=order.signal_id, limit_price=order.limit_price, stop_price=order.stop_price,
+                trade_intent=order.trade_intent)
 
     def authorize_safe_retry(self, client_order_id: str) -> ManagedOrder:
         """Rewind only an unacknowledged order proven absent by a durable paper executor."""

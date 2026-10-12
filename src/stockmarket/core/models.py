@@ -65,6 +65,75 @@ class PositionSide(str, Enum):
     SHORT = "SHORT"
 
 
+class TradeIntent(str, Enum):
+    """Explicit economic purpose of a trade; never inferred from SELL alone."""
+
+    BUY = "BUY"                      # open or add to a long position
+    SELL_TO_CLOSE = "SELL_TO_CLOSE"  # reduce/close an existing long position
+    SHORT_SELL = "SHORT_SELL"        # open or add to a short position
+    COVER = "COVER"                  # reduce/close an existing short position
+    NO_TRADE = "NO_TRADE"            # never executable
+
+    @property
+    def order_side(self) -> "OrderSide | None":
+        return _INTENT_ORDER_SIDE[self]
+
+    @property
+    def is_entry(self) -> bool:
+        return self in (TradeIntent.BUY, TradeIntent.SHORT_SELL)
+
+    @property
+    def is_exit(self) -> bool:
+        return self in (TradeIntent.SELL_TO_CLOSE, TradeIntent.COVER)
+
+    @property
+    def is_executable(self) -> bool:
+        return self is not TradeIntent.NO_TRADE
+
+    @property
+    def position_side(self) -> "PositionSide | None":
+        """Position side that this intent opens (entry) or requires (exit)."""
+        if self in (TradeIntent.BUY, TradeIntent.SELL_TO_CLOSE):
+            return PositionSide.LONG
+        if self in (TradeIntent.SHORT_SELL, TradeIntent.COVER):
+            return PositionSide.SHORT
+        return None
+
+    @classmethod
+    def close_for(cls, position_side: PositionSide) -> "TradeIntent":
+        if position_side is PositionSide.LONG:
+            return cls.SELL_TO_CLOSE
+        if position_side is PositionSide.SHORT:
+            return cls.COVER
+        raise ValueError("position_side must be LONG or SHORT")
+
+    @classmethod
+    def entry_for(cls, side: "OrderSide") -> "TradeIntent":
+        if side is OrderSide.BUY:
+            return cls.BUY
+        if side is OrderSide.SELL:
+            return cls.SHORT_SELL
+        raise ValueError("side must be an OrderSide")
+
+
+_INTENT_ORDER_SIDE = {
+    TradeIntent.BUY: OrderSide.BUY,
+    TradeIntent.COVER: OrderSide.BUY,
+    TradeIntent.SELL_TO_CLOSE: OrderSide.SELL,
+    TradeIntent.SHORT_SELL: OrderSide.SELL,
+    TradeIntent.NO_TRADE: None,
+}
+
+
+def coerce_trade_intent(value: object) -> TradeIntent | None:
+    """Parse a persisted/user intent value; unknown strings raise ValueError."""
+    if value is None or isinstance(value, TradeIntent):
+        return value
+    if isinstance(value, str):
+        return TradeIntent(value.strip().upper())
+    raise TypeError("trade intent must be a TradeIntent or string")
+
+
 class RiskDecisionStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
@@ -261,6 +330,7 @@ class Signal:
     reasons: tuple[str, ...] = ()
     invalidation_conditions: tuple[str, ...] = ()
     signal_id: UUID = field(default_factory=uuid4)
+    intent: TradeIntent | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.instrument_id, "instrument_id")
@@ -268,6 +338,7 @@ class Signal:
         _require_text(self.strategy, "strategy")
         _require_text(self.regime, "regime")
         _require_enum(self.side, SignalSide, "side")
+        object.__setattr__(self, "intent", _signal_intent(self.side, self.intent))
         _require_aware_datetime(self.timestamp, "timestamp")
         _require_uuid(self.signal_id, "signal_id")
         _require_optional_price(self.entry_price, "entry_price")
@@ -311,6 +382,27 @@ class Signal:
                         "SELL signal take_profit must be below entry_price")
 
 
+def _signal_intent(side: SignalSide, intent: object) -> TradeIntent:
+    """BUY and HOLD have one safe meaning; SELL must say whether it shorts or closes."""
+    resolved = coerce_trade_intent(intent)
+    if resolved is None:
+        if side is SignalSide.BUY:
+            return TradeIntent.BUY
+        if side is SignalSide.HOLD:
+            return TradeIntent.NO_TRADE
+        raise ValueError(
+            "SELL signal intent is ambiguous; declare TradeIntent.SHORT_SELL or "
+            "TradeIntent.SELL_TO_CLOSE")
+    if side is SignalSide.HOLD:
+        if resolved is not TradeIntent.NO_TRADE:
+            raise ValueError("HOLD signals may only carry NO_TRADE intent")
+        return resolved
+    if resolved.order_side is None or resolved.order_side.value != side.value:
+        raise ValueError(
+            f"signal intent {resolved.value} contradicts side {side.value}")
+    return resolved
+
+
 @dataclass(frozen=True, slots=True)
 class Order:
     """A broker-independent paper/order-intent record."""
@@ -330,6 +422,7 @@ class Order:
     filled_quantity: int = 0
     average_fill_price: float | None = None
     order_id: UUID = field(default_factory=uuid4)
+    intent: TradeIntent | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.instrument_id, "instrument_id")
@@ -337,6 +430,14 @@ class Order:
         if self.strategy:
             _require_text(self.strategy, "strategy")
         _require_enum(self.side, OrderSide, "side")
+        intent = coerce_trade_intent(self.intent)
+        if intent is not None:
+            if not intent.is_executable:
+                raise ValueError("NO_TRADE intent cannot be an order")
+            if intent.order_side is not self.side:
+                raise ValueError(
+                    f"order intent {intent.value} contradicts side {self.side.value}")
+        object.__setattr__(self, "intent", intent)
         _require_enum(self.order_type, OrderType, "order_type")
         _require_enum(self.status, OrderStatus, "status")
         _require_aware_datetime(self.created_at, "created_at")
