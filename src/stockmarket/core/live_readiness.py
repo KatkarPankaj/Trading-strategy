@@ -20,7 +20,7 @@ from .executors import (
 )
 
 _NTP_EPOCH_OFFSET = 2208988800
-_RESEARCH_ONLY = {"yahoo", "mock"}
+_RESEARCH_ONLY = {"yahoo", "mock", "twelvedata"}
 
 
 @dataclass(frozen=True, slots=True)

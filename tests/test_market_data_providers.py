@@ -11,6 +11,7 @@ from stockmarket.core.data import (
     MarketDataProvider,
     MockProvider,
     Quote,
+    RateLimited,
     ResilientProvider,
     YahooProvider,
     create_market_data_provider,
@@ -176,6 +177,28 @@ class MarketDataProviderTests(unittest.TestCase):
             normalized, "1m", timezone=self.instrument.timezone)
         self.assertIn("DUPLICATE_TIMESTAMPS", report.issues)
         self.assertIn("UNSORTED_TIMESTAMPS", report.issues)
+
+    def test_yahoo_default_downloader_surfaces_recorded_rate_limit(self):
+        import sys
+        from unittest import mock
+        from stockmarket.core.data import yahoo as yahoo_module
+
+        errors = {}
+
+        def fake_download(**kwargs):
+            errors[kwargs["tickers"]] = "YFRateLimitError('Too Many Requests. Rate limited.')"
+            return pd.DataFrame()
+
+        fake_yf = SimpleNamespace(download=fake_download)
+        fake_shared = SimpleNamespace(_ERRORS=errors)
+        fake_yf.shared = fake_shared
+        with mock.patch.dict(sys.modules, {"yfinance": fake_yf, "yfinance.shared": fake_shared}):
+            with self.assertRaises(RateLimited):
+                yahoo_module._default_downloader(tickers="ALV.DE", period="1d", interval="1m")
+            errors.clear()
+            fake_yf.download = lambda **kwargs: pd.DataFrame()
+            self.assertTrue(yahoo_module._default_downloader(
+                tickers="ALV.DE", period="1d", interval="1m").empty)
 
     def test_quote_source_logs_provider_failures_and_fails_closed(self):
         class Logger:

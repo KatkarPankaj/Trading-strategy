@@ -18,7 +18,7 @@ from ..markets import MarketRegistry
 from ..models import Instrument
 from ..strategies.base import Strategy
 
-PROMPT_VERSION = "candidate-assessment-v1"
+PROMPT_VERSION = "candidate-assessment-v2"
 SCHEMA_VERSION = "candidate-assessment-v1"
 _COMPONENT_WEIGHTS = {
     "technical": 0.25,
@@ -367,13 +367,12 @@ class CandidateAssessmentService:
                     "risk_flags": output.risk_flags,
                     "key_evidence": output.key_evidence,
                     "invalidating_conditions": output.invalidating_conditions,
-                    "explanation": output.explanation,
                 },
             }
             selection_request = json.dumps({
                 "available_strategies": tuple(strategies),
                 "research": selection_context,
-            }, sort_keys=True, default=str)
+            }, sort_keys=True, separators=(",", ":"), default=str)
             if len(selection_request) > self.analyst.max_input_chars:
                 selection_error = (
                     "strategy-selection context exceeds the configured AI input limit")

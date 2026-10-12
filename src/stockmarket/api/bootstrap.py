@@ -471,7 +471,7 @@ def build_context(
         not gate.halted, gate.blocked_reason() or "open"))
     logger = StructuredLogger("platform", errors=health.errors)
     raw_market_data = create_market_data_provider(
-        settings.data_provider, instruments, markets=registry)
+        settings.data_provider, instruments, markets=registry, env=env)
     market_data = ResilientProvider(
         raw_market_data,
         policy=DataPolicy(max_quote_age=timedelta(

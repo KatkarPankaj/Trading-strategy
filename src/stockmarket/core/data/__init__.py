@@ -18,6 +18,7 @@ from .provider import (
 )
 from .quality import DataQualityReport, validate_bars, validate_quote
 from .resilient import DataPolicy, ResilientProvider, quote_source
+from .twelvedata import TwelveDataProvider
 from .yahoo import YahooProvider, yahoo_symbol
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "Quote",
     "RateLimited",
     "ResilientProvider",
+    "TwelveDataProvider",
     "YahooProvider",
     "quote_source",
     "validate_bars",

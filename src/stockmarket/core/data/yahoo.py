@@ -37,7 +37,24 @@ def yahoo_symbol(instrument: Instrument) -> str:
 def _default_downloader(**kwargs: Any) -> pd.DataFrame:
     import yfinance as yf
 
-    return yf.download(progress=False, auto_adjust=False, threads=False, **kwargs)
+    raw = yf.download(progress=False, auto_adjust=False,
+                      threads=False, **kwargs)
+    if raw is None or raw.empty:
+        _raise_recorded_download_error(kwargs.get("tickers"))
+    return raw
+
+
+def _raise_recorded_download_error(ticker: Any) -> None:
+    """yf.download records per-ticker failures instead of raising; surface rate limits."""
+    try:
+        import yfinance.shared as shared
+        errors = getattr(shared, "_ERRORS", {}) or {}
+    except Exception:
+        return
+    message = str(errors.get(str(ticker), ""))
+    lowered = message.lower()
+    if "ratelimit" in lowered or ("rate" in lowered and "limit" in lowered) or "too many requests" in lowered:
+        raise RateLimited(30.0)
 
 
 class YahooProvider(MarketDataProvider):

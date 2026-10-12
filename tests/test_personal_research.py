@@ -235,6 +235,54 @@ class PersonalResearchTests(unittest.TestCase):
         self.assertEqual(len(provider.users), 2)
         self.assert_no_orders()
 
+    def test_long_valid_ai_explanation_does_not_overflow_strategy_selection(self):
+        provider = self.enable_ai()
+        original = provider.complete
+        explanation = "Synthetic assessment explanation. " * 60
+        explanation = explanation[:2000]
+
+        def complete(system, user):
+            response = json.loads(original(system, user))
+            if "explanation" in response:
+                response["explanation"] = explanation
+            return json.dumps(response)
+
+        with patch.object(provider, "complete", side_effect=complete):
+            result = self.run_research("long-ai-explanation")
+
+        row = result["recommendations"][0]
+        self.assertEqual(row["ai_status"], "COMPLETE", row["ai_assessment"].get("error"))
+        self.assertEqual(row["ai_assessment"]["explanation"], explanation)
+        self.assertEqual(len(provider.users), 2)
+        request = provider.users[1].split("<untrusted>\n", 1)[1].split("\n</untrusted>", 1)[0]
+        self.assertLessEqual(len(request), self.service.assessment.analyst.max_input_chars)
+        selection = json.loads(request)["research"]
+        self.assertNotIn("explanation", selection["ai_assessment"])
+        self.assertEqual(selection["instrument_id"], "XNAS:AAPL")
+        self.assertEqual(selection["as_of"], AS_OF.isoformat())
+        self.assertEqual(selection["evidence"], row["ai_assessment"]["input_context"]["evidence"])
+        self.assertEqual(selection["missing_evidence"],
+                         row["ai_assessment"]["input_context"]["missing_evidence"])
+        self.assert_no_orders()
+
+    def test_oversized_strategy_selection_still_fails_closed_without_truncation(self):
+        provider = self.enable_ai()
+        original = provider.complete
+
+        def complete(system, user):
+            response = json.loads(original(system, user))
+            response["risk_flags"] = [f"Risk {index}: " + "x" * 190 for index in range(20)]
+            return json.dumps(response)
+
+        with patch.object(provider, "complete", side_effect=complete):
+            result = self.run_research("oversized-ai-selection")
+
+        row = result["recommendations"][0]
+        self.assertEqual((row["ai_status"], row["direction"]), ("AI_INVALID", "AVOID"))
+        self.assertIn("strategy-selection context exceeds", row["ai_assessment"]["error"])
+        self.assertEqual(len(provider.users), 1)
+        self.assert_no_orders()
+
     def test_disagreeing_ai_withholds_buy(self):
         self.enable_ai("BEARISH")
         row = self.run_research()["recommendations"][0]

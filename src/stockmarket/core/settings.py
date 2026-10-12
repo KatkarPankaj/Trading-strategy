@@ -30,7 +30,7 @@ class Environment(str, Enum):
 
 
 _STRICT_ENVS = frozenset({Environment.STAGING, Environment.PRODUCTION})
-_RESEARCH_ONLY_PROVIDERS = frozenset({"yahoo", "mock"})
+_RESEARCH_ONLY_PROVIDERS = frozenset({"yahoo", "mock", "twelvedata"})
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 

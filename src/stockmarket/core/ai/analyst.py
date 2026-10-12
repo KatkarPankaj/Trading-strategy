@@ -186,6 +186,7 @@ class AIAnalyst:
         request = json.dumps(
             {"available_strategies": candidates, "research": research_context},
             sort_keys=True,
+            separators=(",", ":"),
             default=str,
         )
         selection_started = time.monotonic()

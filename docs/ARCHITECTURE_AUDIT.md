@@ -29,6 +29,14 @@ requiring AI. Runs persist selected/resolved context; replay retains it.
 US/Xetra coverage remains 2026 only; India is unsupported and the development
 master has no German instruments. No broker/order safety boundary was relaxed.
 
+Real-AI verification found that repeating a valid long assessment explanation
+could exceed the strategy-selection input limit. Candidate prompt v2 omits only
+that redundant prose from selection and uses compact serialization; full
+explanation/evidence remain persisted, and oversized inputs still fail closed.
+A real OpenAI call over synthetic US fixture data completed both AI stages after
+the fix, without orders/fills. Current India calendar and Germany master gaps
+remain unresolved; this does not establish real-market recommendation readiness.
+
 The repository is a working paper-trading/research simulator with useful features (strategy scoring, backtest, parameter sweep, paper portfolio, and Streamlit dashboards), but it is currently a monolith around India intraday assumptions and UI-driven orchestration.
 
 It is not yet production-grade for live execution and not yet globally extensible by architecture. The highest-risk gaps are:

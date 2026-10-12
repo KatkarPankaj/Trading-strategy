@@ -66,9 +66,10 @@ Manual selection never switches to another country.
 US and Xetra calendar files cover 2026 only; uncovered exchange-local years
 report UNSUPPORTED_CALENDAR, including weekends in an uncovered year.
 India remains unsupported until a verified calendar is supplied.
-Germany's covered 2026 sessions can be displayed, but the development master
-contains no German instruments. Its empty universe is explicit, with no
-fabricated recommendation. Auto selects by session, not by whether a master has
+Germany's covered 2026 sessions can be displayed. The built-in development master
+contains no German instruments; without an imported Xetra master its empty
+universe is explicit, with no fabricated recommendation (see "Germany (Xetra)
+instruments" below). Auto selects by session, not by whether a master has
 instruments; an open Germany session can therefore resolve to an empty universe.
 
 Research policy defaults use registered open/close/timezone facts: opening range
@@ -237,6 +238,15 @@ an app API key. A native Anthropic/Claude endpoint is **not** supported by this
 adapter; do not paste a Claude key into an OpenAI endpoint. Revoke any exposed key.
 No previously pasted key is used by this workflow.
 
+The VS Code `Start Personal Research API` task detects the private
+`secrets\ai_api_key.txt` file. When present, it configures OpenAI's endpoint,
+`gpt-4.1-mini`, file-based credentials and a 20-second timeout. It clears an
+inherited inline `AI_API_KEY` so the file is authoritative. The key is never
+embedded in the task. Without that file, the task leaves AI environment settings
+unchanged; a clean environment therefore still supports deterministic-only
+research. Restart the API task after saving/changing the key. Configuration
+status does not prove billing, model access or successful inference.
+
 Personal mode supplies research sessions whether or not AI is configured;
 legacy AI research still requires explicit `RESEARCH_SESSIONS`. The request
 timeout defaults to 20 seconds and is bounded to 1-120 seconds. The existing
@@ -247,6 +257,15 @@ strategy selection). The dashboard bounds personal requests to 300 seconds; a
 timeout can leave a server-side run finishing, so inspect persisted runs before
 starting another. Start with a small Top-N to control cost/latency.
 
+Candidate assessment prompt version `candidate-assessment-v2` retains the full
+explanation in the persisted assessment, but does not repeat that prose in the
+strategy-selection request. Selection receives all original evidence and
+market/session context plus validated bias, confidence, score, citations, risks
+and invalidating conditions. Compact JSON is used consistently for its size
+check and actual request. The 6,000-character input limit is unchanged:
+genuinely oversized evidence/risks still reject selection without truncating
+required evidence or producing a fallback recommendation.
+
 News is separately optional: `NEWS_PROVIDER=finnhub` with `FINNHUB_API_KEY` or its
 `_FILE` alternative and explicit `FINNHUB_SYMBOL_MAP` where necessary. India news
 coverage is not guaranteed. `FUNDAMENTAL_PROVIDER=yahoo` adds timestamped
@@ -254,6 +273,30 @@ reported-EPS evidence, not full fundamentals. Sector adapters require reviewed
 mapping. Missing components are explicitly MISSING/UNAVAILABLE/REJECTED.
 Yahoo is research-only, not an authoritative master or execution feed.
 
+## Market data provider: Yahoo or Twelve Data
+
+Yahoo needs no key but is unofficial and frequently returns `Too Many Requests`.
+`DATA_PROVIDER=twelvedata` is a research-only alternative that requests bars by
+symbol plus MIC (`XNYS`, `XNAS`, `ARCX`, `XNSE`, `XBOM`, `XETR`) in UTC. Save the key
+on one line in the gitignored `secrets\twelvedata_api_key.txt`; the VS Code task
+**Start Personal Research API** then uses Twelve Data automatically, otherwise
+Yahoo. The adapter paces requests client-side (`TWELVEDATA_REQUESTS_PER_MINUTE`,
+default 8, roughly the free-tier limit) and maps HTTP/JSON errors to
+`RATE_LIMITED`/`UNAVAILABLE` without exposing the key. Which exchanges and
+intervals are available, and whether bars are real time or delayed, depends on
+your Twelve Data plan; entitlement errors surface as UNAVAILABLE, never as
+substituted prices. It is not validated as an execution feed.
+
+## Germany (Xetra) instruments
+
+The DE development universe is built only from stored Xetra records. Import them
+once from a reviewed master file with the platform's insert-only validation
+(see `INSTRUMENT_MASTER_FILE` in `docs/OPERATIONS.md`); the local development
+file `outputs/instrument_masters/DE_xetra_development.json` uses a provisional
+0.01 tick (Xetra ticks are dynamic) and `DEVELOPMENT:` names so it is rejected
+outside personal-research mode. Germany's calendar covers 2026 only; other years
+report `UNSUPPORTED_CALENDAR`. Imported records are research inputs, not an
+authoritative Xetra master.
 ## Troubleshooting and verification
 
 - Zero registry: inspect `/research/personal/status` for master source, requested,
@@ -324,3 +367,19 @@ of a tested live broker or of production readiness.
   fills stayed zero before and after; the order mutation endpoint returned 403.
 - AI-configured behavior was verified with offline fixtures/configuration, not
   real credentials or a live model request.
+
+### Real OpenAI verification, 2026-10-08
+
+A bounded real `gpt-4.1-mini` assessment over synthetic US fixture data succeeded.
+The initial attempt exposed a strategy-selection size rejection when a valid
+model explanation was repeated in the second prompt. After removing that
+redundant prose and using compact serialization, real assessment and strategy
+selection both completed, and deterministic ranking returned BUY for the
+synthetic breakout. This is not a current AAPL recommendation or a profitability
+claim. Tests verify maximum-length explanation handling and oversized-input
+rejection. No live model response is a risk approval, and no orders/fills were
+created in the isolated verification.
+
+Current-market checks still rejected India (unsupported calendar/untradable
+metadata), Germany (empty master), and the sampled US pre-market scan (NO_DATA).
+Configuring AI does not resolve these market-evidence prerequisites.
