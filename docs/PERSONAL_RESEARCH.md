@@ -287,6 +287,14 @@ intervals are available, and whether bars are real time or delayed, depends on
 your Twelve Data plan; entitlement errors surface as UNAVAILABLE, never as
 substituted prices. It is not validated as an execution feed.
 
+NASDAQ (`XNAS`) is requested with `exchange=NASDAQ`, because Twelve Data rejects
+`mic_code=XNAS` and reports NASDAQ listings under the segment MICs
+`XNGS`/`XNMS`/`XNCM`. Verified on 2026-10-12 with a free (Basic) key: US symbols
+(NASDAQ, NYSE, NYSE Arca) return bars. Xetra and NSE symbols return "available
+starting with the Grow or Venture plan", so on a free key the DE and IN
+universes show MISSING/UNAVAILABLE and produce no recommendations. Use a paid
+plan or the Yahoo provider (no key, rate-limited) for those markets.
+
 ## Germany (Xetra) instruments
 
 The DE development universe is built only from stored Xetra records. Import them
