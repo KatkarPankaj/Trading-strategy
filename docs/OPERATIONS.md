@@ -236,6 +236,10 @@ startup `ConfigurationError`s. Defaults are off.
 | `PAPER_AUTO_LOOP_INTERVAL_MINUTES` | `15` | cadence, aligned to wall-clock slots |
 | `PAPER_AUTO_LOOP_TOP_N` | `3` | capped by the autonomous cycle bound |
 | `PAPER_MONITOR_INTERVAL_SECONDS` | `30` | 1-300 seconds; pending orders and protective exits between scans |
+| `PAPER_MONITOR_LATENCY_BUDGET_SECONDS` | `10` | positive finite soft cycle budget, at most 300 seconds |
+| `PAPER_MONITOR_LOCK_TIMEOUT_SECONDS` | `1` | execution-lock admission timeout, no greater than budget |
+| `PAPER_MONITOR_QUOTE_TIMEOUT_SECONDS` | `2` | quote future wait, no greater than budget; one attempt |
+| `PAPER_MONITOR_MAX_ITEMS` | `100` | 1-10000 order/position checks per pass; incomplete passes block entries |
 | `PAPER_EOD_FLATTEN_MINUTES` | `10` | minutes before close to stop entries and flatten |
 | `MARKET_STATS_LOOKBACK_DAYS` | `20` | completed daily bars for ADV/slippage/correlation |
 
@@ -291,12 +295,63 @@ are explicit blockers. `PER_ORDER_VALIDATION_REQUIRED` is not approval: every or
 still passes independent data, signal, sizing and risk checks. Closed-market stale
 quotes are not refreshed or fabricated to make health green.
 
-This remains a single-worker, in-process loop, not a hard-real-time or multi-worker
-scheduler. Slow research/provider calls delay monitoring while an active tick holds
-the execution boundary; the configured interval is a between-tick cadence, not a
-maximum protective-exit latency. Scan-boundary cycles also retain their own
-protective pass. Scale-bounded evidence reconciliation and independently supervised
-monitoring are remaining reliability work. Calendar coverage is still limited
+The opt-in loop now starts a separate `paper-protective-monitor` worker and a
+deadline observer. The research loop does not hold the supervisor's scheduling
+lock, and scan-boundary position checks use its recent status instead of performing
+duplicate polling. A single authoritative TradingService account reservation
+still serializes order/position mutations and prevents duplicate protective exits.
+Manual direct ticks before background startup retain the existing synchronous path.
+
+The supervisor has one active cycle, never a replacement worker launched for a
+stall. It reconciles pending orders, checks positions and cancels entries/flattens
+in the close window through the existing lifecycle/RiskEngine/OrderManager.
+Order/position item counts and monotonic deadline checks bound admission to more
+work; incomplete item-limited passes rotate the work list rather than starving
+later positions, and continue to block entries. They do not cancel an atomic
+update already in progress. The independent
+quote lane cannot be queued behind research futures, uses a configurable wait
+timeout with one attempt and no rate-limit sleep, and preserves all quote-quality
+and freshness checks. Protective exits do not fetch entry-only liquidity/
+correlation statistics; RiskEngine's applicable exit checks are unchanged.
+
+At application composition, existing RecoveryManager restores/reconciles durable
+orders, fills and positions before workers start. No entry is admitted until startup
+cycle recovery completes and a fresh successful supervisor pass exists. A failed
+startup cycle remains explicitly unresolved and blocks entries even if later
+protective checks succeed; resolve/review its persisted history before restarting.
+The supervisor never retries interrupted research orders on its own. Existing
+pause/resume audit persistence and kill-switch rules remain authoritative.
+
+Read `GET /paper/loop` with the bearer token (also displayed under System health).
+Its `protective_monitor` object includes last start/end/success, duration, recent
+and maximum durations, success age, deadline misses, consecutive failures, items
+checked, recovery completion, last error and `entry_ready`. GET does not submit
+orders or perform reconciliation. `STALLED`, `STALE`, `FAILED` or incomplete
+recovery blocks new entries, including the final TradingService order gate.
+An exception/failure never updates last-success time. The worker retries monitoring
+on the next interval; a clean pass can restore readiness after transient failures,
+but cannot clear failed startup recovery or a kill switch. Deadline detection
+reports a stall without interrupting or fabricating the execution result.
+
+Shutdown first prevents new loop work, signals both monitoring workers, and joins
+within the shared shutdown timeout. If order work is still active, shutdown raises
+and the API does not close its provider underneath it. Python cannot safely kill
+an active provider, broker or database call; timeout cancellation applies to
+queued quote futures, not necessarily already-running vendor requests. Outstanding
+vendor reads may still survive a provider close and process termination may wait
+for those executor threads.
+
+This remains single-process PAPER automation, not a hard-real-time or multi-worker
+scheduler. The execution RLock/account reservation and SQLite connection lock are
+shared with entries and persistence. An entry already fetching historical risk
+statistics inside the execution boundary can delay monitoring until its lock
+timeout; the watchdog blocks subsequent entries but cannot make that exit timely.
+Native calls/GIL pauses, saturated quote workers and vendor-internal locks/rate
+limits are additional limits. Timed-out reads never mutate orders. Unbounded fill
+history/provenance scans and prospective replay remain scaling work; item limits
+can block entry readiness when the configured universe is too large for a pass.
+Operational telemetry is process-local, with start/end/failure logs; it is not
+strategy profitability evidence or a model-training dataset. Calendar coverage is still limited
 to registered supported years/markets, and unavailable calendars fail closed.
 Restart the operator-managed API with the updated code/configuration after
 backing up its database; this development stage does not restart running services.

@@ -34,6 +34,7 @@ class AutonomousPaperTradingService:
         clock: Callable[[], datetime] | None = None,
         lease_duration: timedelta = timedelta(minutes=15),
         heartbeat_interval: float = 30.0,
+        monitoring_check: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         if execution.trading.mode is not TradingMode.PAPER:
             raise ValueError("autonomous paper cycles require PAPER execution")
@@ -51,6 +52,7 @@ class AutonomousPaperTradingService:
         self.proposals = proposals
         self.execution = execution
         self.positions = positions
+        self.monitoring_check = monitoring_check
         self.gate = gate
         self.account_id = account_id
         self.max_candidates = max_candidates
@@ -223,7 +225,8 @@ class AutonomousPaperTradingService:
                 owner_token=owner_token)
             self._event(run_id, None, "CYCLE_STARTED", {
                 "recovering": recovering, "mode": TradingMode.PAPER.value})
-            payload["position_management"] = self.positions.manage()
+            payload["position_management"] = (
+                self.monitoring_check() if self.monitoring_check is not None else self.positions.manage())
             self._assert_lease(run_id, owner_token, lease_lost, lease_error)
             if any(row.get("status") in {"MONITOR_FAILED", "RECONCILE_FAILED", "FAILED", "REJECTED"}
                    for row in (*payload["position_management"].get("orders", []),

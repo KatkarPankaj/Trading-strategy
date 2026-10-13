@@ -34,6 +34,28 @@ Instrument registry
 
 The Phase 2A scanner ends at deterministic candidate discovery and Top-N. Phase 2B adds timestamped, persisted candidate research snapshots downstream of RESEARCH scans. Phase 2B-F adds snapshot-only AI assessment, deterministic explainable ranking, and registered-strategy selection; it ends at `STRATEGY_SELECTED` or `REJECTED` and never creates a signal, `TradeProposal`, risk decision or order. Phase 2C-1 composes those persisted services into an idempotent, bounded, PAPER-only research run, with durable run/candidate checkpoints, market/calendar and asset-class/strategy allowlists, and restart reuse. Phase 2C-2 generates deterministic signals from persisted selections. Phase 2C-3 consumes only a persisted actionable signal, validates its linked research/run provenance and freshness, sizes it in account currency, applies `RiskEngine`, and persists the decision plus an approved `TradeProposal` only when allowed. Phase 2C-4 adds explicit, one-shot submission of persisted Phase 2C-3 approvals through `TradingService`, `RiskEngine`, `OrderManager`, and the paper broker; deterministic client IDs and the persisted submission claim prevent repeat submission. Phase 2C-5 monitors fill-created positions against the originating proposal's deterministic stop/target levels and creates persisted, idempotent exit proposals, which pass through the same risk/order boundary. Phase 2C-6 persists paper executor orders, attempts and fills for restart reconciliation; retry is permitted only when durable executor state proves that the client order was not accepted. Phase 2C-7 adds a bounded, manually triggered PAPER cycle that composes those existing services with per-candidate checkpoints, idempotency, a scoped expiring lease and explicit recovery. Exit evaluation is quote-triggered in regular sessions; it does not synthesize future bars or create AI-directed orders. Invalid, missing or stale data, unavailable research, insufficient evidence, or rejected risk decisions must produce no entry order. AI failure is not a trade signal or permission to skip a stage. The opt-in, single-process paper loop schedules this same cycle and monitors pending orders/protective exits between scans. Audited entry pause/resume persists across restart without disabling exits or clearing risk gates; automatic prospective reconciliation remains separate from read-only monitoring. Slow active ticks can delay protective monitoring, so this is not a hard-real-time or production-ready scheduler.
 
+### Independent protective monitoring (PAPER only)
+
+This supersedes the serialized between-scan monitoring described above for the
+opt-in background loop; direct, non-background callers retain that legacy path.
+
+With `PAPER_AUTO_LOOP=true`, `core/protective_monitor.py` schedules lifecycle
+monitoring separately from research. A single-flight worker and deadline observer
+report fresh/failed/stalled checks; `TradingService` blocks new entries until
+startup recovery and a successful current check are complete. The supervisor
+continues protective work through entry pauses and kill switches, using the
+existing execution reservation, RiskEngine and idempotent exit proposals.
+Execution quotes have a separate bounded-wait provider lane; exits do not fetch
+entry-only historical liquidity statistics. Read-only loop/health monitoring
+exposes telemetry, not risk approval.
+
+Cycle budgets, item limits and lock admission timeouts are cooperative bounds,
+not a hard real-time guarantee. Entries can still hold the shared execution lock,
+database transactions can block progress, and Python cannot cancel a running
+vendor call safely. Stalls fail entries closed and retain the existing in-flight
+execution path instead of creating duplicate workers or exits. No migration,
+live execution or model-training capability is added.
+
 ## Existing implementation map
 
 | Responsibility | Existing implementation | Integration status |

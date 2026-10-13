@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from math import isfinite
+from time import monotonic as system_monotonic
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
@@ -36,6 +37,39 @@ _SUBMISSION_OUTCOME = {
 
 class PaperLifecycleError(ValueError):
     """A paper lifecycle request cannot be safely evaluated or submitted."""
+
+
+class _MonitoringBudget:
+    def __init__(self, max_items: int | None, deadline: float | None,
+                 monotonic: Callable[[], float] | None) -> None:
+        if max_items is not None and (
+                isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1):
+            raise ValueError("monitoring max_items must be positive")
+        if deadline is not None and not isfinite(deadline):
+            raise ValueError("monitoring deadline must be finite")
+        self.remaining = max_items
+        self.deadline = deadline
+        self.monotonic = monotonic or system_monotonic
+        self.incomplete = False
+        self.allowed: set[tuple[str, str]] | None = None
+        self.known: set[tuple[str, str]] = set()
+
+    def select(self, kind: str, identifier: str) -> bool:
+        if self.allowed is not None and (kind, identifier) not in self.allowed:
+            if (kind, identifier) not in self.known and self.remaining is not None and self.remaining > 0:
+                self.allowed.add((kind, identifier))
+                return True
+            self.incomplete = True
+            return False
+        return True
+
+    def admit(self) -> bool:
+        if self.remaining == 0 or self.deadline is not None and self.monotonic() >= self.deadline:
+            self.incomplete = True
+            return False
+        if self.remaining is not None:
+            self.remaining -= 1
+        return True
 
 
 class PaperProposalExecutionService:
@@ -376,12 +410,47 @@ class PaperPositionManager:
         self.max_age = max_age
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.evaluation_repository = evaluation_repository
+        self._monitor_cursor = 0
 
-    def manage(self) -> dict[str, Any]:
-        with self.trading.paper_strategy_change():
-            orders = self._pending_orders()
+    def _plan_monitoring(self, budget: _MonitoringBudget, market: str | None = None) -> None:
+        if budget.remaining is None:
+            return
+        def included(instrument_id: str) -> bool:
+            instrument = self.instruments.get(instrument_id)
+            return market is None or instrument is None or instrument.market == market
+
+        items = [
+            ("order", order.client_order_id) for order in self.trading.order_manager.open_orders()
+            if included(order.instrument_id)]
+        items.extend(
+            ("position", position.instrument_id) for position in self.trading.portfolio.positions().values()
+            if included(position.instrument_id))
+        budget.known = set(items)
+        if not items:
+            budget.allowed = set()
+            return
+        offset = self._monitor_cursor % len(items)
+        count = min(budget.remaining, len(items))
+        budget.allowed = {items[(offset + n) % len(items)] for n in range(count)}
+        budget.incomplete = count < len(items)
+        self._monitor_cursor = (offset + count) % len(items)
+
+    def manage(
+        self, *, max_items: int | None = None, deadline: float | None = None,
+        monotonic: Callable[[], float] | None = None, lock_timeout: float | None = None,
+    ) -> dict[str, Any]:
+        budget = _MonitoringBudget(max_items, deadline, monotonic)
+        boundary = (self.trading.paper_strategy_change() if lock_timeout is None
+                    else self.trading.paper_monitoring(lock_timeout))
+        with boundary:
+            self._plan_monitoring(budget)
+            orders = self._pending_orders(budget=budget)
             evaluated = []
             for position in list(self.trading.portfolio.positions().values()):
+                if not budget.select("position", position.instrument_id):
+                    continue
+                if not budget.admit():
+                    break
                 try:
                     evaluated.extend(self._manage_position(position)["positions"])
                 except (PaperLifecycleError, InvalidOrderTransition, BrokerError) as exc:
@@ -390,16 +459,22 @@ class PaperPositionManager:
                         "instrument", position.instrument_id, {"error": str(exc), "at": self._now()})
                     evaluated.append({"instrument_id": position.instrument_id,
                                       "status": "MONITOR_FAILED", "error": str(exc)})
-            return {"trading_mode": TradingMode.PAPER.value, "orders": orders, "positions": evaluated}
+            return {"trading_mode": TradingMode.PAPER.value, "orders": orders, "positions": evaluated,
+                    "incomplete": budget.incomplete}
 
     def _pending_orders(self, *, cancel_entries: bool = False,
-                        market: str | None = None) -> list[dict[str, Any]]:
+                        market: str | None = None,
+                        budget: _MonitoringBudget | None = None) -> list[dict[str, Any]]:
         results = []
         now = self._now()
         for order in self.trading.order_manager.open_orders():
             instrument = self.instruments.get(order.instrument_id)
             if instrument is not None and market is not None and instrument.market != market:
                 continue
+            if budget is not None and not budget.select("order", order.client_order_id):
+                continue
+            if budget is not None and not budget.admit():
+                break
             try:
                 if instrument is None:
                     raise PaperLifecycleError("pending order references unknown instrument")
@@ -495,13 +570,22 @@ class PaperPositionManager:
 
     def flatten(
         self, *, reason: str = "END_OF_DAY_FLATTEN", market: str | None = None,
+        max_items: int | None = None, deadline: float | None = None,
+        monotonic: Callable[[], float] | None = None, lock_timeout: float | None = None,
     ) -> dict[str, Any]:
-        with self.trading.paper_strategy_change():
-            orders = self._pending_orders(cancel_entries=True, market=market)
-            return {**self._flatten(reason=reason, market=market), "orders": orders}
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("flatten reason is required")
+        budget = _MonitoringBudget(max_items, deadline, monotonic)
+        boundary = (self.trading.paper_strategy_change() if lock_timeout is None
+                    else self.trading.paper_monitoring(lock_timeout))
+        with boundary:
+            self._plan_monitoring(budget, market)
+            orders = self._pending_orders(cancel_entries=True, market=market, budget=budget)
+            result = self._flatten(reason=reason, market=market, budget=budget)
+            return {**result, "orders": orders, "incomplete": budget.incomplete}
 
     def _flatten(
-        self, *, reason: str, market: str | None,
+        self, *, reason: str, market: str | None, budget: _MonitoringBudget,
     ) -> dict[str, Any]:
         """Close every open paper position (optionally one market) with a fresh in-session quote.
 
@@ -514,12 +598,16 @@ class PaperPositionManager:
         results: list[dict[str, Any]] = []
         for position in list(self.trading.portfolio.positions().values()):
             instrument = self.instruments.get(position.instrument_id)
+            if instrument is not None and market is not None and instrument.market != market:
+                continue
+            if not budget.select("position", position.instrument_id):
+                continue
+            if not budget.admit():
+                break
             if instrument is None:
                 results.append({"instrument_id": position.instrument_id,
                                 "status": "FLATTEN_FAILED",
                                 "error": "open position references unknown instrument"})
-                continue
-            if market is not None and instrument.market != market:
                 continue
             try:
                 if not self.markets.is_regular_session(instrument.market, now):

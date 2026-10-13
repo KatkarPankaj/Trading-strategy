@@ -722,6 +722,14 @@ def _health(health: Any, activity: dict[str, Any] | None = None,
     if loop is not None:
         st.subheader("Paper loop and startup recovery")
         st.json(loop)
+        protective = loop.get("protective_monitor")
+        if protective is not None:
+            st.subheader("Independent protective monitoring")
+            st.json(protective)
+            st.caption("Latency budget is operational telemetry, not a hard real-time guarantee. "
+                       "A stalled provider or execution/database lock can delay protective exits.")
+            if protective.get("enabled") and not protective.get("entry_ready"):
+                st.error("Protective monitoring/recovery is not ready; new entries are blocked.")
         if loop.get("state") == "STOPPED_AFTER_FAILURES":
             st.error("Automatic entries halted after repeated failures; protective exits remain enabled. "
                      "Resolve failures before restarting the API.")

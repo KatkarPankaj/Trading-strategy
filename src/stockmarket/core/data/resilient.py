@@ -70,6 +70,7 @@ class ResilientProvider:
         logger: Any = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        execution_quote_policy: DataPolicy | None = None,
     ) -> None:
         self._p, self._policy = provider, policy
         self._breaker = breaker or CircuitBreaker()
@@ -78,6 +79,10 @@ class ResilientProvider:
         self._sleep = sleep
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="market-data")
+        self._quote_lane = (
+            ResilientProvider(provider, policy=execution_quote_policy, health=health,
+                              logger=logger, clock=clock, sleep=sleep)
+            if execution_quote_policy is not None else None)
 
     @property
     def name(self) -> str:
@@ -94,8 +99,14 @@ class ResilientProvider:
     def breaker_state(self) -> str:
         return self._breaker.state
 
+    @property
+    def quote_breaker_state(self) -> str:
+        return self._quote_lane.breaker_state if self._quote_lane is not None else self.breaker_state
+
     # ---- validated operations ----
     def get_quote(self, instrument: Instrument) -> Quote:
+        if self._quote_lane is not None:
+            return self._quote_lane.get_quote(instrument)
         quote = self._call(lambda: self._p.get_quote(instrument))
         if isinstance(quote, Quote) and quote.instrument_id != instrument.instrument_id:
             issues = ("INSTRUMENT_MISMATCH",)
@@ -157,6 +168,8 @@ class ResilientProvider:
 
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
+        if self._quote_lane is not None:
+            self._quote_lane.close()
 
     # ---- internals ----
     def _call(self, fn: Callable[[], Any]) -> Any:

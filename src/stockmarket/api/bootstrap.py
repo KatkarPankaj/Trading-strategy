@@ -75,6 +75,7 @@ from ..core.settings import AppSettings, ConfigurationError, Environment, load_s
 from ..core.trading_service import OrderTicket, TradingService
 from ..core.market_stats import MarketStatsProvider, MarketStatsSettings
 from ..core.paper_loop import PaperLoopSettings, PaperTradingLoop
+from ..core.protective_monitor import ProtectiveMonitor, ProtectiveMonitorSettings
 from ..core.outcome_feedback import OutcomeFeedbackService
 from ..core.strategy_lab import StrategyLabService
 from ..core.strategy_ranking import StrategyRankingService
@@ -521,6 +522,18 @@ def build_context(
     raw_market_data = market_data_provider or create_market_data_provider(
         settings.data_provider, instruments, markets=registry, env=env,
         routes=dict(settings.data_provider_routes))
+    execution_quote_policy = None
+    if (env.get("PAPER_AUTO_LOOP") or "false").strip().lower() == "true":
+        try:
+            protective_settings = _protective_monitor_settings(
+                env, int(env.get("PAPER_MONITOR_INTERVAL_SECONDS") or 30))
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError([f"invalid protective monitoring setting: {exc}"]) from exc
+        from ..core.resilience import RetryPolicy
+        execution_quote_policy = DataPolicy(
+            timeout_seconds=protective_settings.quote_timeout_seconds,
+            max_quote_age=timedelta(seconds=settings.max_market_data_age_seconds),
+            max_rate_limit_wait=0, retry=RetryPolicy(max_attempts=1))
     market_data = ResilientProvider(
         raw_market_data,
         policy=DataPolicy(max_quote_age=timedelta(
@@ -528,6 +541,7 @@ def build_context(
         health=health,
         logger=logger,
         clock=now,
+        execution_quote_policy=execution_quote_policy,
     )
     fundamental_observation_provider = (
         YahooEarningsObservationProvider()
@@ -635,6 +649,10 @@ def build_context(
     health.register_check("market_data_provider", lambda: CheckResult(
         market_data.breaker_state != "OPEN",
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
+    if execution_quote_policy is not None:
+        health.register_check("execution_quote_provider", lambda: CheckResult(
+            market_data.quote_breaker_state.lower() != "open",
+            f"{market_data.name} quote circuit {market_data.quote_breaker_state.lower()}"))
     quotes = quote_source(market_data, instruments, logger=logger)
     def paper_version_info(name: str) -> StrategyVersionInfo | None:
         strategy = paper_version_registry.get(name)
@@ -789,6 +807,10 @@ def build_context(
                 {"reason": reason, "at": now(), "exits_remain_enabled": True})
 
         paper_loop.record_control = record_loop_control
+        monitor = paper_loop.protective_monitor
+        if monitor is not None:
+            paper.entry_admission = monitor.entry_blocker
+            autonomous_paper_trading.monitoring_check = monitor.scan_check
     # A polling paper loop has no continuous feed between ticks, so the feed-staleness trigger would
     # always fire; per-order quote freshness is still enforced by quote validation and RiskEngine.
     monitor = AutoTriggerMonitor(
@@ -878,6 +900,15 @@ def build_context(
                       strategy_lab=strategy_lab)
 
 
+def _protective_monitor_settings(env: Mapping[str, str], interval: int) -> ProtectiveMonitorSettings:
+    return ProtectiveMonitorSettings(
+        interval_seconds=interval,
+        latency_budget_seconds=float(env.get("PAPER_MONITOR_LATENCY_BUDGET_SECONDS") or 10),
+        lock_timeout_seconds=float(env.get("PAPER_MONITOR_LOCK_TIMEOUT_SECONDS") or 1),
+        quote_timeout_seconds=float(env.get("PAPER_MONITOR_QUOTE_TIMEOUT_SECONDS") or 2),
+        max_items=int(env.get("PAPER_MONITOR_MAX_ITEMS") or 100))
+
+
 def _paper_loop_from_env(
     env: Mapping[str, str],
     *,
@@ -916,8 +947,14 @@ def _paper_loop_from_env(
             eod_flatten_minutes=int(env.get("PAPER_EOD_FLATTEN_MINUTES") or 10),
             monitor_interval_seconds=int(env.get("PAPER_MONITOR_INTERVAL_SECONDS") or 30),
         )
+        monitor_settings = _protective_monitor_settings(env, loop_settings.monitor_interval_seconds)
+        monitor = ProtectiveMonitor(
+            positions=positions, markets=markets, market=market,
+            flatten_minutes=loop_settings.eod_flatten_minutes,
+            settings=monitor_settings, clock=clock)
         return PaperTradingLoop(cycles=cycles, positions=positions, gate=gate,
-                                markets=markets, settings=loop_settings, clock=clock)
+                                markets=markets, settings=loop_settings, clock=clock,
+                                protective_monitor=monitor)
     except (TypeError, ValueError, KeyError) as exc:
         raise ConfigurationError([f"invalid paper loop setting: {exc}"]) from exc
 

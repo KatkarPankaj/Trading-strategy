@@ -33,11 +33,16 @@ NOT_READY / ADVISORY_ONLY until real, verified point-in-time evidence and a pros
 control experiment exist. No model is trained or automatically promoted.
 See [Prospective evidence operations](docs/OPERATIONS.md#prospective-decision-evidence-and-model-readiness).
 
-The optional API paper loop monitors pending orders and protective exits between
-research scans (30 seconds by default), cancels pending entries before end-of-day
+The optional API paper loop has a separately scheduled protective supervisor
+(30 seconds by default) with deadline telemetry and a dedicated bounded-wait
+quote lane. It monitors pending orders and protective exits during slow research,
+cancels pending entries before end-of-day
 flattening, and automatically attaches paper events/outcomes to frozen decisions.
 Repeated entry failures pause scans without disabling exits. Authenticated entry
 pause/resume controls are audited and survive restart; they never clear a kill switch.
+Recovery, failed/stale checks and watchdog-detected stalls block new entries.
+The latency budget is not a hard guarantee: shared execution/database locks and
+non-cancellable provider calls remain limitations.
 Strategies shows prospective evidence/readiness, and System health explains
 closed-session/stale-data blockers without granting risk approval.
 See [Paper loop operations](docs/OPERATIONS.md#opt-in-paper-auto-loop-local-algorithm-verification).

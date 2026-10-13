@@ -1022,6 +1022,89 @@ remain unresolved. Supervised learning remains NOT_READY/ADVISORY_ONLY, final
 holdouts remain isolated, and live execution/model promotion remain disabled.
 This closes specific MVP gaps, not every production-grade acceptance condition.
 
+### Independent protective supervisor audit (baseline 3620b70)
+
+Inspected clean main at 3620b708481c034927c6dbd20bedfc315f1cb390. Baseline
+`PYTHONPATH=src python -m unittest discover -s tests`: 589 passed in 90.782s.
+The previous loop holds its scheduling mutex throughout research and evidence
+replay. Autonomous research itself does not hold TradingService's execution
+reservation, but position polling holds the execution RLock/reservation during
+provider calls. Entry sizing/risk statistics can also call historical providers
+under that boundary. SQLite shares a connection RLock across transactions.
+The original provider's four-worker pool mixes history and quote tasks.
+
+Implemented the safe increment, not an unsupported hard-latency guarantee:
+separate single-flight supervisor/observer, item/deadline checks, bounded execution
+lock admission, independent one-attempt execution quote lane, and final entry
+admission based on recovery plus fresh successful monitoring. Scan-side protective
+passes reuse the supervisor status while enabled; direct non-background workflows
+retain their synchronous path. Protective exits still pass the same RiskEngine
+and OrderManager, but no longer fetch entry-only liquidity/correlation statistics.
+Pause persistence, kill switches, immutable evidence and holdout/model gates remain.
+
+Telemetry is process-local and read-only through the existing loop/dashboard
+surface; logs record start/end, counts, failures and deadline observations.
+Interrupted shutdown retains provider resources while execution work is active.
+No operator services/database were restarted or modified, no migrations/dependencies
+were added and no commit/push/deployment was performed.
+
+Critical remaining limitation: a running entry's historical-statistics call or a
+database transaction may still hold the shared execution boundary. A watchdog can
+detect and block subsequent entries, not force a timely exit. Quote timeout bounds
+the caller's future wait, not running vendor reads; vendor locks, rate limits,
+worker exhaustion and native/GIL stalls remain blockers. History/provenance reads
+inside reservation and label reconciliation are not bounded by the item count.
+Interrupted research-cycle recovery failures remain unresolved and block entries
+until operator review/restart; monitoring never silently resubmits those entries.
+Thus acceptance is a verified independent scheduler with fail-closed bounds and
+explicit architectural limits, not a completed universal bounded-exit guarantee.
+
+Final validation (Python 3.11.6; deterministic fixtures, no external orders):
+
+- New supervisor suite: 17 passed in 2.556s. Final relevant regression batch,
+  including those tests and bounded-work rotation: 149 passed in 10.404s.
+- Complete configured suite: `PYTHONPATH=src python -m unittest discover -s tests -v`,
+  606 passed in 93.317s, zero failures/skips. Existing AnyIO ResourceWarnings
+  remain; deliberately injected failures emit expected error logs.
+- Slow research was held across 120 simulated seconds while protective work
+  completed in 0.25 simulated seconds against the 10-second budget. Observed
+  protective wall duration in the full run was 0.003375 seconds. These are
+  fixture measurements, not a vendor latency SLA or profitability evidence.
+- `python -m bandit -r src/stockmarket -c bandit.yaml -ll`: exit 1, seven
+  unchanged MEDIUM findings; none in the changed/new supervisor surfaces.
+  B310 in OpenAI-compatible/Finnhub HTTP code remains actionable redirect
+  hardening. Four B608 findings concern trusted application SQL identifiers;
+  B113 concerns the dashboard's existing explicit timeout expression. They
+  remain reported scanner findings, not a certification of exploitability.
+  Existing malformed suppression-comment warnings remain.
+- `python -m pip_audit -r requirements.txt`: exit 0, no known vulnerabilities.
+- Editor diagnostics and `git diff --check`: clean. Existing manage/flatten
+  caller compatibility was checked with Pylance. No repository-wide formatter,
+  linter or static type-check gate is configured; no such gate is claimed.
+  Editor test discovery returned no tests, so unittest was used directly.
+
+The relevant regression command used `PYTHONPATH=src;tests` and
+`python -m unittest test_protective_monitor test_paper_loop test_paper_lifecycle
+test_paper_end_to_end test_paper_mvp_reliability test_prospective_evidence
+test_dashboard_paper_activity test_paper_execution_safety test_risk_engine
+test_market_data_providers test_autonomous_paper_trading`.
+Here `python` denotes the configured interpreter used for each command.
+
+Changed surfaces: new [supervisor](../src/stockmarket/core/protective_monitor.py)
+and [tests](../tests/test_protective_monitor.py); lifecycle, TradingService,
+autonomous cycles, paper loop, resilient provider, API bootstrap and existing
+dashboard health view; `.env.example`, README, architecture, this audit and
+operations documentation. Item-limited passes rotate orders/positions to avoid
+starvation, remain incomplete and block entries until a full pass can succeed.
+Unexpected infrastructure exceptions abort visibly/fail closed; only the existing
+expected per-position domain/provider failures are isolated. Neither item
+admission nor that isolation promises continued progress through a stalled
+database or corrupted execution state.
+
+Next milestone: move entry/provider/history work outside short authoritative
+execution critical sections, bound history/provenance access and validate
+provider/process isolation before claiming bounded protective-exit latency.
+
 ### Recommended next implementation phase (historical context)
 
 Next, connect persisted completed paper outcomes to sample-qualified,

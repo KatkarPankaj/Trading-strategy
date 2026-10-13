@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -59,6 +61,7 @@ class PaperTradingLoop:
         reconcile_evidence: Callable[[], Any] | None = None,
         entries_enabled: bool = True,
         record_control: Callable[[bool, str, str], None] | None = None,
+        protective_monitor: Any = None,
     ) -> None:
         if positions.trading.mode is not TradingMode.PAPER:
             raise ValueError("the paper loop requires PAPER execution")
@@ -71,6 +74,7 @@ class PaperTradingLoop:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.reconcile_evidence = reconcile_evidence
         self.record_control = record_control
+        self.protective_monitor = protective_monitor
         self._entries_enabled = entries_enabled
         self._last_scan_key: str | None = None
         self._last_scan_run: str | None = None
@@ -146,6 +150,31 @@ class PaperTradingLoop:
                 self._aware(now)
                 if not self.markets.is_regular_session(market, now):
                     result = {"action": "MARKET_CLOSED"}
+                elif self.protective_monitor is not None and self.protective_monitor.enabled:
+                    monitor = self.protective_monitor
+                    key = self.idempotency_key(self.bucket(now))
+                    if now >= self._close_at(now) - timedelta(minutes=self.settings.eod_flatten_minutes):
+                        result = {"action": "END_OF_DAY_FLATTEN", "supervisor": monitor.status()}
+                    elif monitor.entry_blocker() or self.gate.halted or not self._entries_enabled \
+                            or self._state == "STOPPED_AFTER_FAILURES":
+                        result = {"action": "EXITS_ONLY", "supervisor": monitor.status()}
+                    elif key == self._last_scan_key:
+                        result = {"action": "MONITOR", "run_id": self._last_scan_run,
+                                  "supervisor": monitor.status()}
+                    else:
+                        if self.reconcile_evidence is not None:
+                            self._last_evidence = self.reconcile_evidence()
+                        if monitor.entry_blocker():
+                            raise RuntimeError("PROTECTIVE_MONITOR_NOT_READY")
+                        self._last_scan_key = key
+                        run = self.cycles.run(
+                            self.settings.universe_id, idempotency_key=key,
+                            operator=self.settings.operator, top_n=self.settings.top_n)
+                        self._last_scan_run = run.get("run_id")
+                        result = {"action": "CYCLE", "run_id": run.get("run_id"),
+                                  "idempotency_key": key, "status": run.get("status")}
+                        if run.get("status") != "COMPLETE":
+                            raise RuntimeError(f"paper cycle ended with {run.get('status')}")
                 elif now >= self._close_at(now) - timedelta(minutes=self.settings.eod_flatten_minutes):
                     result = {"action": "END_OF_DAY_FLATTEN",
                               "result": self.positions.flatten(market=market)}
@@ -229,16 +258,25 @@ class PaperTradingLoop:
             raise RuntimeError("restart the API after resolving paper-loop failures")
         self._stop.clear()
         self._state = "RUNNING"
+        if self.protective_monitor is not None:
+            self.protective_monitor.start()
         self._thread = threading.Thread(target=self._run, name="paper-loop", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 30.0) -> None:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("shutdown timeout must be finite and nonnegative")
+        deadline = time.monotonic() + timeout
         self._stop.set()
+        if self.protective_monitor is not None:
+            self.protective_monitor.request_stop()
         if self._thread is not None:
-            self._thread.join(timeout)
+            self._thread.join(max(0., deadline - time.monotonic()))
             if self._thread.is_alive():
                 self._state = "STOPPING"
                 raise RuntimeError("paper loop is still processing; providers must remain open")
+        if self.protective_monitor is not None:
+            self.protective_monitor.stop(max(0., deadline - time.monotonic()))
         if self._state == "RUNNING":
             self._state = "STOPPED"
 
@@ -249,6 +287,9 @@ class PaperTradingLoop:
             _log.exception("paper loop startup evidence reconciliation failed")
             self._state = "STOPPED_AFTER_FAILURES"
             self._failures += 1
+        if self.protective_monitor is not None:
+            self.protective_monitor.recovery_complete = (
+                not self._recovery_failures and self._state != "STOPPED_AFTER_FAILURES")
         while not self._stop.is_set():
             self.tick()
             if self._stop.is_set():
@@ -268,9 +309,13 @@ class PaperTradingLoop:
             "eod_flatten_minutes": self.settings.eod_flatten_minutes,
             "monitor_interval_seconds": self.settings.monitor_interval_seconds,
             "entries_enabled": self._entries_enabled and not self._stop.is_set()
-                               and self._state != "STOPPED_AFTER_FAILURES",
+                               and self._state != "STOPPED_AFTER_FAILURES"
+                               and (self.protective_monitor is None
+                                    or self.protective_monitor.entry_blocker() is None),
             "operator_entries_enabled": self._entries_enabled,
             "evidence_collection": self._last_evidence,
+            "protective_monitor": (
+                self.protective_monitor.status() if self.protective_monitor is not None else None),
             "consecutive_failures": self._failures,
             "ticks": self._ticks,
             "recovered_runs": list(self._recovered),

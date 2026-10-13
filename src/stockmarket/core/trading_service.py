@@ -119,6 +119,7 @@ class TradingService:
         provenance_source: Callable[[str], Any] | None = None,
         sizing_limits: SizingLimits | None = None,
         paper_strategy_gate: Callable[[OrderTicket], str | None] | None = None,
+        entry_admission: Callable[[], str | None] | None = None,
     ) -> None:
         self.mode = mode
         self.order_manager = order_manager
@@ -134,6 +135,7 @@ class TradingService:
         self._provenance_source = provenance_source
         self._sizing_limits = sizing_limits
         self._paper_strategy_gate = paper_strategy_gate
+        self.entry_admission = entry_admission
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._submit_lock = RLock()
         self._reservation_depth = 0
@@ -423,6 +425,19 @@ class TradingService:
         return self._risk.disabled_controls
 
     @contextmanager
+    def paper_monitoring(self, timeout: float) -> Iterator[None]:
+        """Bound lock admission, not running broker/database/provider operations."""
+        if self.mode is not TradingMode.PAPER:
+            raise ValueError("protective monitoring requires PAPER mode")
+        if not self._submit_lock.acquire(timeout=timeout):
+            raise RuntimeError("PROTECTIVE_EXECUTION_LOCK_TIMEOUT")
+        try:
+            with self.paper_strategy_change():
+                yield
+        finally:
+            self._submit_lock.release()
+
+    @contextmanager
     def paper_strategy_change(self) -> Iterator[None]:
         """Serialize registry changes with paper submissions and the account reservation."""
         if self.mode is not TradingMode.PAPER:
@@ -437,6 +452,11 @@ class TradingService:
             raise problem
 
     def _halt_decision(self, ticket: OrderTicket, now: datetime) -> RiskDecision | None:
+        if ticket.intent is not OrderIntent.EXIT and self.entry_admission is not None:
+            reason = self.entry_admission()
+            if reason is not None:
+                return RiskDecision(RiskDecisionStatus.REJECTED, now, reason,
+                                    signal_id=ticket.signal_id)
         if self.mode is TradingMode.PAPER and ticket.intent is not OrderIntent.EXIT \
                 and self._paper_strategy_gate is not None:
             problem = self._paper_strategy_gate(ticket)
@@ -552,7 +572,8 @@ class TradingService:
         excluded = retrying.client_order_id if retrying is not None else None
         open_orders = tuple(
             o for o in self.order_manager.open_orders() if o.client_order_id != excluded)
-        stats = dict(self._stats(inst.instrument_id))
+        # Liquidity/correlation statistics are entry-only checks in RiskEngine.
+        stats = dict(self._stats(inst.instrument_id)) if t.intent is OrderIntent.ENTRY else {}
         stats.setdefault("orders_last_minute",
                          sum(1 for o in orders if now - o.timestamp <= timedelta(minutes=1)))
         stats.setdefault("recent_order_keys", frozenset(
