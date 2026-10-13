@@ -53,8 +53,18 @@ Cycle budgets, item limits and lock admission timeouts are cooperative bounds,
 not a hard real-time guarantee. Entries can still hold the shared execution lock,
 database transactions can block progress, and Python cannot cancel a running
 vendor call safely. Stalls fail entries closed and retain the existing in-flight
-execution path instead of creating duplicate workers or exits. No migration,
-live execution or model-training capability is added.
+execution path instead of creating duplicate workers or exits.
+
+The subsequent execution-isolation increment prepares entry quotes/statistics
+outside that lock, freezes metadata and rejects stale or changed snapshots before
+current-state sizing and final RiskEngine validation. Portfolio mutation revisions
+also invalidate an observed-and-restored (ABA) state. Bounded state projections,
+ordinal-aware fill replay, instrument/episode provenance queries and per-decision
+evidence transactions replace routine whole-history payload reads. Provider lanes
+cap outstanding reads, including timed-out workers. SQLite admission, busy and
+statement budgets fail explicitly; they are not one global transaction deadline.
+V24 adds replay/provenance indexes, with operator migration still unapplied.
+Live execution and model training/promotion remain disabled.
 
 ## Existing implementation map
 

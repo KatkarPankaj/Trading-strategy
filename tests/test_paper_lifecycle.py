@@ -272,7 +272,7 @@ class PaperPositionManagerTests(TestCase):
         proposal, signal_row = _persisted_signal()
         store = _Store(proposal, signal_row)
         entry_client_id = "proposal-entry"
-        store.fills.all.return_value = [{
+        store.fills.for_position.return_value = [{
             "client_order_id": entry_client_id,
             "instrument_id": INSTRUMENT.instrument_id,
             "timestamp": (NOW - timedelta(minutes=1)).isoformat(),
@@ -341,7 +341,7 @@ class PaperPositionManagerTests(TestCase):
     def test_non_triggering_quote_does_not_create_exit_order(self):
         proposal, signal_row = _persisted_signal()
         store = _Store(proposal, signal_row)
-        store.fills.all.return_value = [{
+        store.fills.for_position.return_value = [{
             "client_order_id": "proposal-entry",
             "instrument_id": INSTRUMENT.instrument_id,
             "timestamp": (NOW - timedelta(minutes=1)).isoformat(),
@@ -459,7 +459,7 @@ class PaperPositionFlattenTests(TestCase):
     def _manager(self, *, in_session=True, quote=(100.5, NOW)):
         proposal, signal_row = _persisted_signal()
         store = _Store(proposal, signal_row)
-        store.fills.all.return_value = [{
+        store.fills.for_position.return_value = [{
             "client_order_id": "proposal-entry",
             "instrument_id": INSTRUMENT.instrument_id,
             "timestamp": (NOW - timedelta(minutes=1)).isoformat(),

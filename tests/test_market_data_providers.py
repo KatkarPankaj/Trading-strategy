@@ -254,6 +254,8 @@ class MarketDataProviderTests(unittest.TestCase):
         portfolio = SimpleNamespace(
             positions=lambda: {},
             cash={"USD": 1000.0},
+            equity=1000.0,
+            mutation_version=0,
             fills=[],
             rate_to_base=lambda currency: 1.0,
             gross_exposure=0.0,

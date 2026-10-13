@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from time import perf_counter
+
 from datetime import datetime, timedelta
 from math import isfinite
 from typing import Any, Callable, Mapping
@@ -121,42 +123,52 @@ class ProspectiveEvidenceService:
         """Explicit replay of durable sources; does not mutate outcomes, orders or decisions."""
         now = aware(self.clock())
         added = 0
-        with self.store.db.transaction():
-            decisions = self.store.prospective.decisions()
-            fills = {f["fill_id"]: f for f in self.store.fills.all()}
-            outcomes = self.store.paper_outcomes.available(now)
-            for decision in decisions:
+        decisions = self.store.prospective.decisions()
+        fills = {f["fill_id"]: f for f in self.store.fills.iter_all(max_rows=10000)}
+        outcomes = self.store.paper_outcomes.available(now)
+        for decision in decisions:
+            # Each decision is atomic; interruption preserves prior decisions for idempotent replay.
+            deadline = perf_counter() + 1.
+            with self.store.db.transaction():
                 iid, oid = decision["decision_id"], decision["opportunity_id"]
                 at = aware(decision["decision_at"])
                 # Older executions cannot be relabeled as prospective observations.
                 generations = self.store.db.query(
-                    "SELECT * FROM generated_strategy_signals WHERE opportunity_id = ?", (oid,))
+                    "SELECT * FROM generated_strategy_signals WHERE opportunity_id = ? LIMIT 1001", (oid,))
+                if len(generations) > 1000:
+                    raise ValueError("EVIDENCE_SOURCE_LIMIT_EXCEEDED: reconciliation incomplete")
                 entry_orders = set()
                 for generation in generations:
                     if not at <= aware(generation["generated_at"]) <= now:
                         raise ValueError("signal generation predates prospective decision or is in the future")
                     payload = {**generation, "payload": json.loads(generation["payload"])}
-                    added += self._attach(iid, "SIGNAL", generation["generation_id"], payload, now)
+                    added += self._attach(iid, "SIGNAL", generation["generation_id"], payload, now, deadline)
                     risk_rows = self.store.db.query(
-                        "SELECT * FROM risk_evaluations WHERE generation_id = ?", (generation["generation_id"],))
+                        "SELECT * FROM risk_evaluations WHERE generation_id = ? LIMIT 1001", (generation["generation_id"],))
+                    if len(risk_rows) > 1000:
+                        raise ValueError("EVIDENCE_SOURCE_LIMIT_EXCEEDED: reconciliation incomplete")
                     for risk in risk_rows:
                         if not at <= aware(risk["evaluated_at"]) <= now:
                             raise ValueError("risk evaluation outside prospective decision boundary")
                         added += self._attach(iid, "RISK", risk["evaluation_id"],
-                                              {**risk, "payload": json.loads(risk["payload"])}, now)
+                                              {**risk, "payload": json.loads(risk["payload"])}, now, deadline)
                     if generation["signal_id"] is not None:
                         orders = self.store.db.query(
-                            "SELECT client_order_id FROM execution_records WHERE signal_id = ? AND mode = 'PAPER'",
+                            "SELECT client_order_id FROM execution_records WHERE signal_id = ? AND mode = 'PAPER' LIMIT 1001",
                             (generation["signal_id"],))
+                        if len(orders) > 1000:
+                            raise ValueError("EVIDENCE_SOURCE_LIMIT_EXCEEDED: reconciliation incomplete")
                         for row in orders:
                             entry_orders.add(row["client_order_id"])
                 for order_id in sorted(entry_orders):
-                    added += self._order_attachments(decision, order_id, now, entry=True)
+                    added += self._order_attachments(decision, order_id, now, entry=True, deadline=deadline)
                     for exit_proposal in self.store.position_exit_proposals.for_entry(order_id):
                         exit_id = exit_proposal["client_order_id"]
                         if self.store.orders.get(exit_id) is not None:
-                            added += self._order_attachments(decision, exit_id, now, entry=False)
+                            added += self._order_attachments(decision, exit_id, now, entry=False, deadline=deadline)
                 for outcome in outcomes:
+                    if perf_counter() >= deadline:
+                        raise ValueError("EVIDENCE_REPLAY_BUDGET_EXCEEDED: reconciliation incomplete")
                     related = [fills[f] for f in outcome["fill_ids"] if f in fills
                                and fills[f]["client_order_id"] in entry_orders]
                     if not related:
@@ -165,7 +177,7 @@ class ProspectiveEvidenceService:
                     if issue is None:
                         episode_orders = {fills[f]["client_order_id"] for f in outcome["fill_ids"]}
                         for order_id in sorted(episode_orders - entry_orders):
-                            added += self._order_attachments(decision, order_id, now, entry=False)
+                            added += self._order_attachments(decision, order_id, now, entry=False, deadline=deadline)
                     added += self._attach(iid, "OUTCOME", outcome["outcome_id"],
                         {"outcome": outcome, "label_status": "ELIGIBLE" if issue is None else "EXCLUDED",
                          "exclusion_reason": issue, "label_schema": LABEL_SCHEMA,
@@ -173,12 +185,16 @@ class ProspectiveEvidenceService:
                              "net_return": outcome["net_pnl"] / outcome["entry_notional"],
                              "profitable": outcome["net_pnl"] > 0, "known_at": outcome["known_at"],
                              "opened_at": outcome["opened_at"], "closed_at": outcome["closed_at"],
-                             "outcome_id": outcome["outcome_id"]}}, now)
+                             "outcome_id": outcome["outcome_id"]}}, now, deadline)
+                if perf_counter() >= deadline:
+                    raise ValueError("EVIDENCE_REPLAY_BUDGET_EXCEEDED: reconciliation incomplete")
         return {"as_of": ts(now), "attachments_added": added, "decision_count": len(decisions),
-                "execution": "NOT_SUBMITTED"}
+                "execution": "NOT_SUBMITTED", "complete": True}
 
     def _attach(self, identity: str, kind: str, source_id: str, payload: Mapping[str, Any],
-                now: datetime) -> int:
+                now: datetime, deadline: float | None = None) -> int:
+        if deadline is not None and perf_counter() >= deadline:
+            raise ValueError("EVIDENCE_REPLAY_BUDGET_EXCEEDED: reconciliation incomplete")
         normalized = plain(payload)
         if kind != "ORDER":
             prior = [a for a in self.store.prospective.attachments(identity)
@@ -189,7 +205,7 @@ class ProspectiveEvidenceService:
             {"decision_id": identity, "kind": kind, "source_id": source_id, "payload": normalized}, now))
 
     def _order_attachments(self, decision: Mapping[str, Any], order_id: str,
-                           now: datetime, *, entry: bool) -> int:
+                           now: datetime, *, entry: bool, deadline: float | None = None) -> int:
         order = self.store.orders.get(order_id)
         execution = self.store.execution_records.for_order(order_id)
         if order is None or execution is None:
@@ -207,17 +223,17 @@ class ProspectiveEvidenceService:
                     or execution["parameters_hash"] != frozen["parameters_hash"] \
                     or execution["timeframe"] != frozen["timeframe"]:
                 raise ValueError("paper execution strategy version differs from frozen prospective decision")
-        added = self._attach(decision["decision_id"], "EXECUTION", order_id, execution, now)
+        added = self._attach(decision["decision_id"], "EXECUTION", order_id, execution, now, deadline)
         added += self._attach(decision["decision_id"], "ORDER", order_id,
-                              {"order": order, "execution": execution, "entry": entry}, now)
+                              {"order": order, "execution": execution, "entry": entry}, now, deadline)
         for event in self.store.orders.events(order_id):
             if not aware(decision["decision_at"]) <= aware(event["timestamp"]) <= now:
                 raise ValueError("future/predecision order event")
-            added += self._attach(decision["decision_id"], "ORDER_EVENT", event["event_id"], event, now)
+            added += self._attach(decision["decision_id"], "ORDER_EVENT", event["event_id"], event, now, deadline)
         for fill in self.store.fills.for_order(order_id):
             if not aware(decision["decision_at"]) <= aware(fill["timestamp"]) <= now:
                 raise ValueError("future/predecision fill")
-            added += self._attach(decision["decision_id"], "FILL", fill["fill_id"], fill, now)
+            added += self._attach(decision["decision_id"], "FILL", fill["fill_id"], fill, now, deadline)
         return added
 
     def _outcome_issue(self, decision: Mapping[str, Any], outcome: Mapping[str, Any],

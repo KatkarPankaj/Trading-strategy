@@ -344,11 +344,13 @@ for those executor threads.
 This remains single-process PAPER automation, not a hard-real-time or multi-worker
 scheduler. The execution RLock/account reservation and SQLite connection lock are
 shared with entries and persistence. An entry already fetching historical risk
-statistics inside the execution boundary can delay monitoring until its lock
-timeout; the watchdog blocks subsequent entries but cannot make that exit timely.
+statistics inside the execution boundary was the baseline bottleneck. Entry
+statistics/quotes now prepare outside it, with final freshness/state/risk checks.
+Nested caller-owned critical sections and atomic database writes can still delay
+monitoring; the watchdog blocks entries but cannot force a timely exit.
 Native calls/GIL pauses, saturated quote workers and vendor-internal locks/rate
-limits are additional limits. Timed-out reads never mutate orders. Unbounded fill
-history/provenance scans and prospective replay remain scaling work; item limits
+limits are additional limits. Timed-out reads never mutate orders. Bounded
+history/provenance and prospective replay still have scaling ceilings; item limits
 can block entry readiness when the configured universe is too large for a pass.
 Operational telemetry is process-local, with start/end/failure logs; it is not
 strategy profitability evidence or a model-training dataset. Calendar coverage is still limited
@@ -357,6 +359,88 @@ Restart the operator-managed API with the updated code/configuration after
 backing up its database; this development stage does not restart running services.
 An old API/base URL can still return 404 for `/paper/fills`; the dashboard now
 reports unavailable history rather than misrepresenting that error as zero fills.
+
+### Execution preparation and bounded storage
+
+Entry preparation takes a brief execution-lock snapshot, releases the lock,
+fetches scalar statistics and required quotes, and freezes them with start/end
+timestamps, source identity and quote completeness. Final execution rejects
+expired preparation or changed cash, positions, FX, fills or orders, rechecks
+entry admission/kill/strategy controls and runs RiskEngine on current mutable
+state. Open-order reservation quotes use that same prepared snapshot. Automatic
+sizing still runs under the authoritative reservation using current exposure and
+cash; preparation is not an approved risk decision. Preparation inputs are also
+recorded in order-audit risk inputs. A changed snapshot is rejected, not retried
+automatically. A monotonic, process-local portfolio revision also detects transient
+changes restored to identical values; rollback never rewinds that revision.
+It is not a durable approval or a cross-process synchronization mechanism.
+Custom callers that hold an outer execution lock before calling
+submission cannot benefit from this isolation; do not perform preparation inside
+caller-owned critical sections.
+
+Each provider lane admits at most four outstanding futures, with no unbounded
+queue/replacement workers. A timed-out running read keeps its slot until it
+really completes; late results are discarded by the timed-out caller, never
+sent to order mutation. Close rejects new reads and cancels queued work without
+waiting for uninterruptible vendor reads. The underlying vendor object is still
+shared; its locks/rate limits, native calls and the GIL are not isolated processes.
+
+SQLite defaults to a 1-second Python-lock admission timeout, a 1-second native
+busy timeout and a 1-second statement progress deadline (constructor keyword
+overrides support `(0, 300]` seconds). These are separate budgets, not one
+end-to-end deadline. The progress callback runs every 1,000 SQLite VM operations;
+it cannot interrupt every I/O/native call. Re-entrant transaction ownership is
+preserved and failures roll back; commit/rollback/fsync durations are not hard
+bounded. Timeout raises explicitly. An interrupted execution retains a durable
+recovery requirement; never clear that claim without reconciliation. PostgreSQL
+still needs separately validated lock/statement settings and pool isolation.
+
+Routine execution state verification reads only bounded identity/status
+projections (10,000 fills/orders), not full payloads. Position provenance queries
+only that instrument's current episode (1,000 fills). Orders/fills replay via
+keyset pages of 500 rows, capped at 100,000; orders use timestamp plus identity,
+while fills reuse the durable feedback ordinal to preserve same-timestamp
+execution ordering. Unique-time legacy fills replay first, as in outcome feedback;
+ambiguous same-time legacy fills require reconciliation rather than guessed order.
+Interruption
+raises, never returns a completed partial portfolio. Recovery restarts replay
+from durable data rather than trusting a partial in-memory checkpoint. It assumes
+the existing single-process startup admission barrier; this is not snapshot
+recovery under concurrent external database writers.
+
+Prospective decisions/attachments/outcomes cap at 10,000, per-order fills at
+1,000 and events at 10,000. Overflow refuses reconciliation/dataset creation;
+it does not silently truncate. Replay commits one decision at a time with a
+1-second boundary-checked processing budget and bounded source reads. Earlier
+completed decisions survive interruption; the current decision rolls back and
+retry is idempotent. Only a fully returned replay reports `complete=true`.
+Point-in-time features, label checks, membership and holdout isolation are unchanged.
+Larger histories need checkpointed snapshot/replay design, not raised limits
+without validation. Operational telemetry remains unsuitable for model training.
+
+Migration **V24** adds indexed `(timestamp, identity)` order/fill replay and
+`(instrument_id, timestamp, fill_id)` provenance access. SQLite query-plan tests
+verify indexed replay seeks without temporary sorts. Position filtering uses its
+instrument/time index but may need a secondary ordinal sort for tied timestamps.
+Only disposable test databases
+were migrated during this milestone. No operator database was changed. Back up
+and review pending migrations before an operator-managed upgrade; do not start
+the new application against an operator database implicitly to test it.
+
+Offline stress harness (no credentials/network; creates only test state):
+
+```powershell
+$env:PYTHONPATH = 'src;tests'
+python -m unittest execution_isolation_stress
+```
+
+Use the configured Python interpreter. The harness reports sample counts,
+p50/p95/worst observed scheduling/lock/quote/database timings, rejected entries,
+deadline misses and duplicate-fill assertions. It uses Events to hold history,
+a controlled database owner and 20 scheduled cycles. Measurements are finite
+fixture observations, not a guaranteed maximum, profitability claim or SLA.
+Telemetry buffers are process-local recent tails; baseline scheduling/database
+telemetry was unavailable and is explicitly reported with zero samples.
 
 When recovery finds a research idempotency conflict caused by configuration
 changes, it terminates the old cycle as `FAILED / RECOVERY_OBSOLETE` without

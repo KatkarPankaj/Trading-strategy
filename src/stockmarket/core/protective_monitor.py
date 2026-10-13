@@ -79,6 +79,8 @@ class ProtectiveMonitor:
         self._cycles = 0
         self._error: str | None = None
         self._result: dict[str, Any] | None = None
+        self._scheduled_at: float | None = None
+        self._scheduling_delay: float | None = None
 
     def enable(self) -> None:
         with self._lock:
@@ -107,10 +109,14 @@ class ProtectiveMonitor:
             self.status()
 
     def _run(self) -> None:
+        scheduled_at = self.monotonic()
         while not self._stop.is_set():
+            with self._lock:
+                self._scheduled_at = scheduled_at
             due = self.monotonic() + self.settings.interval_seconds
             self.run_once()
             self._stop.wait(max(0., due - self.monotonic()))
+            scheduled_at = due
 
     def run_once(self) -> dict[str, Any]:
         if not self.enabled:
@@ -123,6 +129,9 @@ class ProtectiveMonitor:
             started = self.monotonic()
             with self._lock:
                 self._started = self.clock()
+                self._scheduling_delay = (
+                    max(0., started - self._scheduled_at) if self._scheduled_at is not None else None)
+                self._scheduled_at = None
                 self._active_since = started
                 self._miss_recorded = False
                 self._state = "MONITORING"
@@ -214,6 +223,7 @@ class ProtectiveMonitor:
                 "last_started_at": self._started, "last_ended_at": self._ended,
                 "last_successful_at": self._success, "success_age_seconds": age,
                 "last_duration_seconds": self._duration,
+                "scheduling_delay_seconds": self._scheduling_delay,
                 "maximum_duration_seconds": max(self._maximum, active_age or 0.),
                 "recent_durations_seconds": list(self._recent), "active_seconds": active_age,
                 "deadline_misses": self._misses, "consecutive_failures": self._failures,

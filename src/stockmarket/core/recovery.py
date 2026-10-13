@@ -83,7 +83,7 @@ def rebuild_portfolio(
     portfolio = PortfolioManager(base_currency, starting_cash)
     for ccy, rate in (fx_rates or {}).items():
         portfolio.set_fx_rate(ccy, rate)
-    for row in store.fills.all():
+    for row in store.fills.iter_all():
         instrument = instruments.get(row["instrument_id"])
         if instrument is None:
             raise RecoveryError(
@@ -271,7 +271,11 @@ class RecoveryManager:
         if blocked is not None:
             self._conclude(blocked, "STARTUP_RECONCILIATION")
             return blocked
-        restored = self._restore_orders()
+        try:
+            restored = self._restore_orders()
+        except Exception as exc:
+            self._gate.halt(GATE_CODE, f"order replay incomplete: {type(exc).__name__}")
+            raise RecoveryError("order replay incomplete; entries remain halted") from exc
         try:
             call_with_retry(self._broker.connect, self._retry,
                             retry_on=(ConnectionError, TimeoutError, BrokerError), sleep=self._sleep)
@@ -313,7 +317,7 @@ class RecoveryManager:
     # ---- internals ----
     def _restore_orders(self) -> int:
         count = 0
-        for row in self._store.orders.all():
+        for row in self._store.orders.iter_all():
             order = order_from_row(row)
             events = tuple(event_from_row(e)
                            for e in self._store.orders.events(order.client_order_id))

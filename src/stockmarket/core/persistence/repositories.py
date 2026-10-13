@@ -7,7 +7,7 @@ import json
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timezone, timedelta
 from enum import Enum
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .database import Database
@@ -15,6 +15,37 @@ from .database import Database
 _SECRET_MARKERS = ("api_key", "apikey", "secret", "password", "passwd", "token",
                    "authorization", "credential", "private_key")
 GENESIS_HASH = "0" * 64
+
+
+def _history_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100000:
+        raise ValueError("history limit must be an integer in [1, 100000]")
+
+
+def bounded_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    _history_limit(limit)
+    if len(rows) > limit:
+        raise ValueError("HISTORY_LIMIT_EXCEEDED: reconciliation is incomplete")
+    return rows
+
+
+def _pages(fetch: Callable[[tuple[str, str] | None, int], list[dict[str, Any]]],
+           identity: str, *, page_size: int, max_rows: int) -> Iterator[dict[str, Any]]:
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000 \
+            or isinstance(max_rows, bool) or not isinstance(max_rows, int) or not 1 <= max_rows <= 100000:
+        raise ValueError("invalid history pagination bounds")
+    cursor = None
+    count = 0
+    while True:
+        rows = fetch(cursor, min(page_size, max_rows - count + 1))
+        if not rows:
+            return
+        for row in rows:
+            count += 1
+            if count > max_rows:
+                raise ValueError("HISTORY_LIMIT_EXCEEDED: reconciliation is incomplete")
+            yield row
+        cursor = (rows[-1]["timestamp"], rows[-1][identity])
 
 
 class SecretInPayloadError(ValueError):
@@ -257,14 +288,31 @@ class OrderRepository(_Repository):
     def all(self) -> list[dict[str, Any]]:
         return self._db.query("SELECT * FROM orders ORDER BY timestamp")
 
+    def execution_state(self, limit: int = 10000) -> list[dict[str, Any]]:
+        _history_limit(limit)
+        return bounded_rows(self._db.query(
+            "SELECT client_order_id, status, filled_quantity FROM orders "
+            "ORDER BY client_order_id LIMIT ?", (limit + 1,)), limit)
+
+    def iter_all(self, *, page_size: int = 500, max_rows: int = 100000) -> Iterator[dict[str, Any]]:
+        def fetch(cursor: tuple[str, str] | None, limit: int) -> list[dict[str, Any]]:
+            if cursor is None:
+                return self._db.query(
+                    "SELECT * FROM orders ORDER BY timestamp, client_order_id LIMIT ?", (limit,))
+            return self._db.query(
+                "SELECT * FROM orders WHERE (timestamp, client_order_id) > (?, ?) "
+                "ORDER BY timestamp, client_order_id LIMIT ?", (*cursor, limit))
+        return _pages(fetch, "client_order_id", page_size=page_size, max_rows=max_rows)
+
     def open_orders(self) -> list[dict[str, Any]]:
         return self._db.query(
             "SELECT * FROM orders WHERE status NOT IN ('FILLED','CANCELLED','REJECTED','FAILED') "
             "ORDER BY timestamp")
 
     def events(self, client_order_id: str) -> list[dict[str, Any]]:
-        return self._db.query("SELECT * FROM order_events WHERE client_order_id = ? ORDER BY timestamp, event_id",
-                              (client_order_id,))
+        return bounded_rows(self._db.query(
+            "SELECT * FROM order_events WHERE client_order_id = ? "
+            "ORDER BY timestamp, event_id LIMIT 10001", (client_order_id,)), 10000)
 
 
 class FillRepository(_Repository):
@@ -291,10 +339,68 @@ class FillRepository(_Repository):
     def all(self) -> list[dict[str, Any]]:
         return self._db.query("SELECT * FROM fills ORDER BY timestamp")
 
+    def execution_state(self, limit: int = 10000) -> list[dict[str, Any]]:
+        _history_limit(limit)
+        return bounded_rows(self._db.query(
+            "SELECT client_order_id, fill_sequence FROM fills ORDER BY fill_id LIMIT ?",
+            (limit + 1,)), limit)
+
+    def iter_all(self, *, page_size: int = 500, max_rows: int = 100000) -> Iterator[dict[str, Any]]:
+        def fetch(cursor: tuple[str, str] | None, limit: int) -> list[dict[str, Any]]:
+            if cursor is None:
+                return self._db.query(
+                    "SELECT f.* FROM fills f LEFT JOIN paper_feedback_fills p ON p.fill_id = f.fill_id "
+                    "WHERE p.fill_id IS NULL ORDER BY f.timestamp, f.fill_id LIMIT ?", (limit,))
+            return self._db.query(
+                "SELECT f.* FROM fills f LEFT JOIN paper_feedback_fills p ON p.fill_id = f.fill_id "
+                "WHERE p.fill_id IS NULL AND (f.timestamp, f.fill_id) > (?, ?) "
+                "ORDER BY f.timestamp, f.fill_id LIMIT ?", (*cursor, limit))
+        count = 0
+        seen: set[tuple[str, str]] = set()
+        # Match outcome-feedback ordering: legacy first, then durable execution ordinal.
+        for row in _pages(fetch, "fill_id", page_size=page_size, max_rows=max_rows):
+            key = (row["instrument_id"], row["timestamp"])
+            if key in seen:
+                raise ValueError("ambiguous same-time legacy fills: reconcile ordering before recovery")
+            seen.add(key)
+            count += 1
+            yield row
+        ordinal = 0
+        while True:
+            rows = self._db.query(
+                "SELECT f.*, p.ordinal AS replay_ordinal FROM paper_feedback_fills p "
+                "JOIN fills f ON f.fill_id = p.fill_id WHERE p.ordinal > ? "
+                "ORDER BY p.ordinal LIMIT ?", (ordinal, min(page_size, max_rows - count + 1)))
+            if not rows:
+                return
+            for row in rows:
+                count += 1
+                if count > max_rows:
+                    raise ValueError("HISTORY_LIMIT_EXCEEDED: reconciliation is incomplete")
+                yield row
+            ordinal = rows[-1]["replay_ordinal"]
+
+    def for_position(self, instrument_id: str, opened_at: datetime,
+                     limit: int = 1000) -> list[dict[str, Any]]:
+        _history_limit(limit)
+        rows = bounded_rows(self._db.query(
+            "SELECT f.*, p.ordinal AS replay_ordinal FROM fills f "
+            "LEFT JOIN paper_feedback_fills p ON p.fill_id = f.fill_id "
+            "WHERE f.instrument_id = ? AND f.timestamp >= ? "
+            "ORDER BY f.timestamp, p.ordinal, f.fill_id LIMIT ?",
+            (instrument_id, ts(opened_at), limit + 1)), limit)
+        legacy_stamps: set[str] = set()
+        for row in rows:
+            if row["replay_ordinal"] is None:
+                if row["timestamp"] in legacy_stamps:
+                    raise ValueError("ambiguous same-time legacy position fills")
+                legacy_stamps.add(row["timestamp"])
+        return rows
+
     def for_order(self, client_order_id: str) -> list[dict[str, Any]]:
-        return self._db.query(
-            "SELECT * FROM fills WHERE client_order_id = ? ORDER BY fill_sequence, timestamp",
-            (client_order_id,))
+        return bounded_rows(self._db.query(
+            "SELECT * FROM fills WHERE client_order_id = ? ORDER BY fill_sequence, timestamp LIMIT ?",
+            (client_order_id, 1001)), 1000)
 
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._db.query(
@@ -1506,8 +1612,9 @@ class PositionExitProposalRepository(_Repository):
     def for_entry(self, entry_client_order_id: str) -> list[dict[str, Any]]:
         rows = self._db.query(
             """SELECT * FROM position_exit_proposals
-               WHERE entry_client_order_id = ? ORDER BY created_at, proposal_id""",
+               WHERE entry_client_order_id = ? ORDER BY created_at, proposal_id LIMIT 1001""",
             (entry_client_order_id,))
+        bounded_rows(rows, 1000)
         for row in rows:
             row["payload"] = json.loads(row["payload"])
         return rows
@@ -1855,9 +1962,10 @@ class PaperOutcomeRepository(_Repository):
     def available(self, as_of: datetime) -> list[dict[str, Any]]:
         rows = self._db.query(
             """SELECT payload, known_at FROM paper_outcomes
-               WHERE closed_at <= ? AND known_at <= ? ORDER BY closed_at, outcome_id""",
+               WHERE closed_at <= ? AND known_at <= ? ORDER BY closed_at, outcome_id LIMIT 10001""",
             (ts(as_of), ts(as_of)))
-        return [{**json.loads(row["payload"]), "known_at": row["known_at"]} for row in rows]
+        return [{**json.loads(row["payload"]), "known_at": row["known_at"]}
+                for row in bounded_rows(rows, 10000)]
 
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self._db.query(
@@ -2072,7 +2180,8 @@ class ProspectiveRepository(_Repository):
                    {"opportunity_id": payload["opportunity_id"], "decision_at": payload["decision_at"]})
 
     def decisions(self) -> list[dict[str, Any]]:
-        return self._read("SELECT payload_hash, payload FROM prospective_decisions ORDER BY decision_at, decision_id")
+        return bounded_rows(self._read(
+            "SELECT payload_hash, payload FROM prospective_decisions ORDER BY decision_at, decision_id LIMIT 10001"), 10000)
 
     def decision(self, identity: str) -> dict[str, Any] | None:
         rows = self._read("SELECT payload_hash, payload FROM prospective_decisions WHERE decision_id = ?", (identity,))
@@ -2086,10 +2195,10 @@ class ProspectiveRepository(_Repository):
         return not exists
 
     def attachments(self, identity: str) -> list[dict[str, Any]]:
-        return self._read(
+        return bounded_rows(self._read(
             """SELECT payload_hash, payload, recorded_at FROM prospective_attachments
-               WHERE decision_id = ? ORDER BY recorded_at, attachment_id""",
-            (identity,))
+               WHERE decision_id = ? ORDER BY recorded_at, attachment_id LIMIT 10001""",
+            (identity,)), 10000)
 
     def manifest(self, identity: str) -> dict[str, Any] | None:
         rows = self._read("SELECT payload_hash, payload FROM prospective_datasets WHERE manifest_id = ?", (identity,))

@@ -113,6 +113,11 @@ class PortfolioManager:
         self._month_key: object = None
         self._day_baseline = float(initial_cash)
         self._month_baseline = float(initial_cash)
+        self._mutation_version = 0
+
+    @property
+    def mutation_version(self) -> int:
+        return self._mutation_version
 
     def execution_checkpoint(self) -> dict[str, Any]:
         """Capture mutable accounting state for rollback if a durable execution write fails."""
@@ -154,6 +159,8 @@ class PortfolioManager:
         self._month_key = checkpoint["month_key"]
         self._day_baseline = checkpoint["day_baseline"]
         self._month_baseline = checkpoint["month_baseline"]
+        # Never rewind the revision on rollback: a preparer may have observed transient state.
+        self._mutation_version += 1
 
     # ---- configuration ----
     def set_fx_rate(self, currency: str, rate_to_base: float) -> None:
@@ -162,6 +169,7 @@ class PortfolioManager:
         if currency.upper() == self.base_currency and rate_to_base != 1.0:
             raise PortfolioError("base currency rate must be 1")
         self._fx[currency.upper()] = float(rate_to_base)
+        self._mutation_version += 1
 
     def deposit(self, currency: str, amount: float) -> None:
         _check_positive(amount, "amount")
@@ -172,6 +180,7 @@ class PortfolioManager:
         self._day_baseline += value
         self._month_baseline += value
         self._peak_equity += value
+        self._mutation_version += 1
 
     def convert_cash(self, from_currency: str, to_currency: str, amount: float) -> None:
         """Convert cash at the configured FX rates (no spread modeled)."""
@@ -182,6 +191,7 @@ class PortfolioManager:
         self._cash[src] = self._cash.get(src, 0.0) - amount
         self._cash[dst] = self._cash.get(
             dst, 0.0) + amount * self._rate(src) / self._rate(dst)
+        self._mutation_version += 1
 
     # ---- mutations ----
     def apply_fill(
@@ -451,6 +461,7 @@ class PortfolioManager:
         return self._rate(currency)
 
     def _record_equity(self, timestamp: datetime) -> None:
+        self._mutation_version += 1
         local = timestamp.astimezone(self._tz)
         day, month = local.date(), (local.year, local.month)
         if self._day_key is not None and day != self._day_key:

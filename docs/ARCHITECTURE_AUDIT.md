@@ -1105,6 +1105,145 @@ Next milestone: move entry/provider/history work outside short authoritative
 execution critical sections, bound history/provenance access and validate
 provider/process isolation before claiming bounded protective-exit latency.
 
+### Execution isolation audit (baseline 1320073)
+
+Started from clean main at `1320073c41322e9df9db9ff281fbd785ae52e16d`.
+The unchanged configured suite passed 606 tests in 143.262s. The audit traced the
+following real boundaries rather than assuming the supervisor already isolated them:
+
+| Path | Baseline blocking/ownership | Increment and remaining boundary |
+| --- | --- | --- |
+| Entry submit / sizing | Execution RLock and durable account claim cover historical statistics, candidate/open-order quotes, current cash/exposure, risk, write-ahead records and submission | Scalar statistics and quotes prepare outside lock; immutable times/source/completeness, structural state plus monotonic portfolio revision; current sizing, gates and final risk remain locked |
+| Position / pending-order polling | Whole pass holds execution RLock/claim, including quote reads, broker price updates, nested exit submit and provenance lookup | Existing bounded quote lane remains; targeted current-episode provenance replaces full fill payload history; nested protective quote waits still occur inside the atomic pass |
+| Durable account claim | Acquire/finish use short repository transactions; baseline checks materialize all fill/order payloads under execution lock | Equivalent identity/status checks use bounded projections; mismatch/overflow never permits entries |
+| Paper fills | Paper executor transaction encloses order/fill durability and portfolio checkpointed mutation; fill callback nests fills, positions and PnL writes | Kept atomic. SQLite timeout/statement failure rolls back; failed claim completion also halts the entry gate |
+| Recovery | All orders/fills materialized; mutable state only admitted after startup reconciliation | Keyset pages with explicit ceilings; durable fill ordinal preserves same-time execution order; interruption raises and order replay halts entries |
+| Evidence | One database transaction spans all decisions, fills, outcomes and attachment replay | Bounded prefetch outside transaction; each decision commits atomically with a boundary-checked one-second processing budget; earlier decisions survive an interrupted later decision, but replay never returns complete |
+| Research / cycle leases | Research/history calls are outside execution reservation; heartbeat/checkpoint repository writes share the connection lock | Reused without a second execution path; shared DB contention now has SQLite admission/progress bounds |
+
+Lock order remains loop scheduling mutex (scan only) -> execution RLock ->
+durable account claim -> database connection RLock -> nested repository
+transactions. The account claim is a persistent ownership row, not a database
+transaction held throughout vendor work. Supervisor flight/telemetry locks are
+separate: telemetry is released before lifecycle execution, and status/observer
+never acquire execution or database locks. Provider admission uses a short
+lifecycle lock/semaphore; completion callbacks only release capacity and never
+touch orders/positions. Cancellation now uses the same execution lock/account
+claim as submission. Paper OrderManager/portfolio/executor remain the mutable
+execution owners; no prepared object contains permanent risk permission.
+
+Final review identified two coupled hazards and tests now cover them:
+fill UUID sorting cannot define same-timestamp execution order, so paginated
+recovery reuses the existing feedback ordinal and refuses ambiguous legacy ties;
+a structural snapshot alone cannot detect observed-and-restored portfolio state,
+so a monotonic mutation revision survives rollback and invalidates preparation.
+
+V24 adds fill/order timestamp replay and instrument/time provenance indexes.
+Disposable SQLite EXPLAIN tests prove indexed replay seeks without temporary
+sorting; tied position provenance can need an ordinal secondary sort. Existing
+feedback-ordinal indexes are reused rather than duplicating them. No operator
+database was opened/migrated or service restarted. The generated isolated
+baseline archive was used only for the same offline harness, then removed.
+
+Priority/acceptance assessment:
+
+1. **Implemented/tested:** slow historical entry preparation no longer owns the
+   execution lock; an actual protective exit completes while history is held by
+   an Event, and the entry is rejected after the changed state is revalidated.
+2. **Implemented/tested:** stale/missing inputs, changed final risk/gates and
+   ABA/rollback fail closed; same-order concurrent submission stays idempotent.
+3. **Implemented/tested:** each provider lane has four outstanding read slots,
+   including timed-out reads; late reads cannot become an order mutation and
+   close/saturation do not create replacement threads.
+4. **Implemented/tested:** bounded SQLite lock admission/statement progress,
+   transaction rollback, paginated order/fill replay, budget/limit interruption,
+   immutable evidence and no completed partial replay/dataset.
+5. **Not certified:** provider-free protective critical sections, a universal
+   transaction deadline, PostgreSQL admission/pool isolation, concurrent
+   external-writer snapshot recovery or large-history delta verification.
+   Shared execution/database locks, nested exits' quote waits, fsync/native
+   calls and vendor/GIL constraints remain. Custom callers can still defeat
+   preparation isolation by holding an outer execution lock.
+
+Measurements from the identical offline harness against archived baseline and
+the revised source (milliseconds; p50 / p95 / worst, with samples):
+
+| Measurement | Baseline | Revised |
+| --- | --- | --- |
+| Manual monitoring call, n=20 each | 11.999 / 26.089 / 26.258 | 3.113 / 4.082 / 4.550 |
+| Execution-lock waits | 0.0018 / 11.866 / 24.814 (124) | 0.0028 / 0.0087 / 0.0661 (187) |
+| Outer critical-section duration | 1.445 / 27.717 / 29.146 (62) | 2.886 / 4.403 / 17.229 (124) |
+| Quote caller latency | 0.170 / 0.318 / 0.372 (20) | 0.398 / 0.863 / 0.940 (41) |
+| Scheduling delay | unavailable | 2.217 / 3.050 / 3.626 (20) |
+| Controlled DB lock timeout | unavailable | 16.120 / 16.120 / 16.120 (1) |
+| Recent DB transaction telemetry | unavailable | 0.167 / 0.249 / 0.249 (8) |
+
+Both workloads rejected 20 deliberately gate-blocked entries, recorded zero
+deadline misses and asserted one original fill/no duplicates. Baseline failed
+all 20 monitoring checks while history held the lock; revised failed zero.
+Different lock/quote sample counts reflect shorter split sections and baseline
+checks skipped before quotes. The eight transaction samples are the telemetry
+tail, not a census of writes. Twenty additional cycles measure scheduling; the
+baseline exposes no equivalent scheduling/DB telemetry. No baseline database
+contention percentile was fabricated.
+
+These are finite Event-controlled fixtures on a shared Windows host, not vendor
+SLAs, guaranteed maxima or strategy evidence. Another revised run under concurrent
+full-suite validation observed a 46.252ms monitoring-call worst sample: measurements
+vary and worst-case improvement is not established by this workload.
+
+The baseline harness command sets `PYTHONPATH` to an isolated `git archive` of
+the baseline's `src`, plus current `tests`, and runs
+`python -m unittest execution_isolation_stress`. Revised uses `PYTHONPATH=src;tests`.
+The configured interpreter was Python 3.11.6, not an inferred PATH interpreter.
+Validation used the configured executable
+`C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe`:
+
+- Baseline: `PYTHONPATH=src`, `python -m unittest discover -s tests -v`:
+  606 passed in 143.262s.
+- Relevant regression: `PYTHONPATH=src;tests`, `python -m unittest
+  test_execution_isolation test_protective_monitor test_paper_loop
+  test_paper_lifecycle test_paper_end_to_end test_paper_mvp_reliability
+  test_prospective_evidence test_dashboard_paper_activity test_paper_execution_safety
+  test_risk_engine test_market_data_providers test_market_stats test_trade_intent
+  test_paper_order_management test_autonomous_paper_trading`:
+  205 passed in 16.604s before the final ordinal/ABA regression additions.
+- Final focused/measurement run: `PYTHONPATH=src;tests`, `python -m unittest
+  test_execution_isolation test_portfolio_manager test_paper_lifecycle
+  test_protective_monitor test_market_data_providers execution_isolation_stress`:
+  84 passed in 18.301s, including the mutation revision safety fix.
+- Final source: `PYTHONPATH=src`, `python -m unittest discover -s tests -v`:
+  **628 passed in 139.185s, zero failed, zero skipped**. This supersedes the
+  earlier 627-test run begun before the ABA fix.
+- `python -m bandit -r src\stockmarket -c bandit.yaml -ll -f json -o <session-report>`:
+  exit 1, the same seven existing MEDIUM findings; no newly introduced scanner
+  findings. B310 flags OpenAI-compatible:107 and Finnhub:93 URL handling
+  (high confidence); redirect hardening remains actionable despite existing URL
+  checks. B608 flags repositories:113 (medium confidence) and :441/:650/:2110
+  (low confidence): trusted application identifiers with parameterized values,
+  scanner candidates rather than demonstrated injectable user input. B113 flags
+  dashboard client:63 (low confidence), despite its explicit computed timeout.
+  Existing malformed suppression-comment warnings also remain. This is not an
+  exploit certification or a clean security gate.
+- `python -m pip_audit -r requirements.txt`: exit 0, no known vulnerabilities.
+- `git diff --check`: clean; editor Problems: no errors. No repository-wide
+  formatter/linter/static-type gate is configured, so none was invented or
+  claimed. Pylance signature checks found 24 submit callers compatible;
+  submit_signal retained one pre-existing Optional manual-quantity compatibility
+  warning among seven callers; actual lifecycle file diagnostics were empty.
+
+Changed files: core trading service, portfolio, lifecycle, protective supervisor,
+resilient provider, recovery, prospective evidence, persistence database/repositories/
+migrations; new [isolation tests](../tests/test_execution_isolation.py) and
+[stress harness](../tests/execution_isolation_stress.py), two directly affected
+test fixtures; README, architecture, operations and this audit. No dependencies,
+live capability, strategy, model training/promotion or new dashboard were added.
+
+Next milestone: move remaining protective quote reads outside atomic position
+execution with snapshot/version revalidation; replace full bounded state comparisons
+with validated durable delta/checkpoints; add consistent snapshot evidence/recovery
+above current ceilings and separately test PostgreSQL admission/statement/pool bounds.
+
 ### Recommended next implementation phase (historical context)
 
 Next, connect persisted completed paper outcomes to sample-qualified,

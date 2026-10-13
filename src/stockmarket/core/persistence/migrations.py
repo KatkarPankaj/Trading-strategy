@@ -417,6 +417,12 @@ _V23 = [
     """CREATE INDEX prospective_attachments_decision ON prospective_attachments(decision_id)""",
 ]
 
+_V24 = [
+    "CREATE INDEX idx_fills_replay ON fills (timestamp, fill_id)",
+    "CREATE INDEX idx_orders_replay ON orders (timestamp, client_order_id)",
+    "CREATE INDEX idx_fills_position ON fills (instrument_id, timestamp, fill_id)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -437,7 +443,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (20, "preregistered_strategy_holdouts", _V20),
     (21, "paper_strategy_lifecycle_and_rankings", _V21),
     (22, "reproducible_strategy_comparisons", _V22),
-    (23, "immutable_prospective_evidence", _V23)]
+    (23, "immutable_prospective_evidence", _V23),
+    (24, "bounded_execution_history_access", _V24)]
 
 
 def applied_versions(db: Database) -> set[int]:

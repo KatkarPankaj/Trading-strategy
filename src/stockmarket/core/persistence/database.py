@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+import math
+import time
+from collections import deque
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from threading import RLock
@@ -43,28 +46,66 @@ class Database(ABC):
 class SQLiteDatabase(Database):
     dialect = "sqlite"
 
-    def __init__(self, path: str = ":memory:") -> None:
+    def __init__(self, path: str = ":memory:", *, lock_timeout: float = 1.0,
+                 busy_timeout: float = 1.0, statement_timeout: float = 1.0) -> None:
+        for value in (lock_timeout, busy_timeout, statement_timeout):
+            if isinstance(value, bool) or not math.isfinite(value) or not 0 < value <= 300:
+                raise ValueError("database timeouts must be finite and in (0, 300]")
         self._path = path
         self._conn = sqlite3.connect(
-            path, isolation_level=None, check_same_thread=False)
+            path, isolation_level=None, check_same_thread=False, timeout=busy_timeout)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         if path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
         self._lock = RLock()
         self._depth = 0
+        self.lock_timeout = lock_timeout
+        self.statement_timeout = statement_timeout
+        self.timings: deque[dict[str, Any]] = deque(maxlen=100)
+
+    @contextmanager
+    def _access(self, operation: str) -> Iterator[None]:
+        started = time.perf_counter()
+        acquired = self._lock.acquire(timeout=self.lock_timeout)
+        entered = time.perf_counter()
+        try:
+            if not acquired:
+                raise DatabaseError("DATABASE_LOCK_TIMEOUT")
+            yield
+        finally:
+            self.timings.append({"operation": operation, "acquired": acquired,
+                                 "wait_seconds": entered - started,
+                                 "duration_seconds": time.perf_counter() - entered})
+            if acquired:
+                self._lock.release()
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        with self._lock:
-            self._conn.execute(sql, tuple(params))
+        with self._access("execute"):
+            with self._statement():
+                self._conn.execute(sql, tuple(params))
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
-        with self._lock:
-            return [dict(r) for r in self._conn.execute(sql, tuple(params)).fetchall()]
+        with self._access("query"):
+            with self._statement():
+                return [dict(r) for r in self._conn.execute(sql, tuple(params)).fetchall()]
+
+    @contextmanager
+    def _statement(self) -> Iterator[None]:
+        deadline = time.perf_counter() + self.statement_timeout
+        self._conn.set_progress_handler(lambda: int(time.perf_counter() >= deadline), 1000)
+        try:
+            yield
+        except sqlite3.OperationalError as exc:
+            if str(exc) == "interrupted":
+                raise DatabaseError("DATABASE_STATEMENT_TIMEOUT") from exc
+            raise
+        finally:
+            self._conn.set_progress_handler(None, 0)
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        with self._lock:
+        with self._access("transaction"):
             outer = self._depth == 0
             if outer:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -73,16 +114,22 @@ class SQLiteDatabase(Database):
                 yield
             except BaseException:
                 self._depth -= 1
-                if outer:
+                if outer and self._conn.in_transaction:
                     self._conn.execute("ROLLBACK")
                 raise
             else:
                 self._depth -= 1
                 if outer:
-                    self._conn.execute("COMMIT")
+                    try:
+                        self._conn.execute("COMMIT")
+                    except BaseException:
+                        if self._conn.in_transaction:
+                            self._conn.execute("ROLLBACK")
+                        raise
 
     def close(self) -> None:
-        self._conn.close()
+        with self._access("close"):
+            self._conn.close()
 
 
 class PostgresDatabase(Database):

@@ -9,6 +9,8 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
+from threading import BoundedSemaphore, Lock
+from collections import deque
 
 import pandas as pd
 
@@ -79,6 +81,10 @@ class ResilientProvider:
         self._sleep = sleep
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="market-data")
+        self._capacity = BoundedSemaphore(4)
+        self._closed = False
+        self._lifecycle_lock = Lock()
+        self.read_timings: deque[float] = deque(maxlen=100)
         self._quote_lane = (
             ResilientProvider(provider, policy=execution_quote_policy, health=health,
                               logger=logger, clock=clock, sleep=sleep)
@@ -167,7 +173,9 @@ class ResilientProvider:
         return self._call(lambda: self._p.get_market_status(market))
 
     def close(self) -> None:
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        with self._lifecycle_lock:
+            self._closed = True
+            self._pool.shutdown(wait=False, cancel_futures=True)
         if self._quote_lane is not None:
             self._quote_lane.close()
 
@@ -212,13 +220,27 @@ class ResilientProvider:
                                sleep=self._sleep)
 
     def _run_with_timeout(self, fn: Callable[[], Any]) -> Any:
-        future = self._pool.submit(fn)
+        started = time.monotonic()
+        with self._lifecycle_lock:
+            if self._closed:
+                raise DataUnavailable("provider is closed")
+            if not self._capacity.acquire(blocking=False):
+                raise DataUnavailable("provider read capacity exhausted")
+            try:
+                future = self._pool.submit(fn)
+            except BaseException:
+                self._capacity.release()
+                raise
+            # Keep a timed-out running read charged until it really ends.
+            future.add_done_callback(lambda done: self._capacity.release())
         try:
             return future.result(timeout=self._policy.timeout_seconds)
         except FutureTimeout as exc:
             future.cancel()
             raise ProviderTimeout(
                 f"no answer within {self._policy.timeout_seconds}s") from exc
+        finally:
+            self.read_timings.append(time.monotonic() - started)
 
     def _warn(self, message: str, instrument: Instrument, issues: tuple[str, ...]) -> None:
         if self._log is not None:

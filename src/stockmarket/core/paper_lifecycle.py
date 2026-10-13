@@ -811,7 +811,7 @@ class PaperPositionManager:
         }
 
     def _entry_proposal(self, position: Any) -> dict[str, Any]:
-        for fill in self.store.fills.all():
+        for fill in self.store.fills.for_position(position.instrument_id, position.opened_at):
             client_order_id = fill.get("client_order_id")
             if not client_order_id or fill["instrument_id"] != position.instrument_id:
                 continue

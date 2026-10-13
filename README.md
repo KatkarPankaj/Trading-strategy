@@ -43,6 +43,11 @@ pause/resume controls are audited and survive restart; they never clear a kill s
 Recovery, failed/stale checks and watchdog-detected stalls block new entries.
 The latency budget is not a hard guarantee: shared execution/database locks and
 non-cancellable provider calls remain limitations.
+Entry quotes/statistics are prepared outside the execution lock and checked again
+for freshness and changed portfolio/order state before final RiskEngine validation.
+Provider lanes admit at most four outstanding reads each, including timed-out reads.
+SQLite admission/statement waits and historical reads now have explicit fail-closed
+bounds; see [execution isolation](docs/OPERATIONS.md#execution-preparation-and-bounded-storage).
 Strategies shows prospective evidence/readiness, and System health explains
 closed-session/stale-data blockers without granting risk approval.
 See [Paper loop operations](docs/OPERATIONS.md#opt-in-paper-auto-loop-local-algorithm-verification).
