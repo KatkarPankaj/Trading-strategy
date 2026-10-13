@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timedelta
+import hashlib
+import json
+from typing import Any
 from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
 from ..market_session import MarketSession
 from ..models import AssetClass, Instrument, Signal
+
+
+def strategy_parameters_hash(strategy: Any) -> str | None:
+    config = getattr(strategy, "config", None)
+    if config is None or not is_dataclass(config) or isinstance(config, type):
+        return None
+    parameters = {k: v.total_seconds() if isinstance(v, timedelta) else v
+                  for k, v in asdict(config).items()}
+    return hashlib.sha256(json.dumps(
+        parameters, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

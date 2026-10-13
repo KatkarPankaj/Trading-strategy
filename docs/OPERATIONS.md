@@ -282,6 +282,139 @@ startup-recovery errors. These monitoring reads do not invoke AI or execution.
 Realized PnL is gross price PnL; fees are recorded separately and deducted from
 cash. For a fully closed fixture, net PnL is gross realized PnL minus fees.
 
+### Completed paper outcomes and AI feedback
+
+Migrations V18/V19 add immutable closed-position outcomes, fill-ingestion ordering,
+trusted execution timeframe attribution, and versioned strategy-laboratory records.
+Back up the configured database and apply migrations using
+`python -m stockmarket.ops migrate` during a controlled maintenance window.
+These changes do not migrate legacy JSON/CSV artifacts. Do not run competing
+workers or change execution mode to install them.
+
+The paper fill transaction also projects completed position episodes and appends
+`PAPER_OUTCOME_RECORDED` to the audit chain. Partial closes accrue inside the
+episode; only returning to flat emits an outcome. Additions, short covers and
+reversals share the portfolio's weighted-average accounting, with proportional
+fee allocation for a reversal. Actual fill prices already incorporate slippage:
+reported slippage is diagnostic and is **not** deducted from PnL again.
+Restart replays persisted fills idempotently, backfilling missing outcomes without
+rewriting trades. A fill/PnL conflict or ambiguous same-time legacy fill ordering
+is a visible recovery error, not silently replaced history.
+
+Execution attribution comes from the actual registered paper strategy's version,
+configuration hash and interval, not AI confidence or client-supplied audit
+metadata. Missing historical attribution stays incomplete; mixed-version
+episodes do not enter strategy-ranking feedback.
+
+Authenticated monitoring routes are read-only:
+
+- `GET /paper/outcomes?limit=100`: completed episodes, fill identities, reasons,
+  attribution, gross PnL, fees, net PnL and holding time.
+- `GET /paper/strategy-performance`: metrics grouped by market, currency,
+  strategy/version/configuration, timeframe and entry regime.
+- `GET /strategy-lab/proposals?limit=20`: proposals and persisted evaluations.
+
+The Strategies tab displays these separately from legacy/backtest trade metrics.
+Monitoring never processes outcomes, invokes AI or submits orders.
+Metrics include expectancy, win rate, profit factor (undefined without losses),
+closed-PnL drawdown, nonannualized return volatility and mean-to-volatility ratio.
+The approximate expectancy confidence half-width is unavailable for one trade.
+Thirty completed, attributed episodes qualify only as a **paper sample**, not
+out-of-sample proof, profitability or permission to change risk.
+
+Both AI candidate assessment and strategy selection receive a bounded
+`outcome_feedback` context, persisted with the assessment and its prompt hashes.
+Only outcomes both closed and known by the research `as_of` are available.
+Backfilled outcomes cannot affect earlier decisions. Evidence must match the
+registered strategy version/configuration and market/currency; no FX comparability
+is inferred. At most four performance groups are supplied, with omitted counts.
+Historical feedback is advisory; all deterministic execution gates remain intact.
+
+### Constrained AI strategy laboratory
+
+Explicit authenticated mutations (not monitoring) are:
+
+- `POST /strategy-lab/proposals` with `{"snapshot_id": "<persisted-snapshot-id>"}`.
+- `POST /strategy-lab/proposals/<proposal-id>/evaluate` with timezone-aware
+  `start`/`end`, optional `commission_rate` (default `0.001`) and
+  `slippage_bps` (default `5`).
+
+Proposals reuse validated research evidence and the configured AI provider.
+Currently only bounded ORB/VWAP parameter modifications at 5m/15m are representable.
+Entry/exit/data/sizing policy identifiers are fixed; extra fields and unsupported
+templates are rejected. Hypotheses, alternatives and invalidation descriptions
+are inert research text, never Python, SQL or shell execution. NO_TRADE is stored
+and cannot be evaluated for execution.
+
+Evaluation uses the existing causal backtester and frozen parameters, with
+20/10/10-session train/validation/test windows, one-session embargoes, next-bar
+execution, positive costs and participation assumptions. Reports retain bars
+hashes, costs, sizing inputs, skips and segment metrics. Insufficient history
+produces an explicit `INSUFFICIENT_EVIDENCE`; provider errors remain errors.
+Requests are bounded to past data spanning at most 180 days.
+
+**No laboratory proposal is executable or automatically registered.** Historical
+reports remain exploratory; retrospectively proposed parameters do not become
+out-of-sample evidence merely by splitting historical dates. Even large historical
+samples remain `EXPLORATORY_NOT_ELIGIBLE`. Existing registered strategies still
+use the unchanged signal -> risk -> order -> paper broker path. Historical FX,
+new exchange calendar verification and multi-worker certification remain gaps.
+
+### Session flattening and preregistered post-proposal holdouts
+
+Migration V20 adds one immutable holdout registration per proposal. Registration
+is explicit, authenticated, and does not invoke AI, retrieve market data or
+submit orders:
+
+`POST /strategy-lab/proposals/<proposal-id>/holdout`
+
+```json
+{
+  "start": "2026-11-02T09:30:00-05:00",
+  "end": "2026-12-01T16:00:00-05:00",
+  "commission_rate": 0.001,
+  "slippage_bps": 5
+}
+```
+
+Dates above are illustrative: start must still be in the future when registering.
+Start/end must be actual exchange session open/close boundaries, with calendar
+coverage and at least one complete trading-session embargo after registration.
+NO_TRADE, past windows, previous evaluated-data overlap and changed registrations
+are rejected. Identical registration retries return the original record.
+The window, proposal/configuration identity, instrument metadata, session/calendar,
+sizing, transaction costs and flatten policy are frozen together.
+
+After the reserved window has finished, call the existing evaluation route with
+the same dates/costs and `"evaluation_kind": "POST_PROPOSAL_HOLDOUT"`.
+An unregistered window or changed policy fails closed. Historical exploration
+cannot request reserved holdout dates. Missing whole sessions or scheduled bars
+are rejected; truncated data cannot manufacture an end-of-day exit. A persisted
+holdout report is returned unchanged on retry or service reconstruction without
+retrieving data again, including insufficient-sample reports. There is no
+window extension/replacement or parameter fitting on observed holdout results.
+
+Laboratory evaluations now use the backtester's opt-in session-flatten policy:
+exchange close minus the configured paper-loop flatten margin (10 minutes when
+the loop is disabled), aligned **at or before** the cutoff on the scheduled bar
+grid. Exchange timezone, DST and early closes determine the boundary. Pending
+entries are cancelled before that bar can fill; no new signals are generated
+after it. Long SELL exits and short BUY covers use boundary bar **open**, with
+costs/slippage and participation limits. Partial flatten fills continue on later
+session bars; insufficient liquidity to become flat by the last session bar is
+an explicit evaluation failure. This is a bar-level simulation, not proof of
+intrabar quote/execution parity. Missing scheduled flatten bars are errors.
+Existing backtests keep their original behavior unless flatten is enabled.
+
+Reports distinguish historical folds from preregistered future observation.
+At least 20 full holdout sessions and 30 completed trades produce
+`HOLDOUT_REVIEW_REQUIRED`; otherwise the status is `INSUFFICIENT_EVIDENCE`.
+Neither status makes a proposal executable, establishes profitability, changes
+risk, or proves absence of multi-proposal selection bias. The Strategies tab
+shows persisted registrations, reports and policies through GET-only monitoring.
+Promotion/activation, validation against alternative baselines and independent
+review of sample uncertainty/regime stability remain the next implementation gate.
+
 Entries need liquidity, slippage, correlation and sector inputs. The API now
 derives ADV, expected slippage and correlated exposure from completed daily
 bars (`core/market_stats.py`) and sector from the instrument master; if any

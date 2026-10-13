@@ -276,11 +276,16 @@ class FillRepository(_Repository):
             if order_id is not None and sequence is not None
             else str(uuid4())
         )
-        self._upsert("fills", "fill_id", {
-            "fill_id": fill_id, "client_order_id": order_id, "instrument_id": f.instrument_id,
-            "side": f.side.value, "quantity": f.quantity, "price": f.price, "fee": f.fee,
-            "slippage": f.slippage, "currency": f.currency, "realized_pnl": f.realized_pnl,
-            "timestamp": ts(f.timestamp), "fill_sequence": sequence})
+        with self._db.transaction():
+            self._upsert("fills", "fill_id", {
+                "fill_id": fill_id, "client_order_id": order_id, "instrument_id": f.instrument_id,
+                "side": f.side.value, "quantity": f.quantity, "price": f.price, "fee": f.fee,
+                "slippage": f.slippage, "currency": f.currency, "realized_pnl": f.realized_pnl,
+                "timestamp": ts(f.timestamp), "fill_sequence": sequence})
+            self._db.execute(
+                """INSERT INTO paper_feedback_fills (fill_id, ordinal)
+                   SELECT ?, COALESCE(MAX(ordinal), 0) + 1 FROM paper_feedback_fills WHERE 1 = 1
+                   ON CONFLICT(fill_id) DO NOTHING""", (fill_id,))
         return fill_id
 
     def all(self) -> list[dict[str, Any]]:
@@ -631,13 +636,13 @@ class ExecutionRecordRepository(_Repository):
     def save(self, *, client_order_id: str, mode: str, strategy_name: str, strategy_version: str,
              parameter_version: int | None, parameters_hash: str | None, signal_id: Any,
              market_regime: str | None, data_timestamp: datetime | None, decision_timestamp: datetime,
-             versioned: bool) -> None:
+             versioned: bool, timeframe: str | None = None) -> None:
         self._upsert("execution_records", "client_order_id", {
             "client_order_id": client_order_id, "mode": mode, "strategy_name": strategy_name,
             "strategy_version": strategy_version, "parameter_version": parameter_version,
             "parameters_hash": parameters_hash, "signal_id": _opt(signal_id), "market_regime": market_regime,
             "data_timestamp": ts(data_timestamp), "decision_timestamp": ts(decision_timestamp),
-            "versioned": 1 if versioned else 0})
+            "versioned": 1 if versioned else 0, "timeframe": timeframe})
 
     def paper_test_stats(self) -> dict[str, int]:
         """Evidence that the strategy ran in paper mode: filled paper orders and distinct decision days."""
@@ -1830,6 +1835,110 @@ class PersonalResearchRepository(_Repository):
             (payload["status"], to_json(payload), payload["run_id"]))
 
 
+class PaperOutcomeRepository(_Repository):
+    def save(self, outcome: Mapping[str, Any], known_at: datetime) -> bool:
+        body = to_json(outcome)
+        rows = self._db.query(
+            "SELECT payload FROM paper_outcomes WHERE outcome_id = ?",
+            (outcome["outcome_id"],))
+        if rows:
+            if rows[0]["payload"] != body:
+                raise ValueError("immutable paper outcome conflicts with persisted fills or attribution")
+            return False
+        self._db.execute(
+            "INSERT INTO paper_outcomes (outcome_id, closed_at, known_at, payload) VALUES (?, ?, ?, ?)",
+            (outcome["outcome_id"], outcome["closed_at"], ts(known_at), body))
+        return True
+
+    def available(self, as_of: datetime) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT payload, known_at FROM paper_outcomes
+               WHERE closed_at <= ? AND known_at <= ? ORDER BY closed_at, outcome_id""",
+            (ts(as_of), ts(as_of)))
+        return [{**json.loads(row["payload"]), "known_at": row["known_at"]} for row in rows]
+
+    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT payload, known_at FROM paper_outcomes ORDER BY closed_at DESC, outcome_id LIMIT ?",
+            (limit,))
+        return [{**json.loads(row["payload"]), "known_at": row["known_at"]} for row in rows]
+
+    def ordered_fills(self) -> list[dict[str, Any]]:
+        # Legacy same-time fills have no ordering provenance. Refuse to invent it.
+        legacy = self._db.query(
+            """SELECT f.* FROM fills f LEFT JOIN paper_feedback_fills p ON p.fill_id = f.fill_id
+               WHERE p.fill_id IS NULL ORDER BY f.timestamp, f.fill_id""")
+        stamps: set[tuple[str, str]] = set()
+        for fill in legacy:
+            key = (fill["instrument_id"], fill["timestamp"])
+            if key in stamps:
+                raise ValueError("ambiguous same-time legacy fills: outcome ordering requires reconciliation")
+            stamps.add(key)
+        return legacy + self._db.query(
+            """SELECT f.* FROM fills f JOIN paper_feedback_fills p ON p.fill_id = f.fill_id
+               ORDER BY p.ordinal""")
+
+
+class StrategyLabRepository(_Repository):
+    def save_holdout(self, payload: Mapping[str, Any], created_at: datetime) -> None:
+        self._insert_immutable("strategy_lab_holdouts", "proposal_id",
+                               payload["proposal_id"], payload, created_at)
+
+    def holdout(self, proposal_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT payload, created_at FROM strategy_lab_holdouts WHERE proposal_id = ?",
+            (proposal_id,))
+        return {**json.loads(rows[0]["payload"]), "registered_at": rows[0]["created_at"]} if rows else None
+
+    def evaluations(self, proposal_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT payload FROM strategy_lab_evaluations WHERE proposal_id = ?
+               ORDER BY created_at DESC, evaluation_id""", (proposal_id,))
+        return [json.loads(row["payload"]) for row in rows]
+
+    def save_proposal(self, payload: Mapping[str, Any], created_at: datetime) -> None:
+        self._insert_immutable("strategy_lab_proposals", "proposal_id",
+                               payload["proposal_id"], payload, created_at)
+
+    def save_evaluation(self, payload: Mapping[str, Any], created_at: datetime) -> None:
+        self._insert_immutable("strategy_lab_evaluations", "evaluation_id",
+                               payload["evaluation_id"], payload, created_at,
+                               proposal_id=payload["proposal_id"])
+
+    def _insert_immutable(
+        self, table: str, key: str, identity: str, payload: Mapping[str, Any],
+        created_at: datetime, **extra: Any,
+    ) -> None:
+        body = to_json(payload)
+        with self._db.transaction():
+            self._db.execute(
+                f"INSERT INTO {table} ({key}, created_at, payload"
+                + "".join(f", {name}" for name in extra)
+                + ") VALUES (?, ?, ?" + ", ?" * len(extra)
+                + f") ON CONFLICT({key}) DO NOTHING",
+                (identity, ts(created_at), body, *extra.values()))
+            stored = self._db.query(
+                f"SELECT payload FROM {table} WHERE {key} = ?", (identity,))[0]
+            if stored["payload"] != body:
+                raise ValueError("immutable strategy laboratory identity conflict")
+
+    def get(self, proposal_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT payload FROM strategy_lab_proposals WHERE proposal_id = ?", (proposal_id,))
+        return json.loads(rows[0]["payload"]) if rows else None
+
+    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT proposal_id, payload FROM strategy_lab_proposals ORDER BY created_at DESC LIMIT ?",
+            (limit,))
+        result = []
+        for row in rows:
+            result.append({**json.loads(row["payload"]),
+                           "holdout": self.holdout(row["proposal_id"]),
+                           "evaluations": self.evaluations(row["proposal_id"])})
+        return result
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -1863,3 +1972,5 @@ class Store:
         self.signal_generations = SignalGenerationRepository(db)
         self.trade_proposals = TradeProposalRepository(db)
         self.execution_reservations = ExecutionReservationRepository(db)
+        self.paper_outcomes = PaperOutcomeRepository(db)
+        self.strategy_lab = StrategyLabRepository(db)

@@ -97,6 +97,7 @@ class StrategyVersionInfo:
     strategy_version: str
     parameter_version: int
     parameters_hash: str
+    timeframe: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

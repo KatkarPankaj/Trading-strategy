@@ -354,6 +354,31 @@ _V17 = [
         state TEXT NOT NULL, acquired_at TEXT NOT NULL, lease_until TEXT NOT NULL)""",
 ]
 
+_V18 = [
+    "ALTER TABLE execution_records ADD COLUMN timeframe TEXT",
+    """CREATE TABLE paper_outcomes (
+        outcome_id TEXT PRIMARY KEY, closed_at TEXT NOT NULL,
+        known_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+    "CREATE INDEX idx_paper_outcomes_time ON paper_outcomes (closed_at, known_at)",
+    """CREATE TABLE paper_feedback_fills (
+        fill_id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL UNIQUE)""",
+]
+
+_V19 = [
+    """CREATE TABLE strategy_lab_proposals (
+        proposal_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE strategy_lab_evaluations (
+        evaluation_id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL,
+        created_at TEXT NOT NULL, payload TEXT NOT NULL,
+        FOREIGN KEY(proposal_id) REFERENCES strategy_lab_proposals(proposal_id))""",
+]
+
+_V20 = [
+    """CREATE TABLE strategy_lab_holdouts (
+        proposal_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL,
+        FOREIGN KEY(proposal_id) REFERENCES strategy_lab_proposals(proposal_id))""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -368,7 +393,10 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (14, "autonomous_paper_cycle_lock_leases", _V14),
     (15, "personal_research_recommendations", _V15),
     (16, "explicit_trade_intent", _V16),
-    (17, "atomic_account_execution_reservations", _V17)]
+    (17, "atomic_account_execution_reservations", _V17),
+    (18, "immutable_paper_outcome_feedback", _V18),
+    (19, "versioned_strategy_laboratory", _V19),
+    (20, "preregistered_strategy_holdouts", _V20)]
 
 
 def applied_versions(db: Database) -> set[int]:

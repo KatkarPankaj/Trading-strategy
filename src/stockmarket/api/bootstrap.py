@@ -38,7 +38,8 @@ from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
 from ..core.recovery import RecoveryManager, rebuild_portfolio, reconcile_positions
 from ..core.risk import RiskEngine, RiskLimits
-from ..core.learning import StrategyConfigRegistry
+from ..core.learning import StrategyConfigRegistry, StrategyVersionInfo
+from ..core.strategies.base import strategy_parameters_hash
 from ..core.strategies import OrbVwapStrategy, Strategy
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.market_intelligence import MarketIntelligenceOrchestrator
@@ -72,6 +73,8 @@ from ..core.settings import AppSettings, ConfigurationError, Environment, load_s
 from ..core.trading_service import TradingService
 from ..core.market_stats import MarketStatsProvider, MarketStatsSettings
 from ..core.paper_loop import PaperLoopSettings, PaperTradingLoop
+from ..core.outcome_feedback import OutcomeFeedbackService
+from ..core.strategy_lab import StrategyLabService
 from .app import ApiContext, create_app
 
 
@@ -247,6 +250,9 @@ def create_candidate_assessment_service(
         research_strategies or {"orb_vwap": OrbVwapStrategy()},
         model_version=(env.get("AI_MODEL") or "unspecified").strip(),
         clock=clock,
+        outcome_feedback=OutcomeFeedbackService(
+            store, clock=clock or (lambda: datetime.now(timezone.utc))
+        ).research_evidence,
     )
 
 
@@ -477,15 +483,19 @@ def build_context(
             fx_rates[ccy.strip().upper()] = float(rate)
     portfolio = rebuild_portfolio(store, instruments, settings.base_currency,
                                   float(env.get("PAPER_STARTING_CASH") or 100_000), fx_rates)
+    outcome_feedback = OutcomeFeedbackService(store, clock=now)
+    outcome_feedback.process()
     def persist_paper_fill(fill: Any) -> None:
-        store.fills.save(fill)
-        store.positions.replace_all(
-            portfolio.positions().values(), fill.timestamp)
-        snapshot_id = (
-            f"fill:{fill.client_order_id}:{fill.fill_sequence}"
-            if fill.client_order_id is not None and fill.fill_sequence is not None
-            else None)
-        store.pnl.snapshot(portfolio, fill.timestamp, snapshot_id=snapshot_id)
+        with store.db.transaction():
+            store.fills.save(fill)
+            store.positions.replace_all(
+                portfolio.positions().values(), fill.timestamp)
+            snapshot_id = (
+                f"fill:{fill.client_order_id}:{fill.fill_sequence}"
+                if fill.client_order_id is not None and fill.fill_sequence is not None
+                else None)
+            store.pnl.snapshot(portfolio, fill.timestamp, snapshot_id=snapshot_id)
+            outcome_feedback.process()
 
     portfolio.on_fill = persist_paper_fill
     broker = PaperBroker(portfolio, instruments, clock=now,
@@ -620,12 +630,24 @@ def build_context(
         market_data.breaker_state != "OPEN",
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
     quotes = quote_source(market_data, instruments, logger=logger)
+    def paper_version_info(name: str) -> StrategyVersionInfo | None:
+        strategy = registered_research_strategies.get(name)
+        if strategy is None:
+            return None
+        digest = strategy_parameters_hash(strategy)
+        version = getattr(strategy, "version", None)
+        if digest is None or not isinstance(version, str):
+            return None
+        return StrategyVersionInfo(
+            version, 0, digest,
+            getattr(getattr(strategy, "config", None), "interval", None))
+
     paper = TradingService(
         mode=TradingMode.PAPER, risk_engine=risk_engine,
         order_manager=order_manager, portfolio=portfolio, instruments=instruments,
         quotes=quotes,
         market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
-        strategy_approval=strategies.check_live, provenance_source=strategies.version_info,
+        strategy_approval=strategies.check_live, provenance_source=paper_version_info,
         sizing_limits=sizing_limits, clock=now)
     max_execution_data_age = timedelta(
         seconds=settings.max_market_data_age_seconds)
@@ -754,7 +776,14 @@ def build_context(
                       personal_research=personal_research,
                       personal_research_mode=personal_research_mode,
                       instrument_discovery=discovery,
-                      paper_loop=paper_loop)
+                      paper_loop=paper_loop,
+                      outcome_feedback=outcome_feedback,
+                      strategy_lab=StrategyLabService(
+                          store, candidate_assessment, market_data, instruments,
+                          research_sessions, sizing_limits, clock=now,
+                          flatten_minutes=paper_loop.settings.eod_flatten_minutes
+                          if paper_loop is not None else 10,
+                      ) if candidate_assessment is not None else None)
 
 
 def _paper_loop_from_env(

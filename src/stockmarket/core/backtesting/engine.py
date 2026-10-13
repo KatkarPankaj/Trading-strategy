@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from math import isfinite
 from typing import Any, Callable, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,8 @@ class BacktestConfig:
     price_basis: PriceBasis = PriceBasis.RAW
     periods_per_year: int = 252
     annual_risk_free_rate: float = 0.0
+    session_flatten_before_close: timedelta | None = None
+    bar_interval: timedelta | None = None
 
     def __post_init__(self) -> None:
         if not isfinite(self.starting_cash) or self.starting_cash <= 0:
@@ -55,6 +58,12 @@ class BacktestConfig:
             raise ValueError("max_positions must be at least 1")
         if self.max_holding_bars is not None and self.max_holding_bars < 1:
             raise ValueError("max_holding_bars must be at least 1")
+        if self.session_flatten_before_close is not None:
+            if not isinstance(self.session_flatten_before_close, timedelta) \
+                    or self.session_flatten_before_close <= timedelta(0) \
+                    or not isinstance(self.bar_interval, timedelta) \
+                    or self.bar_interval <= timedelta(0):
+                raise ValueError("session flatten requires positive margin and bar interval")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +138,7 @@ class _Symbol:
     last: int
     rate: float
     actions: list[CorporateAction]
+    flatten_at: dict[date, pd.Timestamp] = field(default_factory=dict)
     pos: _Pos | None = None
     pending: _Order | None = None
 
@@ -209,12 +219,32 @@ class _Simulation:
                          if start is None or d >= start), None)
             if first is None:
                 continue
+            flatten_at: dict[date, pd.Timestamp] = {}
+            if cfg.session_flatten_before_close is not None:
+                if cal is None:
+                    raise ValueError(f"{iid}: session flatten requires an exchange calendar")
+                if cal.timezone != inst.timezone:
+                    raise ValueError(f"{iid}: flatten calendar timezone must match instrument")
+                assert cfg.bar_interval is not None
+                zone = ZoneInfo(cal.timezone)
+                for day in set(local[first:]):
+                    opened = pd.Timestamp(datetime.combine(day, cal.open_time, zone))
+                    close = pd.Timestamp(datetime.combine(day, cal.close_time_on(day), zone))
+                    cutoff = close - cfg.session_flatten_before_close
+                    if cutoff <= opened:
+                        raise ValueError(f"{iid}: flatten margin exceeds the session")
+                    # Floor to the scheduled bar grid, never use the future bar's close.
+                    boundary = opened + ((cutoff - opened) // cfg.bar_interval) * cfg.bar_interval
+                    if boundary not in df.index or not cal.is_open(boundary):
+                        raise ValueError(f"{iid}: missing scheduled session-flatten bar on {day}")
+                    flatten_at[day] = boundary
             self.symbols[iid] = _Symbol(
                 iid, inst, df, *(df[c].to_numpy(dtype=float)
                                  for c in REQUIRED_COLUMNS), local,
                 {df.index[k]: k for k in range(first, len(df))}, len(df) - 1,
                 self.fx[inst.currency.upper()],
-                sorted((a for a in actions if a.instrument_id == iid), key=lambda a: a.ex_date))
+                sorted((a for a in actions if a.instrument_id == iid), key=lambda a: a.ex_date),
+                flatten_at=flatten_at)
         if not self.symbols:
             raise ValueError(
                 "no bars fall inside the requested window and trading hours")
@@ -246,6 +276,21 @@ class _Simulation:
     # ---- per-bar pipeline ----
     def _bar(self, s: _Symbol, i: int, t: pd.Timestamp) -> None:
         self._apply_actions(s, i, t)
+        flatten = s.flatten_at.get(s.local_dates[i])
+        if flatten is not None and t >= flatten:
+            s.pending = None
+            if s.pos is not None:
+                quantity = self.ex.fillable_quantity(s.pos.qty, s.v[i])
+                if quantity > 0:
+                    self._close(s, quantity, s.o[i], t, "END_OF_DAY_FLATTEN")
+                else:
+                    self.skipped["SESSION_FLATTEN_NO_LIQUIDITY"] += 1
+                if s.pos is not None:
+                    self.pf.mark(s.iid, float(s.o[i]), t)
+                next_day = i == s.last or s.local_dates[i + 1] != s.local_dates[i]
+                if s.pos is not None and next_day:
+                    raise ValueError(f"{s.iid}: insufficient session-flatten liquidity on {s.local_dates[i]}")
+            return
         self._execute_pending(s, i, t)
         self._check_stops(s, i, t)
         if s.pos is not None:

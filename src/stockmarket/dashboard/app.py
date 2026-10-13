@@ -564,7 +564,27 @@ def _strategies(client: ApiClient, activity: dict[str, Any] | None = None) -> No
         _table(views.frame(request.get("strategy_catalog", [])))
         st.caption("Registration and AI selection do not establish profitability or authorize an order.")
         _table(views.research_candidates(activity["research"].get("candidates", [])))
-    st.subheader("Strategy performance")
+    st.subheader("Completed paper trades and strategy feedback")
+    st.caption("Gross price PnL minus fees = net PnL. Fill prices already include slippage. "
+               "Samples are grouped by version, parameters, timeframe, regime and currency; "
+               "paper performance is not out-of-sample validation or risk approval.")
+    outcomes = _safe(client, "/paper/outcomes", limit=100)
+    _table(views.frame(outcomes["outcomes"]) if outcomes else None,
+           "No fully closed paper position episodes recorded.")
+    feedback = _safe(client, "/paper/strategy-performance")
+    _table(views.frame(feedback["performance"]) if feedback else None,
+           "No closed paper sample available.")
+    st.subheader("AI strategy laboratory (research only)")
+    st.caption("Versioned trusted-template proposals and cost-aware historical evaluations. "
+               "Historical folds are exploratory. Post-proposal holdouts must be registered "
+               "before observation and keep their original window and policy. "
+               "Proposals are not executable; monitoring never invokes AI or runs evaluations.")
+    laboratory = _safe(client, "/strategy-lab/proposals", limit=20)
+    if laboratory and laboratory["proposals"]:
+        st.json(laboratory["proposals"])
+    else:
+        st.info("No strategy proposals recorded.")
+    st.subheader("Legacy/backtest strategy performance (separate from paper feedback)")
     _table(views.strategy_performance(
         _safe(client, "/trades", limit=1000) or []))
     perf = _safe(client, "/performance")

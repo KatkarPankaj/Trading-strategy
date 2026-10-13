@@ -52,6 +52,9 @@ from ..core.scanner import MarketScanner, ScanPersistenceError, UnknownUniverse
 from ..core.signal_generation import SignalGenerationService
 from ..core.trade_proposals import TradeProposalService
 from ..core.security import Secret
+from ..core.strategy_lab import StrategyLabService, StrategyLabError
+from ..core.outcome_feedback import OutcomeFeedbackService
+from ..core.data.provider import DataProviderError
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.trading_service import (
@@ -59,6 +62,8 @@ from ..core.trading_service import (
     summarize_trades,
 )
 from .schemas import (
+    StrategyLabProposalBody,
+    StrategyLabEvaluationBody,
     PersonalResearchBody,
     CandidateResearchRunBody,
     AutonomousPaperCycleBody,
@@ -109,6 +114,8 @@ class ApiContext:
     personal_research_mode: bool = False
     instrument_discovery: Mapping[str, Any] = field(default_factory=dict)
     paper_loop: Any = None
+    outcome_feedback: OutcomeFeedbackService | None = None
+    strategy_lab: StrategyLabService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -635,6 +642,61 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def paper_fills(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
         return {"trading_mode": TradingMode.PAPER.value,
                 "fills": _plain(ctx.store.fills.recent(limit))}
+
+    @app.get("/paper/outcomes", dependencies=[Depends(auth)])
+    def paper_outcomes(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
+        return {"trading_mode": TradingMode.PAPER.value,
+                "outcomes": ctx.store.paper_outcomes.recent(limit)}
+
+    @app.get("/strategy-lab/proposals", dependencies=[Depends(auth)])
+    def strategy_lab_proposals(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
+        return {"research_only": True, "proposals": ctx.store.strategy_lab.recent(limit)}
+
+    @app.post("/strategy-lab/proposals", dependencies=[Depends(auth)])
+    def propose_strategy(body: StrategyLabProposalBody) -> dict[str, Any]:
+        if ctx.strategy_lab is None:
+            raise HTTPException(503, "AI strategy laboratory is not configured")
+        try:
+            return ctx.strategy_lab.propose(body.snapshot_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown research snapshot") from exc
+        except (StrategyLabError, CandidateAssessmentError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/strategy-lab/proposals/{proposal_id}/evaluate", dependencies=[Depends(auth)])
+    def evaluate_strategy(proposal_id: str, body: StrategyLabEvaluationBody) -> dict[str, Any]:
+        if ctx.strategy_lab is None:
+            raise HTTPException(503, "AI strategy laboratory is not configured")
+        try:
+            return ctx.strategy_lab.evaluate(proposal_id, **body.model_dump())
+        except KeyError as exc:
+            raise HTTPException(404, "unknown strategy proposal") from exc
+        except DataProviderError as exc:
+            raise HTTPException(503, f"historical data unavailable: {exc.code}") from exc
+        except (StrategyLabError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/strategy-lab/proposals/{proposal_id}/holdout", dependencies=[Depends(auth)])
+    def register_strategy_holdout(proposal_id: str, body: StrategyLabEvaluationBody) -> dict[str, Any]:
+        if ctx.strategy_lab is None:
+            raise HTTPException(503, "AI strategy laboratory is not configured")
+        try:
+            return ctx.strategy_lab.register_holdout(
+                proposal_id, **body.model_dump(exclude={"evaluation_kind"}))
+        except KeyError as exc:
+            raise HTTPException(404, "unknown strategy proposal") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/paper/strategy-performance", dependencies=[Depends(auth)])
+    def paper_strategy_performance() -> dict[str, Any]:
+        # Read the same decision clock; monitoring never processes fills or calls AI.
+        service = ctx.outcome_feedback
+        if service is None:
+            raise HTTPException(503, "Paper outcome feedback is not configured")
+        as_of = service.clock()
+        return {"trading_mode": TradingMode.PAPER.value, "as_of": as_of.isoformat(),
+                "performance": service.performance(as_of)}
 
     @app.get("/portfolio", dependencies=[Depends(auth)])
     def portfolio() -> dict[str, Any]:

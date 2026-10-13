@@ -460,11 +460,12 @@ class TradingService:
             client_order_id=client_order_id, mode=self.mode.value, strategy_name=ticket.strategy,
             strategy_version=info.strategy_version if info else "UNVERSIONED",
             parameter_version=info.parameter_version if info else None,
-            parameters_hash=ticket.parameters_hash or (
-                info.parameters_hash if info else None),
+            parameters_hash=info.parameters_hash if info is not None and self.mode is TradingMode.PAPER
+                else ticket.parameters_hash or (info.parameters_hash if info else None),
             signal_id=ticket.signal_id, market_regime=ticket.market_regime,
             data_timestamp=market_data[1] if market_data else None,
-            decision_timestamp=now, versioned=info is not None)
+            decision_timestamp=now, versioned=info is not None,
+            timeframe=info.timeframe if info else None)
 
     def _record_audit(self, client_order_id: str, ticket: OrderTicket, now: datetime,
                       decision: RiskDecision, market_data: tuple[float, datetime] | None,

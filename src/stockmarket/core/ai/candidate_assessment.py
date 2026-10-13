@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from math import isfinite
@@ -19,7 +19,7 @@ from ..markets import MarketRegistry
 from ..models import Instrument
 from ..strategies.base import Strategy
 
-PROMPT_VERSION = "candidate-assessment-v3"
+PROMPT_VERSION = "candidate-assessment-v4"
 SCHEMA_VERSION = "candidate-assessment-v2"
 _MAX_URL_LENGTH = 2048
 _COMPONENT_WEIGHTS = {
@@ -82,9 +82,10 @@ class AIResearchContext:
     registered_strategies: tuple[Mapping[str, str], ...]
     missing_evidence: tuple[str, ...]
     warnings: tuple[str, ...]
+    outcome_feedback: Mapping[str, Any] | None = None
 
     def as_mapping(self) -> dict[str, Any]:
-        return {
+        result = {
             "snapshot_id": self.snapshot_id,
             "instrument_id": self.instrument_id,
             "symbol": self.symbol,
@@ -113,6 +114,9 @@ class AIResearchContext:
             "missing_evidence": list(self.missing_evidence),
             "warnings": list(self.warnings),
         }
+        if self.outcome_feedback is not None:
+            result["outcome_feedback"] = dict(self.outcome_feedback)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +246,9 @@ class CandidateAssessmentService:
         model_version: str = "unspecified",
         ranking: OpportunityRankingConfig = OpportunityRankingConfig(),
         clock: Callable[[], datetime] | None = None,
+        outcome_feedback: Callable[
+            [datetime, str, str, Mapping[str, Strategy]], Mapping[str, Any]
+        ] | None = None,
     ) -> None:
         if not isinstance(model_version, str) or not model_version.strip() \
                 or len(model_version.strip()) > 128:
@@ -259,6 +266,7 @@ class CandidateAssessmentService:
         self.model_version = model_version.strip()
         self.ranking_config = ranking
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.outcome_feedback = outcome_feedback
 
     @property
     def configuration_fingerprint(self) -> str:
@@ -278,6 +286,7 @@ class CandidateAssessmentService:
             "schema_version": SCHEMA_VERSION,
             "ranking": self.ranking_config,
             "catalog": catalog,
+            "outcome_feedback_version": "closed-episodes-v1" if self.outcome_feedback else None,
         }
         text = json.dumps(configuration, sort_keys=True, separators=(",", ":"),
                           default=str)
@@ -501,6 +510,12 @@ class CandidateAssessmentService:
     def get_assessment(self, assessment_id: str) -> dict[str, Any] | None:
         return self.repository.get_assessment(assessment_id)
 
+    def snapshot_context(self, snapshot_id: str) -> AIResearchContext:
+        row = self.repository.get_snapshot(snapshot_id)
+        if row is None:
+            raise KeyError(f"unknown research snapshot {snapshot_id!r}")
+        return self._context(row, self.strategies)
+
     def opportunities(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         return self.repository.list_opportunities(limit=limit, offset=offset)
 
@@ -722,7 +737,7 @@ class CandidateAssessmentService:
             if any(c["name"] == name and c["status"] == "AVAILABLE" for c in components))
         quality_count = sum(1 for item in evidence if item["quality"] == "VALID")
         quality = quality_count / len(evidence) if evidence else 0.0
-        return AIResearchContext(
+        context = AIResearchContext(
             snapshot_id=str(row["snapshot_id"]),
             instrument_id=instrument_id,
             symbol=instrument.symbol,
@@ -757,6 +772,20 @@ class CandidateAssessmentService:
             missing_evidence=tuple(missing),
             warnings=tuple(str(x) for x in payload.get("warnings", [])),
         )
+        if self.outcome_feedback is not None:
+            feedback = dict(self.outcome_feedback(
+                as_of, instrument.market, instrument.currency, strategies))
+            groups = list(feedback.get("performance", []))
+            feedback["performance"] = groups
+            # Reserve room for the second-call assessment; never truncate market evidence.
+            budget = self.analyst.max_input_chars - 1000 - len(json.dumps(
+                context.as_mapping(), sort_keys=True, separators=(",", ":")))
+            while groups and len(json.dumps(feedback, separators=(",", ":"))) > budget:
+                groups.pop()
+                feedback["omitted_groups"] = int(feedback.get("omitted_groups", 0)) + 1
+                feedback["omission_reason"] = "AI_INPUT_LIMIT"
+            context = replace(context, outcome_feedback=feedback)
+        return context
 
     def _has_missing_critical_evidence(self, context: AIResearchContext) -> bool:
         statuses = {str(item["name"]): str(item["status"])

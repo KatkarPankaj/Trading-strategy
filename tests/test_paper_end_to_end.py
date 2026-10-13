@@ -209,7 +209,38 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(self.store.orders.all()[-1]["trade_intent"], "SELL_TO_CLOSE")
         self.assertAlmostEqual(final["realized_pnl"], -2.0 * quantity)
         self.assertAlmostEqual(final["cash"]["USD"], STARTING_CASH - 2.0 * quantity)
+        outcomes = client.get("/paper/outcomes", headers=HEADERS).json()["outcomes"]
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]["net_pnl"], -2.0 * quantity)
+        self.assertEqual(outcomes[0]["attribution"]["strategy_version"], "1.0.0")
+        self.assertEqual(outcomes[0]["attribution"]["timeframe"], "5m")
+        metrics = client.get("/paper/strategy-performance", headers=HEADERS).json()["performance"]
+        self.assertEqual(metrics[0]["trade_count"], 1)
+        self.assertEqual(metrics[0]["sample_status"], "INSUFFICIENT_EVIDENCE")
         restarted = self.context(auto_loop=True)
+        self.assertEqual(self.state(self.client(restarted)), final)
+        self.assertEqual(restarted.outcome_feedback.process(), 0)
+        self.assertEqual(len(self.store.paper_outcomes.recent()), 1)
+        opportunity = self.store.research_runs.list_opportunities(limit=1)[0]
+        snapshot_id = opportunity["payload"]["assessment"]["snapshot_id"]
+        # The snapshot predates the close: replaying it cannot see the later loss.
+        old_context = restarted.candidate_assessment._context(
+            self.store.research_runs.get_snapshot(snapshot_id),
+            restarted.candidate_assessment.strategies)
+        self.assertEqual(old_context.outcome_feedback["performance"], [])
+        before_calls = len(self.ai.users)
+        later_run = self.client(restarted).post(
+            "/research/autonomous", headers=HEADERS, json={
+                "universe_id": "US_ALL", "idempotency_key": "post-outcome-research",
+                "as_of": self.clock.at.isoformat(), "top_n": 1})
+        self.assertEqual(later_run.status_code, 200, later_run.text)
+        later_prompts = self.ai.users[before_calls:]
+        self.assertEqual(len(later_prompts), 2)
+        for prompt in later_prompts:
+            self.assertIn('"outcome_feedback"', prompt)
+            self.assertIn('"trade_count":1', prompt)
+        assessment = later_run.json()["candidates"][0]["opportunity"]["assessment"]
+        self.assertEqual(assessment["input_context"]["outcome_feedback"]["performance"][0]["trade_count"], 1)
         self.assertEqual(self.state(self.client(restarted)), final)
         self.assertTrue(restarted.recovery.recover().clean)
         self.assertEqual(restarted.paper_loop.tick()["run_id"], tick["run_id"])

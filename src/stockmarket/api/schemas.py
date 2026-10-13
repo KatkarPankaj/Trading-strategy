@@ -18,6 +18,27 @@ from ..core.risk import OrderIntent
 _ID = r"^[A-Za-z0-9:._\-^=&]+$"
 
 
+class StrategyLabProposalBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snapshot_id: str = Field(min_length=1, max_length=128, pattern=_ID)
+
+
+class StrategyLabEvaluationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: datetime
+    end: datetime
+    commission_rate: float = Field(default=.001, gt=0, le=.01, allow_inf_nan=False)
+    slippage_bps: float = Field(default=5, gt=0, le=100, allow_inf_nan=False)
+    evaluation_kind: Literal["HISTORICAL", "POST_PROPOSAL_HOLDOUT"] = "HISTORICAL"
+
+    @field_validator("start", "end")
+    @classmethod
+    def aware_dates(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("evaluation dates must be timezone-aware")
+        return value
+
+
 class PersonalResearchBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

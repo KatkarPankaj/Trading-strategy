@@ -106,7 +106,9 @@ class PaperActivityDashboardTests(TestCase):
     @patch.object(app, "st")
     def test_strategies_displays_catalog_and_current_selection_without_trades(self, ui):
         client = Mock()
-        client.get.side_effect = [[], {"trades": {"count": 0}}]
+        client.get.side_effect = [
+            {"outcomes": []}, {"performance": []}, {"proposals": []},
+            [], {"trades": {"count": 0}}]
         app._strategies(client, {"research": research()})
         frames = [call.args[0] for call in ui.dataframe.call_args_list]
         self.assertEqual(frames[0].iloc[0]["name"], "orb_vwap")

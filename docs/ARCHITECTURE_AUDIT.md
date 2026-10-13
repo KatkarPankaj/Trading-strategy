@@ -650,6 +650,114 @@ or real-market execution-feed readiness claim follows from these fixtures.
 Earlier process-local reservation and unrecoverable configuration-conflict
 statements above describe the prior baseline; this section supersedes them.
 
+### 18.6 Milestone 4: closed-outcome feedback and constrained strategy laboratory
+
+Implemented incrementally against `8103ae8e40819e276e23b7f2f7fcfcc7129041d5`.
+No live broker, commit, push, deployment or migration of user-created state:
+
+- Confirmed missing link: filled/closed paper positions previously had no
+  immutable episode outcomes consumed by candidate assessment or selection.
+  V18 and `core/outcome_feedback.py` now project durable fills inside the paper
+  transaction and backfill on startup. Partial closes, weighted-average
+  additions, short covers, reversals and reopened episodes retain exact fill
+  provenance and allocate fees without double-counting slippage.
+- Actual configured paper strategies now provide trusted execution version,
+  parameter hash and timeframe. Previously the paper path depended on a
+  live-approved-config registry and recorded ordinary configured strategies as
+  UNVERSIONED. Historical missing attribution is not guessed or repaired.
+- Outcome identity is derived from the first entry fill. Conflicting replay
+  fails explicitly instead of upserting history; each new outcome receives a
+  hash-chained audit event. Same-time new fills use durable ingestion ordering.
+  Ambiguous same-time legacy fills require reconciliation.
+- Per-market/currency/version/config/timeframe/regime metrics and uncertainty
+  reach **both** AI assessment and strategy-selection prompts. Evidence is
+  filtered by close time and known-at time, including backfill knowledge time,
+  and retained in assessment provenance. Small samples cannot alter risk policy.
+  This verifies feedback delivery, not that a real model changes its ranking.
+- Authenticated GET outcome/performance/laboratory routes and the Strategies
+  dashboard show actual paper feedback separately from legacy/backtest results.
+  Reads neither invoke AI nor mutate fills, outcomes or execution.
+- V19 and `core/strategy_lab.py` persist strict, stable ORB/VWAP proposal versions,
+  hypotheses, alternatives, invalidation descriptions and bounded parameters.
+  Explicit proposal requests reuse AIAnalyst structured output and validated
+  snapshot context. Unsupported templates/extra fields/mismatched markets and
+  unverified short eligibility fail closed; NO_TRADE remains non-executable.
+- Explicit evaluation connects proposals to the existing causal backtester,
+  fixed-parameter train/validation/test folds and positive costs, with input
+  hashes and reproducible persisted reports. Missing history is reported as
+  insufficient evidence rather than fabricated results.
+
+Still incomplete: laboratory activation into the executable registry, genuine
+new deterministic templates, historical session-flatten parity, independent
+post-proposal/out-of-sample validation, historical corporate-action completeness,
+timestamped/historical FX, additional official exchange-calendar verification
+and provider entitlements, scalable incremental feedback and multi-worker/
+PostgreSQL certification. Historical reports remain exploratory and proposals
+cannot create orders. The existing ORB/VWAP selection/execution path is preserved.
+The feedback projector currently replays the fill ledger on every fill; it is a
+single-worker local implementation, not a large-history throughput claim.
+
+Validation at this revision: focused outcome/laboratory/execution/AI-selection/
+dashboard suite **53 tests passed**; complete unittest discovery **523 tests
+passed**. Existing AnyIO resource warnings remain visible. `git diff --check`
+and checked-file editor diagnostics reported no errors. Deterministic production
+composition demonstrated USD 100,000 -> BUY 100 at 102 -> cash 89,800 ->
+STOP_LOSS close at 100 -> cash 99,800, two fills, one immutable outcome with
+gross/net PnL -200 and zero fixture fees. Reconstruction produced zero new
+outcomes; later assessment and selection prompts contained the one-trade
+insufficient-sample evidence, while the earlier snapshot excluded it. The
+fixture's entry regime is explicitly UNKNOWN, not inferred. Separate focused
+tests cover fees, partial exits, reversals, reopened shorts, atomic projection
+rollback and NO_TRADE. No paid AI or real-provider session was exercised.
+
+### 18.7 Milestone 4 continuation: session flatten and future holdout boundary
+
+The following supersedes the session-flatten and holdout integration gaps in
+18.6; executable promotion remains blocked:
+
+- The existing platform backtester has an opt-in calendar-based session flatten
+  mode. It cancels pending entries before boundary execution, blocks further
+  signals, and closes long/short positions at scheduled bar-open prices rather
+  than using a future closing price. DST, early closes and coarse-bar alignment
+  are explicit. Partial flatten fills respect participation limits; residual
+  positions at session end fail the evaluation. Missing boundary data is not
+  substituted with a plausible price. Default legacy backtest behavior remains.
+- Laboratory evaluations use the configured paper-loop flatten margin (or
+  10 minutes with the loop disabled). Complete historical folds now require
+  scheduled flatten bars; truncated provider sessions fail visibly.
+- V20 stores one immutable future holdout policy per proposal. Explicit
+  registration precedes the window, requires a full trading-session embargo,
+  and freezes parameters, window, instrument/calendar/session, sizing, costs and
+  flatten assumptions before any holdout market-data request.
+- A separate evaluation kind, POST_PROPOSAL_HOLDOUT, requires that registration,
+  a finished observation period and matching policy. Missing full sessions/
+  scheduled bars and overlapping historical exploration fail closed. Replays
+  return the original persisted report without refetching or reinterpreting data.
+  No parameter refitting, cherry-picked window replacement or automatic
+  execution follows. Twenty sessions/30 trades mean REVIEW_REQUIRED, not approval.
+- Monitoring shows registrations and reports without AI/data-provider mutations
+  or order submission. New deterministic tests exercise long/short flatten,
+  fees, partial liquidity, missing bars, early closes, DST, pending-entry
+  cancellation, future registration, immutable costs, holdout completeness,
+  restart replay and sample thresholds.
+
+Remaining: executable proposal promotion through all existing research/signal/
+risk/order gates, multi-proposal selection-bias controls, stronger cost/baseline
+and regime-stability evaluation, provider historical/corporate-action coverage,
+timestamped FX and additional verified calendars/entitlements. The future
+holdout machinery is implemented, but these fixtures do not establish real-model
+ranking improvement, profitability or production execution parity.
+
+Validation of this continuation: 19 focused tests passed
+(`test_backtest_session_flatten`, `test_strategy_lab.StrategyLabTests`), then
+536 tests passed with `PYTHONPATH=src;tests python -m unittest discover -s tests`.
+Checked-file editor diagnostics and `git diff --check` were clean. A targeted
+regression first reproduced partial-flatten equity marking at the exit's
+slippage-adjusted fill rather than the known bar open; residual positions now
+use that bar open without leaking the future close into reported equity.
+No provider/paid-AI run, running-service restart or existing-user database
+migration was performed.
+
 ### Recommended next implementation phase
 
 Next, connect persisted completed paper outcomes to sample-qualified,
