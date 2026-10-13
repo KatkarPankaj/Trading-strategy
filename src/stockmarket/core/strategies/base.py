@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -62,3 +62,28 @@ class Strategy(Protocol):
         *,
         as_of: datetime,
     ) -> Signal: ...
+
+
+class PaperStrategyVersion:
+    """Trusted immutable template bound to one evaluated instrument and version."""
+
+    def __init__(self, template: Strategy, *, name: str, version: str,
+                 instrument_id: str, market: str, available_from: datetime) -> None:
+        self.template = template
+        self.name = name
+        self.version = version
+        self.instrument_id = instrument_id
+        self.available_from = available_from
+        self.config = getattr(template, "config")
+        metadata = getattr(template, "metadata")
+        if not isinstance(metadata, StrategyMetadata):
+            raise ValueError("template metadata is required for a paper version")
+        self.metadata = StrategyMetadata(
+            version, frozenset({market}), metadata.supported_asset_classes)
+
+    def evaluate(self, instrument: Instrument, bars: pd.DataFrame,
+                 session: MarketSession, *, as_of: datetime) -> Signal:
+        if instrument.instrument_id != self.instrument_id:
+            raise ValueError("paper strategy version was evaluated for a different instrument")
+        return replace(self.template.evaluate(instrument, bars, session, as_of=as_of),
+                       strategy=self.name)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Mapping
 
@@ -14,7 +15,7 @@ from ..core.instrument_master import bootstrap_instruments
 from ..core.personal_research import PersonalResearchService
 from ..core.market_profiles import default_research_sessions
 from ..core.executors import TradingMode
-from ..core.models import AssetClass, Instrument, TradingStatus
+from ..core.models import AssetClass, Instrument, TradingStatus, TradeIntent
 from ..core.observability import CheckResult, ErrorCounter, HealthMonitor
 from ..core.order_management import OrderManager
 from ..core.market_session import MarketSession
@@ -36,6 +37,7 @@ from ..core.paper_lifecycle import (
 from ..core.autonomous_paper_trading import AutonomousPaperTradingService
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
 from ..core.persistence import SchemaOutOfDate, Store, open_store
+from ..core.persistence.repositories import to_json
 from ..core.recovery import RecoveryManager, rebuild_portfolio, reconcile_positions
 from ..core.risk import RiskEngine, RiskLimits
 from ..core.learning import StrategyConfigRegistry, StrategyVersionInfo
@@ -70,11 +72,12 @@ from ..core.research import NewsEvidenceProducer
 from ..core.trading_gate import TradingGate
 from ..core.security import SecurityError, get_secret
 from ..core.settings import AppSettings, ConfigurationError, Environment, load_settings
-from ..core.trading_service import TradingService
+from ..core.trading_service import OrderTicket, TradingService
 from ..core.market_stats import MarketStatsProvider, MarketStatsSettings
 from ..core.paper_loop import PaperLoopSettings, PaperTradingLoop
 from ..core.outcome_feedback import OutcomeFeedbackService
 from ..core.strategy_lab import StrategyLabService
+from ..core.strategy_ranking import StrategyRankingService
 from .app import ApiContext, create_app
 
 
@@ -566,6 +569,8 @@ def build_context(
     )
     registered_research_strategies = (
         research_strategies or {"orb_vwap": OrbVwapStrategy()})
+    registered_research_strategies = dict(registered_research_strategies)
+    paper_version_registry = dict(registered_research_strategies)
     candidate_assessment = (
         create_candidate_assessment_service(
             store,
@@ -631,7 +636,7 @@ def build_context(
         f"{market_data.name} circuit {market_data.breaker_state.lower()}"))
     quotes = quote_source(market_data, instruments, logger=logger)
     def paper_version_info(name: str) -> StrategyVersionInfo | None:
-        strategy = registered_research_strategies.get(name)
+        strategy = paper_version_registry.get(name)
         if strategy is None:
             return None
         digest = strategy_parameters_hash(strategy)
@@ -642,13 +647,42 @@ def build_context(
             version, 0, digest,
             getattr(getattr(strategy, "config", None), "interval", None))
 
+    def paper_strategy_gate(ticket: OrderTicket) -> str | None:
+        if not ticket.strategy.startswith("lab_"):
+            return None
+        proposal_id = ticket.strategy[4:]
+        proposal = store.strategy_lab.get(proposal_id)
+        if proposal is None or store.strategy_lab.state(proposal_id)["state"] != "ACTIVE_FOR_PAPER":
+            return "PAPER_STRATEGY_NOT_ACTIVE"
+        if proposal["instrument_id"] != ticket.instrument_id:
+            return "PAPER_STRATEGY_INSTRUMENT_MISMATCH"
+        if strategy_lab is None or not strategy_lab.eligibility(proposal_id)["eligible_for_review"]:
+            return "PAPER_STRATEGY_ELIGIBILITY_CHANGED"
+        generation = store.signal_generations.get_by_signal(str(ticket.signal_id))
+        if ticket.signal is None or generation is None \
+                or generation.get("strategy_name") != ticket.strategy \
+                or generation.get("strategy_version") != proposal["strategy_version_id"]:
+            return "PAPER_STRATEGY_REQUIRES_TRUSTED_VERSIONED_SIGNAL"
+        trusted_signal = dict(generation["payload"]["signal"])
+        if datetime.fromisoformat(trusted_signal["timestamp"]) != ticket.signal.timestamp:
+            return "PAPER_STRATEGY_SIGNAL_TIMESTAMP_CHANGED"
+        trusted_signal["timestamp"] = ticket.signal.timestamp
+        if to_json(ticket.signal) != to_json(trusted_signal) \
+                or ticket.stop_loss != ticket.signal.stop_loss \
+                or ticket.take_profit != ticket.signal.take_profit:
+            return "PAPER_STRATEGY_SIGNAL_OR_PROTECTION_CHANGED"
+        if datetime.fromisoformat(generation["evaluation_as_of"]) < datetime.fromisoformat(
+                store.strategy_lab.state(proposal_id)["updated_at"]):
+            return "PAPER_STRATEGY_SIGNAL_PREDATES_ACTIVATION"
+        return None
+
     paper = TradingService(
         mode=TradingMode.PAPER, risk_engine=risk_engine,
         order_manager=order_manager, portfolio=portfolio, instruments=instruments,
         quotes=quotes,
         market_stats=market_stats, sector_of=sector_of, store=store, gate=gate,
         strategy_approval=strategies.check_live, provenance_source=paper_version_info,
-        sizing_limits=sizing_limits, clock=now)
+        sizing_limits=sizing_limits, clock=now, paper_strategy_gate=paper_strategy_gate)
     max_execution_data_age = timedelta(
         seconds=settings.max_market_data_age_seconds)
     paper_proposal_execution = PaperProposalExecutionService(
@@ -758,6 +792,41 @@ def build_context(
         settings=settings, broker=broker, store=store, health=health, recovery=recovery, gate=gate,
         risk_engine=risk_engine, risk_limits=limits, registry=strategies, live_strategies=live_strategies,
         kill_switch_available=kill_switch.available, clock=now)
+    strategy_lab = StrategyLabService(
+        store, candidate_assessment, market_data, instruments, research_sessions,
+        sizing_limits, clock=now,
+        max_active_versions=20 - len(registered_research_strategies),
+        flatten_minutes=paper_loop.settings.eod_flatten_minutes if paper_loop is not None else 10,
+    ) if candidate_assessment is not None else None
+    if strategy_lab is not None:
+        strategy_ranking = StrategyRankingService(store, outcome_feedback, clock=now)
+        candidate_assessment.outcome_feedback = strategy_ranking.evidence
+        candidate_assessment.strategy_ranker = strategy_ranking.rank
+        base_catalog = dict(registered_research_strategies)
+        base_allowlist = autonomous_research.settings.strategy_allowlist if autonomous_research else ()
+
+        def refresh_paper_strategies() -> None:
+            active = strategy_lab.paper_versions(active_only=True)
+            if len(base_catalog) + len(active) > 20:
+                raise ValueError("paper strategy catalog exceeds 20 entries")
+            paper_version_registry.update(strategy_lab.paper_versions())
+            registered_research_strategies.clear()
+            registered_research_strategies.update({**base_catalog, **active})
+            signal_generation.strategies = dict(registered_research_strategies)
+            paper_proposal_execution.strategies = dict(registered_research_strategies)
+            if autonomous_research is not None:
+                autonomous_research.settings = replace(
+                    autonomous_research.settings, strategy_allowlist=tuple(base_allowlist) + tuple(active))
+
+        strategy_lab.on_state_change = refresh_paper_strategies
+        strategy_lab.open_entry_orders = lambda name: any(
+            order.strategy == name and order.trade_intent in {TradeIntent.BUY, TradeIntent.SHORT_SELL}
+            for order in paper.order_manager.open_orders())
+        signal_generation.strategy_refresh = refresh_paper_strategies
+        paper_proposal_execution.strategy_refresh = refresh_paper_strategies
+        if autonomous_research is not None:
+            autonomous_research.strategy_refresh = refresh_paper_strategies
+        refresh_paper_strategies()
     return ApiContext(settings=settings, paper=paper, live=None, store=store, health=health,
                       api_token=token, gate=gate, recovery=recovery, markets=registry, readiness=checker,
                       kill_switch=kill_switch, monitor=monitor, market_data=market_data,
@@ -778,12 +847,8 @@ def build_context(
                       instrument_discovery=discovery,
                       paper_loop=paper_loop,
                       outcome_feedback=outcome_feedback,
-                      strategy_lab=StrategyLabService(
-                          store, candidate_assessment, market_data, instruments,
-                          research_sessions, sizing_limits, clock=now,
-                          flatten_minutes=paper_loop.settings.eod_flatten_minutes
-                          if paper_loop is not None else 10,
-                      ) if candidate_assessment is not None else None)
+                      strategy_ranking=strategy_ranking if strategy_lab is not None else None,
+                      strategy_lab=strategy_lab)
 
 
 def _paper_loop_from_env(

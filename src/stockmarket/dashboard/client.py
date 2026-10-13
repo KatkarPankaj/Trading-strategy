@@ -110,13 +110,13 @@ class ApiClient:
                 "Proposal submission was rejected as stale or conflicting (409); "
                 "regenerate and review the proposal.", 409)
         if not response.ok:
-            if path.startswith("/research/personal/"):
+            if path.startswith(("/research/personal/", "/strategy-lab/")):
                 try:
                     detail = response.json().get("detail", "Request rejected")
                 except requests.exceptions.JSONDecodeError:
                     detail = "Server returned a non-JSON error; inspect API logs and persisted run status"
                 raise ApiError(
-                    f"Personal research error {response.status_code}: {detail}", response.status_code)
+                    f"Request rejected ({response.status_code}): {detail}", response.status_code)
             raise ApiError(
                 f"API error {response.status_code} for {path}", response.status_code)
         return response.json()

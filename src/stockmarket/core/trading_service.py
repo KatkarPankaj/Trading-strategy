@@ -118,6 +118,7 @@ class TradingService:
         strategy_approval: Callable[[str], str | None] | None = None,
         provenance_source: Callable[[str], Any] | None = None,
         sizing_limits: SizingLimits | None = None,
+        paper_strategy_gate: Callable[[OrderTicket], str | None] | None = None,
     ) -> None:
         self.mode = mode
         self.order_manager = order_manager
@@ -132,6 +133,7 @@ class TradingService:
         self._strategy_approval = strategy_approval
         self._provenance_source = provenance_source
         self._sizing_limits = sizing_limits
+        self._paper_strategy_gate = paper_strategy_gate
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._submit_lock = RLock()
         self._reservation_depth = 0
@@ -420,7 +422,27 @@ class TradingService:
     def disabled_controls(self) -> dict[str, str]:
         return self._risk.disabled_controls
 
+    @contextmanager
+    def paper_strategy_change(self) -> Iterator[None]:
+        """Serialize registry changes with paper submissions and the account reservation."""
+        if self.mode is not TradingMode.PAPER:
+            raise ValueError("paper strategy changes require PAPER mode")
+        problem = None
+        with self._submit_lock, self._execution_reservation():
+            try:
+                yield
+            except (ValueError, KeyError) as exc:
+                problem = exc
+        if problem is not None:
+            raise problem
+
     def _halt_decision(self, ticket: OrderTicket, now: datetime) -> RiskDecision | None:
+        if self.mode is TradingMode.PAPER and ticket.intent is not OrderIntent.EXIT \
+                and self._paper_strategy_gate is not None:
+            problem = self._paper_strategy_gate(ticket)
+            if problem is not None:
+                return RiskDecision(RiskDecisionStatus.REJECTED, now, problem,
+                                    signal_id=ticket.signal_id)
         reason = self._gate.blocked_reason() if self._gate is not None else None
         if reason is None and self.mode is TradingMode.LIVE and ticket.intent is not OrderIntent.EXIT:
             # Live entries need an active, approved strategy configuration; missing wiring counts as not approved.
@@ -473,7 +495,9 @@ class TradingService:
         """Decision inputs are stored before the order is sent; the broker response is added afterwards."""
         if self._store is None:
             return
-        if ticket.signal is not None:
+        if ticket.signal is not None and not (
+                self.mode is TradingMode.PAPER and self._paper_strategy_gate is not None
+                and ticket.strategy.startswith("lab_")):
             self._store.signals.save(ticket.signal)
         if strategy_decision is not None:
             self._store.strategy_decisions.save(strategy_decision)

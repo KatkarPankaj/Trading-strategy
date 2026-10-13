@@ -175,6 +175,7 @@ class OutcomeFeedbackService:
                 "expectancy_ci95_half_width": uncertainty,
                 "mean_return_on_entry_notional": mean(returns),
                 "return_volatility": stdev(returns) if count > 1 else None,
+                "return_ci95_half_width": 1.96 * stdev(returns) / sqrt(count) if count > 1 else None,
                 "return_mean_to_volatility": mean(returns) / stdev(returns)
                     if count > 1 and stdev(returns) > 0 else None,
                 "evidence_hash": hashlib.sha256(
@@ -199,6 +200,7 @@ class OutcomeFeedbackService:
             "trade_count", "sample_status", "win_rate", "expectancy", "profit_factor",
             "max_closed_pnl_drawdown", "expectancy_ci95_half_width", "return_mean_to_volatility",
             "evidence_hash", "last_known_at", "out_of_sample_validated",
+            "mean_return_on_entry_notional", "return_volatility", "return_ci95_half_width",
         }
         return {
             "as_of": ts(as_of), "source": "persisted_closed_paper_episodes",

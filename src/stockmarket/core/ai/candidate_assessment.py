@@ -157,6 +157,7 @@ class AIResearchAssessment:
     calibrated_probability: float | None = None
     sources: tuple[Mapping[str, Any], ...] = ()
     ai_usage: Mapping[str, Any] | None = None
+    strategy_ranking_evidence: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +268,7 @@ class CandidateAssessmentService:
         self.ranking_config = ranking
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.outcome_feedback = outcome_feedback
+        self.strategy_ranker: Callable[..., Mapping[str, Any]] | None = None
 
     @property
     def configuration_fingerprint(self) -> str:
@@ -432,6 +434,14 @@ class CandidateAssessmentService:
                     selection = None
                     selection_error = "AI strategy-selection timestamp is invalid"
         strategy = selection.ranked_strategies[0] if selection else None
+        assessment_id = str(uuid4())
+        strategy_ranking_evidence = None
+        if selection is not None and self.strategy_ranker is not None:
+            strategy_ranking_evidence = self.strategy_ranker(
+                [item.strategy for item in selection.ranked_strategies],
+                context, assessment_id=assessment_id)
+            selected = strategy_ranking_evidence["ranked_order"][0]
+            strategy = next(item for item in selection.ranked_strategies if item.strategy == selected)
         if strategy is None:
             if no_trade:
                 status = AssessmentStatus.NO_TRADE
@@ -463,7 +473,7 @@ class CandidateAssessmentService:
             state = OpportunityState.STRATEGY_SELECTED
             error = None
         assessment = AIResearchAssessment(
-            assessment_id=str(uuid4()),
+            assessment_id=assessment_id,
             snapshot_id=context.snapshot_id,
             instrument_id=context.instrument_id,
             status=status,
@@ -501,6 +511,7 @@ class CandidateAssessmentService:
             sources=_cited_sources(
                 context, (*output.key_evidence, *output.contradictory_evidence)),
             ai_usage=_usage(assessment_result, selection_result),
+            strategy_ranking_evidence=strategy_ranking_evidence,
         )
         ranking = self.rank(
             assessment, context, strategy_names=frozenset(strategies)
@@ -777,12 +788,18 @@ class CandidateAssessmentService:
                 as_of, instrument.market, instrument.currency, strategies))
             groups = list(feedback.get("performance", []))
             feedback["performance"] = groups
+            evaluations = list(feedback.get("evaluations", []))
+            feedback["evaluations"] = evaluations
             # Reserve room for the second-call assessment; never truncate market evidence.
             budget = self.analyst.max_input_chars - 1000 - len(json.dumps(
                 context.as_mapping(), sort_keys=True, separators=(",", ":")))
             while groups and len(json.dumps(feedback, separators=(",", ":"))) > budget:
                 groups.pop()
                 feedback["omitted_groups"] = int(feedback.get("omitted_groups", 0)) + 1
+                feedback["omission_reason"] = "AI_INPUT_LIMIT"
+            while evaluations and len(json.dumps(feedback, separators=(",", ":"))) > budget:
+                evaluations.pop()
+                feedback["omitted_evaluations"] = int(feedback.get("omitted_evaluations", 0)) + 1
                 feedback["omission_reason"] = "AI_INPUT_LIMIT"
             context = replace(context, outcome_feedback=feedback)
         return context

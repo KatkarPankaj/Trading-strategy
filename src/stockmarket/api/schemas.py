@@ -39,6 +39,15 @@ class StrategyLabEvaluationBody(BaseModel):
         return value
 
 
+class StrategyLabTransitionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    target: Literal["APPROVED_FOR_PAPER", "ACTIVE_FOR_PAPER", "PAUSED", "RETIRED"]
+    operator: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=1000)
+    request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    acknowledge_selection_bias: bool = Field(default=False, strict=True)
+
+
 class PersonalResearchBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

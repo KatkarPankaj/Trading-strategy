@@ -141,6 +141,7 @@ class AutonomousResearchService:
         self.markets = markets
         self.settings = settings
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.strategy_refresh: Callable[[], None] | None = None
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         row = self.repository.get_run(run_id)
@@ -157,6 +158,8 @@ class AutonomousResearchService:
     ) -> dict[str, Any]:
         if mode != "PAPER":
             raise AutonomousResearchError("autonomous opportunity discovery is PAPER-only")
+        if self.strategy_refresh is not None:
+            self.strategy_refresh()
         if not isinstance(idempotency_key, str) or not idempotency_key.strip() \
                 or len(idempotency_key) > 128 \
                 or any(not (ch.isascii() and (ch.isalnum() or ch in "_-"))
@@ -213,6 +216,9 @@ class AutonomousResearchService:
         instrument_scope_fingerprint = hashlib.sha256(
             json.dumps(scoped_instrument_ids, separators=(",", ":")).encode()
         ).hexdigest()
+        effective_allowlist = tuple(
+            name for name in self.settings.strategy_allowlist
+            if getattr(self.candidate_assessment.strategies[name], "available_from", timestamp) <= timestamp)
         strategy_catalog = [
             {
                 "name": name,
@@ -222,7 +228,7 @@ class AutonomousResearchService:
                     self.candidate_assessment.strategies[name],
                     "version", "unspecified"))[:128],
             }
-            for name in self.settings.strategy_allowlist
+            for name in effective_allowlist
         ]
         for code in active_markets:
             try:
@@ -245,7 +251,7 @@ class AutonomousResearchService:
             "top_n": count,
             "markets": sorted(active_markets),
             "asset_classes": sorted(item.value for item in active_asset_classes),
-            "strategy_allowlist": list(self.settings.strategy_allowlist),
+            "strategy_allowlist": list(effective_allowlist),
             "max_concurrency": self.settings.max_concurrency,
             "scanner_fingerprint": self.scanner.configuration_fingerprint,
             "research_fingerprint": self.candidate_research.configuration_fingerprint,

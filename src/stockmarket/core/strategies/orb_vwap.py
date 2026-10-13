@@ -160,37 +160,11 @@ class OrbVwapStrategy:
         entry: float,
         reasons: tuple[str, ...],
     ) -> Signal:
-        if side is SignalSide.BUY:
-            stop = _tick_price(
-                entry * (1 - self.config.stop_loss_pct), instrument.tick_size, ROUND_FLOOR)
-            target = _tick_price(
-                entry * (1 + self.config.take_profit_pct), instrument.tick_size, ROUND_CEILING)
-        else:
-            stop = _tick_price(
-                entry * (1 + self.config.stop_loss_pct), instrument.tick_size, ROUND_CEILING)
-            target = _tick_price(
-                entry * (1 - self.config.take_profit_pct), instrument.tick_size, ROUND_FLOOR)
-        if side is SignalSide.BUY and not 0 < stop < entry < target:
-            return self._hold(instrument, timestamp, "INVALID_TICK_ADJUSTED_RISK_PRICES")
-        if side is SignalSide.SELL and not 0 < target < entry < stop:
-            return self._hold(instrument, timestamp, "INVALID_TICK_ADJUSTED_RISK_PRICES")
-        risk = abs(entry - stop)
-        reward = abs(target - entry)
-        return Signal(
-            instrument_id=instrument.instrument_id,
-            symbol=instrument.symbol,
-            timestamp=timestamp,
-            strategy=self.name,
-            side=side,
-            entry_price=entry,
-            stop_loss=stop,
-            take_profit=target,
-            reward_risk=reward / risk,
-            reasons=reasons,
-            invalidation_conditions=("Closing price crosses VWAP against the signal",),
-            # a breakdown below the range is a short entry, never an exit of a long
-            intent=TradeIntent.BUY if side is SignalSide.BUY else TradeIntent.SHORT_SELL,
-        )
+        return entry_signal(
+            self.name, instrument, timestamp, side, entry, reasons,
+            stop_loss_pct=self.config.stop_loss_pct,
+            take_profit_pct=self.config.take_profit_pct,
+            invalidation=("Closing price crosses VWAP against the signal",))
 
     def _hold(self, instrument: Instrument, timestamp: datetime, reason: str) -> Signal:
         return Signal(
@@ -201,6 +175,36 @@ class OrbVwapStrategy:
             side=SignalSide.HOLD,
             reasons=(reason,),
         )
+
+
+def entry_signal(
+    name: str, instrument: Instrument, timestamp: datetime, side: SignalSide,
+    entry: float, reasons: tuple[str, ...], *, stop_loss_pct: float,
+    take_profit_pct: float, invalidation: tuple[str, ...],
+) -> Signal:
+    if side is SignalSide.BUY:
+        stop = _tick_price(
+            entry * (1 - stop_loss_pct), instrument.tick_size, ROUND_FLOOR)
+        target = _tick_price(
+            entry * (1 + take_profit_pct), instrument.tick_size, ROUND_CEILING)
+    else:
+        stop = _tick_price(
+            entry * (1 + stop_loss_pct), instrument.tick_size, ROUND_CEILING)
+        target = _tick_price(
+            entry * (1 - take_profit_pct), instrument.tick_size, ROUND_FLOOR)
+    if (side is SignalSide.BUY and not 0 < stop < entry < target) \
+            or (side is SignalSide.SELL and not 0 < target < entry < stop):
+        return Signal(instrument_id=instrument.instrument_id, symbol=instrument.symbol,
+                      timestamp=timestamp, strategy=name, side=SignalSide.HOLD,
+                      reasons=("INVALID_TICK_ADJUSTED_RISK_PRICES",))
+    return Signal(
+        instrument_id=instrument.instrument_id, symbol=instrument.symbol,
+        timestamp=timestamp, strategy=name, side=side, entry_price=entry,
+        stop_loss=stop, take_profit=target,
+        reward_risk=abs(target - entry) / abs(entry - stop), reasons=reasons,
+        invalidation_conditions=invalidation,
+        intent=TradeIntent.BUY if side is SignalSide.BUY else TradeIntent.SHORT_SELL,
+    )
 
 
 def _tick_price(price: float, tick_size: float, rounding: str) -> float:

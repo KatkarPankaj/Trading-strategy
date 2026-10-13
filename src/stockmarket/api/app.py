@@ -53,6 +53,7 @@ from ..core.signal_generation import SignalGenerationService
 from ..core.trade_proposals import TradeProposalService
 from ..core.security import Secret
 from ..core.strategy_lab import StrategyLabService, StrategyLabError
+from ..core.strategy_ranking import StrategyRankingService
 from ..core.outcome_feedback import OutcomeFeedbackService
 from ..core.data.provider import DataProviderError
 from ..core.settings import AppSettings
@@ -64,6 +65,7 @@ from ..core.trading_service import (
 from .schemas import (
     StrategyLabProposalBody,
     StrategyLabEvaluationBody,
+    StrategyLabTransitionBody,
     PersonalResearchBody,
     CandidateResearchRunBody,
     AutonomousPaperCycleBody,
@@ -116,6 +118,7 @@ class ApiContext:
     paper_loop: Any = None
     outcome_feedback: OutcomeFeedbackService | None = None
     strategy_lab: StrategyLabService | None = None
+    strategy_ranking: StrategyRankingService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -650,7 +653,27 @@ def create_app(ctx: ApiContext) -> FastAPI:
 
     @app.get("/strategy-lab/proposals", dependencies=[Depends(auth)])
     def strategy_lab_proposals(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
-        return {"research_only": True, "proposals": ctx.store.strategy_lab.recent(limit)}
+        proposals = ctx.store.strategy_lab.recent(limit)
+        if ctx.strategy_lab is not None:
+            for proposal in proposals:
+                proposal["eligibility"] = ctx.strategy_lab.eligibility(proposal["proposal_id"])
+                proposal["executable"] = proposal["lifecycle"]["state"] == "ACTIVE_FOR_PAPER"
+                proposal["paper_strategy_name"] = "lab_" + proposal["proposal_id"]
+        return {"trading_mode": "PAPER", "monitoring_only": True, "proposals": proposals}
+
+    @app.post("/strategy-lab/proposals/{proposal_id}/transition", dependencies=[Depends(auth)])
+    def transition_strategy(proposal_id: str, body: StrategyLabTransitionBody) -> dict[str, Any]:
+        if ctx.strategy_lab is None:
+            raise HTTPException(503, "AI strategy laboratory is not configured")
+        if ctx.personal_research_mode:
+            raise HTTPException(403, "paper activation is disabled in personal research mode")
+        try:
+            with ctx.paper.paper_strategy_change():
+                return ctx.strategy_lab.transition(proposal_id, **body.model_dump())
+        except KeyError as exc:
+            raise HTTPException(404, "unknown strategy proposal") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.post("/strategy-lab/proposals", dependencies=[Depends(auth)])
     def propose_strategy(body: StrategyLabProposalBody) -> dict[str, Any]:
@@ -697,6 +720,12 @@ def create_app(ctx: ApiContext) -> FastAPI:
         as_of = service.clock()
         return {"trading_mode": TradingMode.PAPER.value, "as_of": as_of.isoformat(),
                 "performance": service.performance(as_of)}
+
+    @app.get("/paper/strategy-rankings", dependencies=[Depends(auth)])
+    def strategy_rankings() -> dict[str, Any]:
+        if ctx.strategy_ranking is None:
+            raise HTTPException(503, "strategy ranking measurements are not configured")
+        return dict(ctx.strategy_ranking.measurements())
 
     @app.get("/portfolio", dependencies=[Depends(auth)])
     def portfolio() -> dict[str, Any]:

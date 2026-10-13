@@ -379,6 +379,19 @@ _V20 = [
         FOREIGN KEY(proposal_id) REFERENCES strategy_lab_proposals(proposal_id))""",
 ]
 
+_V21 = [
+    """CREATE TABLE strategy_lab_states (
+        proposal_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL,
+        updated_at TEXT NOT NULL, payload TEXT NOT NULL,
+        FOREIGN KEY(proposal_id) REFERENCES strategy_lab_proposals(proposal_id))""",
+    """CREATE TABLE strategy_lab_transitions (
+        request_id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL,
+        created_at TEXT NOT NULL, payload TEXT NOT NULL,
+        FOREIGN KEY(proposal_id) REFERENCES strategy_lab_proposals(proposal_id))""",
+    """CREATE TABLE strategy_rankings (
+        assessment_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -396,7 +409,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (17, "atomic_account_execution_reservations", _V17),
     (18, "immutable_paper_outcome_feedback", _V18),
     (19, "versioned_strategy_laboratory", _V19),
-    (20, "preregistered_strategy_holdouts", _V20)]
+    (20, "preregistered_strategy_holdouts", _V20),
+    (21, "paper_strategy_lifecycle_and_rankings", _V21)]
 
 
 def applied_versions(db: Database) -> set[int]:

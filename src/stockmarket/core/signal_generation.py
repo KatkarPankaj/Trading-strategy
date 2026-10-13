@@ -102,6 +102,7 @@ class SignalGenerationService:
         self.sessions = {key.upper(): value for key, value in sessions.items()}
         self.settings = settings
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.strategy_refresh: Callable[[], None] | None = None
 
     def generate(
         self,
@@ -111,6 +112,8 @@ class SignalGenerationService:
         evaluation_as_of: datetime,
     ) -> dict[str, Any]:
         started = perf_counter()
+        if self.strategy_refresh is not None:
+            self.strategy_refresh()
         self._require_aware(evaluation_as_of, "evaluation_as_of")
         now = self._now()
         evaluation_as_of = evaluation_as_of.astimezone(timezone.utc)
@@ -417,6 +420,8 @@ class SignalGenerationService:
                 started=started,
             )
         if instrument.asset_class not in metadata.supported_asset_classes \
+                or getattr(strategy, "instrument_id", instrument_id) != instrument_id \
+                or getattr(strategy, "available_from", evaluation_as_of) > evaluation_as_of \
                 or ("*" not in metadata.supported_markets
                     and instrument.market.upper() not in {
                         market.upper() for market in metadata.supported_markets}):

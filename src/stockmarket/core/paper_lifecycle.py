@@ -66,6 +66,7 @@ class PaperProposalExecutionService:
         self.strategies = dict(strategies)
         self.max_age = max_age
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.strategy_refresh: Callable[[], None] | None = None
 
     def submit(
         self,
@@ -77,6 +78,8 @@ class PaperProposalExecutionService:
     ) -> dict[str, Any]:
         if self.trading.mode is not TradingMode.PAPER:
             raise PaperLifecycleError("proposal submission is restricted to PAPER mode")
+        if self.strategy_refresh is not None:
+            self.strategy_refresh()
         if not isinstance(proposal_id, str) or not proposal_id.strip():
             raise PaperLifecycleError("proposal_id must be non-empty")
         if not isinstance(operator, str) or not operator.strip():

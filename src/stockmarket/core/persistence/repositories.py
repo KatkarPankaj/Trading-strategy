@@ -1880,6 +1880,54 @@ class PaperOutcomeRepository(_Repository):
 
 
 class StrategyLabRepository(_Repository):
+    def state(self, proposal_id: str) -> dict[str, Any]:
+        rows = self._db.query(
+            "SELECT state, revision, updated_at, payload FROM strategy_lab_states WHERE proposal_id = ?",
+            (proposal_id,))
+        if rows:
+            return {**rows[0], "details": json.loads(rows[0]["payload"])}
+        evaluations = self.evaluations(proposal_id)
+        review = next((e for e in evaluations if e["status"] == "HOLDOUT_REVIEW_REQUIRED"), None)
+        return {"state": "HOLDOUT_REVIEW_REQUIRED" if review else "EVALUATED" if evaluations else "DRAFT",
+                "revision": 0, "updated_at": None, "details": {}}
+
+    def transition_request(self, request_id: str) -> dict[str, Any] | None:
+        rows = self._db.query(
+            "SELECT payload FROM strategy_lab_transitions WHERE request_id = ?", (request_id,))
+        return json.loads(rows[0]["payload"]) if rows else None
+
+    def transition(
+        self, proposal_id: str, expected_revision: int, target: str,
+        payload: Mapping[str, Any], now: datetime,
+    ) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """INSERT INTO strategy_lab_states
+                   (proposal_id, state, revision, updated_at, payload) VALUES (?, 'DRAFT', 0, ?, '{}')
+                   ON CONFLICT(proposal_id) DO NOTHING""", (proposal_id, ts(now)))
+            self._db.execute(
+                """UPDATE strategy_lab_states SET state = ?, revision = revision + 1,
+                   updated_at = ?, payload = ? WHERE proposal_id = ? AND revision = ?""",
+                (target, ts(now), to_json(payload), proposal_id, expected_revision))
+            current = self.state(proposal_id)
+            if current["revision"] != expected_revision + 1 or current["details"] != json.loads(to_json(payload)):
+                raise ValueError("strategy state changed concurrently; retry with a new request")
+            self._insert_immutable("strategy_lab_transitions", "request_id",
+                                   payload["request_id"], payload, now, proposal_id=proposal_id)
+
+    def lifecycle_proposals(self) -> list[dict[str, Any]]:
+        rows = self._db.query("SELECT proposal_id FROM strategy_lab_states ORDER BY proposal_id")
+        return [self.get(row["proposal_id"]) for row in rows]
+
+    def save_ranking(self, payload: Mapping[str, Any], now: datetime) -> None:
+        self._insert_immutable("strategy_rankings", "assessment_id",
+                               payload["assessment_id"], payload, now)
+
+    def rankings(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT payload FROM strategy_rankings ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [json.loads(row["payload"]) for row in rows]
+
     def save_holdout(self, payload: Mapping[str, Any], created_at: datetime) -> None:
         self._insert_immutable("strategy_lab_holdouts", "proposal_id",
                                payload["proposal_id"], payload, created_at)
@@ -1892,13 +1940,20 @@ class StrategyLabRepository(_Repository):
 
     def evaluations(self, proposal_id: str) -> list[dict[str, Any]]:
         rows = self._db.query(
-            """SELECT payload FROM strategy_lab_evaluations WHERE proposal_id = ?
+            """SELECT payload, created_at FROM strategy_lab_evaluations WHERE proposal_id = ?
                ORDER BY created_at DESC, evaluation_id""", (proposal_id,))
-        return [json.loads(row["payload"]) for row in rows]
+        return [{**json.loads(row["payload"]), "evaluated_at": row["created_at"]} for row in rows]
 
     def save_proposal(self, payload: Mapping[str, Any], created_at: datetime) -> None:
-        self._insert_immutable("strategy_lab_proposals", "proposal_id",
-                               payload["proposal_id"], payload, created_at)
+        with self._db.transaction():
+            new = self.get(payload["proposal_id"]) is None
+            self._insert_immutable("strategy_lab_proposals", "proposal_id",
+                                   payload["proposal_id"], payload, created_at)
+            if new:
+                self._db.execute(
+                    """INSERT INTO strategy_lab_states
+                       (proposal_id, state, revision, updated_at, payload) VALUES (?, 'DRAFT', 0, ?, '{}')""",
+                    (payload["proposal_id"], ts(created_at)))
 
     def save_evaluation(self, payload: Mapping[str, Any], created_at: datetime) -> None:
         self._insert_immutable("strategy_lab_evaluations", "evaluation_id",
@@ -1934,6 +1989,7 @@ class StrategyLabRepository(_Repository):
         result = []
         for row in rows:
             result.append({**json.loads(row["payload"]),
+                           "lifecycle": self.state(row["proposal_id"]),
                            "holdout": self.holdout(row["proposal_id"]),
                            "evaluations": self.evaluations(row["proposal_id"])})
         return result
