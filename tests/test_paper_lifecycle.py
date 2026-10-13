@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock
@@ -96,6 +98,7 @@ class _ExitProposalRepository:
 
 class _Store:
     def __init__(self, proposal, signal_row):
+        self.audit = Mock()
         self.proposal_submissions = _SubmissionRepository()
         self.position_exit_proposals = _ExitProposalRepository()
         self.trade_proposals = Mock()
@@ -300,6 +303,8 @@ class PaperPositionManagerTests(TestCase):
         })
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
+            paper_strategy_change=nullcontext,
+            order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
             submit=Mock(return_value=SimpleNamespace(
@@ -361,6 +366,8 @@ class PaperPositionManagerTests(TestCase):
         )
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
+            paper_strategy_change=nullcontext,
+            order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
             submit=Mock(),
@@ -392,6 +399,8 @@ class PaperPositionManagerTests(TestCase):
         )
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
+            paper_strategy_change=nullcontext,
+            order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
             submit=Mock(),
@@ -424,6 +433,29 @@ class PaperPositionManagerTests(TestCase):
 
 
 class PaperPositionFlattenTests(TestCase):
+    def test_bad_quote_for_one_position_does_not_prevent_another_target_exit(self):
+        manager, trading, _ = self._manager()
+        first = INSTRUMENT
+        second = replace(first, instrument_id="XNAS:MSFT", symbol="MSFT")
+        initial = trading.portfolio.positions()[first.instrument_id]
+        other = SimpleNamespace(**{**vars(initial), "instrument_id": second.instrument_id})
+        entry = manager._entry_proposal(initial)
+        manager._entry_proposal = Mock(return_value=entry)
+        manager.instruments[second.instrument_id] = second
+        trading.portfolio = Mock()
+        trading.portfolio.positions.return_value = {
+            first.instrument_id: initial, second.instrument_id: other}
+        manager.quotes = Mock(side_effect=lambda instrument_id:
+                              None if instrument_id == first.instrument_id else (110., NOW))
+        result = manager.manage()
+        self.assertEqual(result["positions"][0]["status"], "MONITOR_FAILED")
+        self.assertEqual(result["positions"][1]["trigger_reason"], "TAKE_PROFIT")
+        trading.submit.assert_called_once()
+        manager.store.audit.append.assert_any_call(
+            "system:paper-position-manager", "PAPER_POSITION_MONITOR_FAILED", "instrument",
+            first.instrument_id, {"at": NOW,
+                                  "error": f"fresh market quote is unavailable for {first.instrument_id}"})
+
     def _manager(self, *, in_session=True, quote=(100.5, NOW)):
         proposal, signal_row = _persisted_signal()
         store = _Store(proposal, signal_row)
@@ -456,6 +488,8 @@ class PaperPositionFlattenTests(TestCase):
         })
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
+            paper_strategy_change=nullcontext,
+            order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
             submit=Mock(return_value=SimpleNamespace(

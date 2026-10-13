@@ -543,7 +543,12 @@ def _orders(client: ApiClient) -> None:
     st.subheader("Actual simulated paper fills")
     st.caption("An accepted order is not a fill. Fees, slippage and realized PnL below come from execution.")
     fills = _safe(client, "/paper/fills", limit=100)
-    _table(views.frame(fills["fills"]) if fills else None, "No simulated fills recorded.")
+    if fills is not None:
+        _table(views.frame(fills["fills"]), "No simulated fills recorded.")
+    else:
+        st.error("Paper fill history unavailable. This is not evidence of an empty fill ledger. "
+                 "If the API returned 404, verify the API version/base URL and refresh after "
+                 "an operator-controlled API restart.")
 
 
 def _pnl(client: ApiClient) -> None:
@@ -638,6 +643,38 @@ def _strategies(client: ApiClient, activity: dict[str, Any] | None = None) -> No
     perf = _safe(client, "/performance")
     if perf:
         st.json(perf["trades"])
+    _prospective_evidence(client)
+
+
+def _prospective_evidence(client: ApiClient) -> None:
+    st.subheader("Prospective evidence and supervised-model readiness")
+    st.caption("Read-only persisted observations. No model is trained or promoted here; "
+               "fixture data and insufficient samples do not establish predictive improvement.")
+    readiness = _safe(client, "/intelligence/prospective/readiness")
+    if readiness is not None:
+        st.warning(f"Model readiness: {readiness['status']} | {readiness['mode']}")
+        _table(views.frame([
+            {"feature": name, "missing_decisions": count}
+            for name, count in readiness["missing_feature_counts"].items()
+        ]), "No missing feature values reported; source/sample checks still apply.")
+        st.json(readiness)
+    ledger = _safe(client, "/intelligence/prospective/decisions", limit=20)
+    if ledger is not None:
+        _table(views.frame([
+            {key: decision.get(key) for key in (
+                "decision_id", "decision_at", "instrument_id", "selected_strategy",
+                "timeframe", "feature_schema", "ranking_policy", "source_verification")}
+            for decision in ledger["decisions"]
+        ]), "No prospective decisions captured.")
+        if ledger["decisions"]:
+            with st.expander("Frozen decision and collected execution/outcome evidence"):
+                selected = st.selectbox(
+                    "Prospective decision", ledger["decisions"],
+                    format_func=lambda decision: decision["decision_id"])
+                observation = _safe(
+                    client, f"/intelligence/prospective/decisions/{quote(selected['decision_id'], safe='')}")
+                if observation is not None:
+                    st.json(observation)
 
 
 def _news(client: ApiClient, activity: dict[str, Any] | None = None) -> None:
@@ -678,20 +715,46 @@ def _risk(client: ApiClient) -> None:
     _table(views.frame(risk["recent_decisions"]))
 
 
-def _health(health: Any, activity: dict[str, Any] | None = None, *, client: ApiClient | None = None) -> None:
+def _health(health: Any, activity: dict[str, Any] | None = None,
+            *, client: ApiClient | None = None) -> None:
     st.subheader("System health")
     loop = (activity or {}).get("loop")
     if loop is not None:
         st.subheader("Paper loop and startup recovery")
         st.json(loop)
         if loop.get("state") == "STOPPED_AFTER_FAILURES":
-            st.error("Paper loop halted after repeated failures. Resolve failures before restarting the API.")
+            st.error("Automatic entries halted after repeated failures; protective exits remain enabled. "
+                     "Resolve failures before restarting the API.")
         for failure in loop.get("recovery_failures", []):
             st.error(f"Cycle {failure['run_id']}: {failure['error']}")
+        if client is not None and loop.get("state") != "DISABLED":
+            with st.form("paper_loop_control"):
+                st.caption("Pause/resume automatic entries only. Stop/target monitoring and "
+                           "end-of-day exits remain enabled. Resuming never clears a kill switch.")
+                enabled = st.checkbox("Allow automatic PAPER entries",
+                                      value=loop.get("operator_entries_enabled", True))
+                operator = st.text_input("Paper session operator")
+                reason = st.text_input("Paper session control reason")
+                submitted = st.form_submit_button("Apply automatic entry control")
+            if submitted:
+                if not operator.strip() or not reason.strip():
+                    st.error("Operator and reason are required.")
+                else:
+                    try:
+                        result = client.post("/paper/loop/control", {
+                            "entries_enabled": enabled, "operator": operator.strip(), "reason": reason.strip()})
+                    except ApiError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.json(result)
+                        st.rerun()
     if not health:
         st.error("Health report unavailable.")
         return
     st.metric("Status", health["status"])
+    if health.get("paper_readiness") is not None:
+        st.subheader("Paper execution readiness (not risk approval)")
+        st.json(health["paper_readiness"])
     _table(views.health_checks(health))
     st.json({k: health[k] for k in ("last_market_data_timestamp", "market_data_age_seconds",
                                     "last_successful_order", "error_counts")})
@@ -703,29 +766,6 @@ def _health(health: Any, activity: dict[str, Any] | None = None, *, client: ApiC
         "last_research_data_timestamp": health.get("last_research_data_timestamp"),
         "last_research_data_received_at": health.get("last_research_data_received_at"),
     })
-    if client is None or health.get("trading_mode") != "PAPER" \
-            or health.get("application_mode") == "PERSONAL_RESEARCH":
-        return
-    st.subheader("Paper execution-data check")
-    st.caption(
-        "Explicitly fetch one quote and validate its timestamp, instrument, price and provider. "
-        "This consumes provider quota, never places an order and never approves a strategy. "
-        "Closed sessions or delayed-data plans may return stale data; those failures remain blocking.")
-    instruments = _safe(client, "/instruments")
-    if not instruments:
-        st.info("No configured instruments available for an execution-data check.")
-        return
-    instrument_id = st.selectbox(
-        "Instrument to check", [item["instrument_id"] for item in instruments],
-        key="paper_data_check_instrument")
-    if st.button("Check paper execution data"):
-        try:
-            with st.spinner("Fetching and validating a provider quote..."):
-                result = client.post(f"/paper/data-check/{instrument_id}", {}, timeout=120)
-            st.success("Quote validated. This is not a risk approval or permission to trade.")
-            st.json(result)
-        except ApiError as exc:
-            st.error(str(exc))
 
 
 def _audit(client: ApiClient) -> None:

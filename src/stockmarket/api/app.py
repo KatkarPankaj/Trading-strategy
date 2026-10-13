@@ -57,7 +57,7 @@ from ..core.strategy_ranking import StrategyRankingService
 from ..core.strategy_comparison import StrategyComparisonService
 from ..core.prospective_evidence import ProspectiveEvidenceService
 from ..core.outcome_feedback import OutcomeFeedbackService
-from ..core.data.provider import DataProviderError, DataQualityError
+from ..core.data.provider import DataProviderError
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.trading_service import (
@@ -81,6 +81,7 @@ from .schemas import (
     ProposalSubmitBody,
     ResearchRunBody,
     ResumeBody,
+    PaperLoopControlBody,
     SignalGenerationBody,
     TradeProposalRiskBody,
     ScannerRunBody,
@@ -143,13 +144,17 @@ def create_app(ctx: ApiContext) -> FastAPI:
     proposal_contexts: OrderedDict[str,
                                    ProposalSubmissionContext] = OrderedDict()
     proposal_contexts_lock = RLock()
-    if ctx.market_data is not None:
-        app.add_event_handler("shutdown", ctx.market_data.close)
+    def shutdown_paper_services() -> None:
+        if ctx.paper_loop is not None:
+            ctx.paper_loop.stop()
+        if ctx.market_data is not None:
+            ctx.market_data.close()
+
+    app.add_event_handler("shutdown", shutdown_paper_services)
     if ctx.paper_loop is not None:
         if ctx.mode != TradingMode.PAPER.value or ctx.live is not None:
             raise RuntimeError("the paper loop may only run with PAPER execution")
         app.add_event_handler("startup", ctx.paper_loop.start)
-        app.add_event_handler("shutdown", ctx.paper_loop.stop)
 
     @app.middleware("http")
     async def show_mode(request: Request, call_next):  # the trading mode is never hidden
@@ -246,6 +251,32 @@ def create_app(ctx: ApiContext) -> FastAPI:
         report["instrument_count"] = len(
             ctx.personal_research.instruments if ctx.personal_research else ctx.instruments)
         report["ai_research_configured"] = ctx.candidate_assessment is not None
+        at = datetime.fromisoformat(report["timestamp"])
+        sessions = {
+            market: ctx.markets.phase(market, at).value
+            for market in ctx.settings.markets
+        } if ctx.markets is not None else {}
+        blockers = []
+        if not any(phase == "REGULAR" for phase in sessions.values()):
+            blockers.append("NO_REGULAR_MARKET_SESSION")
+        if not report["checks"]["market_data"]["healthy"]:
+            blockers.append("MISSING_OR_STALE_EXECUTION_DATA")
+        blockers.extend(f"{name.upper()}_UNHEALTHY" for name, check in report["checks"].items()
+                        if name != "market_data" and not check["healthy"])
+        if ctx.gate is not None and ctx.gate.halted:
+            blockers.append(ctx.gate.blocked_reason())
+        if ctx.personal_research_mode:
+            blockers.append("PERSONAL_RESEARCH_EXECUTION_DISABLED")
+        if ctx.paper_loop is not None and not ctx.paper_loop.status()["entries_enabled"]:
+            blockers.append("AUTOMATIC_ENTRIES_DISABLED")
+        report["paper_readiness"] = {
+            "status": "BLOCKED" if blockers else "PER_ORDER_VALIDATION_REQUIRED",
+            "sessions": sessions, "blockers": blockers,
+            "risk_approval": False,
+            "detail": "Read-only status, not order authorization. Closed-session or stale prices "
+                      "are never refreshed by changing timestamps. Each order needs its own fresh "
+                      "validated quote, sizing and final RiskEngine approval.",
+        }
         return JSONResponse(report, status_code=200 if report["status"] != "DOWN" else 503)
 
     @app.get("/markets", dependencies=[Depends(auth)])
@@ -651,36 +682,6 @@ def create_app(ctx: ApiContext) -> FastAPI:
         return {"trading_mode": TradingMode.PAPER.value,
                 "fills": _plain(ctx.store.fills.recent(limit))}
 
-    @app.post("/paper/data-check/{instrument_id}", dependencies=[Depends(auth)])
-    def paper_data_check(instrument_id: str) -> dict[str, Any]:
-        if ctx.mode != "PAPER" or ctx.personal_research_mode:
-            raise HTTPException(403, "execution-data diagnostics require PAPER execution mode")
-        if ctx.market_data is None:
-            raise HTTPException(503, "market data provider is not configured")
-        instrument = ctx.instruments.get(instrument_id)
-        if instrument is None:
-            raise HTTPException(404, "unknown instrument")
-        try:
-            quote = ctx.market_data.get_quote(instrument)
-        except DataProviderError as exc:
-            raise HTTPException(503, {
-                "code": exc.code,
-                "issues": list(exc.issues) if isinstance(exc, DataQualityError) else [],
-                "execution": "NOT_SUBMITTED",
-            }) from exc
-        return {
-            "trading_mode": "PAPER", "execution": "NOT_SUBMITTED",
-            "risk_status": "NOT_EVALUATED", "status": "VALIDATED_QUOTE",
-            "instrument_id": instrument_id, "market": instrument.market,
-            "quote": _plain(quote),
-            "research_only_provider": bool(ctx.market_data.research_only),
-            "health": ctx.health.report(),
-            "limitations": [
-                "One validated quote is not strategy or portfolio-wide readiness.",
-                "Every order still requires an independently fresh quote and normal risk checks.",
-            ],
-        }
-
     @app.get("/paper/outcomes", dependencies=[Depends(auth)])
     def paper_outcomes(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
         return {"trading_mode": TradingMode.PAPER.value,
@@ -1080,6 +1081,16 @@ def create_app(ctx: ApiContext) -> FastAPI:
             return {"state": "DISABLED", "trading_mode": TradingMode.PAPER.value,
                     "detail": "set PAPER_AUTO_LOOP=true (PAPER mode only) to enable"}
         return _plain(ctx.paper_loop.status())
+
+    @app.post("/paper/loop/control", dependencies=[Depends(auth)])
+    def paper_loop_control(body: PaperLoopControlBody) -> dict[str, Any]:
+        if ctx.paper_loop is None or ctx.mode != "PAPER" or ctx.personal_research_mode:
+            raise HTTPException(403, "automatic PAPER entry control is not enabled")
+        try:
+            return _plain(ctx.paper_loop.set_entries_enabled(
+                body.entries_enabled, operator=body.operator, reason=body.reason))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/paper/cycles/{run_id}", dependencies=[Depends(auth)])
     def paper_cycle(run_id: str) -> dict[str, Any]:

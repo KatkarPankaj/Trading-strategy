@@ -37,49 +37,6 @@ def research():
 
 
 class PaperActivityDashboardTests(TestCase):
-    @staticmethod
-    def health():
-        return {
-            "status": "DEGRADED", "trading_mode": "PAPER", "application_mode": "PAPER",
-            "checks": {"market_data": {"healthy": False, "detail": "no market data received"}},
-            "last_market_data_timestamp": None, "market_data_age_seconds": None,
-            "last_successful_order": None, "error_counts": {},
-        }
-
-    @patch.object(app, "st")
-    def test_health_data_check_requires_explicit_click(self, ui):
-        ui.button.return_value = False
-        client = Mock()
-        client.get.return_value = [{"instrument_id": "XNAS:AAPL"}]
-        app._health(self.health(), client=client)
-        client.post.assert_not_called()
-        ui.selectbox.assert_called_once()
-
-    @patch.object(app, "st")
-    def test_health_data_check_posts_one_instrument_and_displays_provider_failure(self, ui):
-        ui.button.return_value = True
-        ui.selectbox.return_value = "XNAS:AAPL"
-        ui.spinner.return_value = nullcontext()
-        client = Mock()
-        client.get.return_value = [{"instrument_id": "XNAS:AAPL"}]
-        client.post.side_effect = ApiError("STALE_DATA: STALE_QUOTE", 503)
-        app._health(self.health(), client=client)
-        client.post.assert_called_once_with("/paper/data-check/XNAS:AAPL", {}, timeout=120)
-        ui.error.assert_called_once_with("STALE_DATA: STALE_QUOTE")
-        ui.success.assert_not_called()
-
-    @patch.object(app, "st")
-    def test_health_data_check_success_is_not_risk_approval(self, ui):
-        ui.button.return_value = True
-        ui.selectbox.return_value = "XNAS:AAPL"
-        ui.spinner.return_value = nullcontext()
-        client = Mock()
-        client.get.return_value = [{"instrument_id": "XNAS:AAPL"}]
-        client.post.return_value = {"status": "VALIDATED_QUOTE", "risk_status": "NOT_EVALUATED"}
-        app._health(self.health(), client=client)
-        self.assertIn("not a risk approval", ui.success.call_args.args[0])
-        ui.json.assert_any_call(client.post.return_value)
-
     @patch.object(app, "st")
     def test_loads_selected_persisted_cycle_and_research_without_submission(self, ui):
         ui.sidebar.selectbox.return_value = "cycle-1"
@@ -152,7 +109,9 @@ class PaperActivityDashboardTests(TestCase):
         client.get.side_effect = [
             {"outcomes": []}, {"performance": []}, {"proposals": []},
             {"rankings": [], "improvement_status": "NOT_ESTABLISHED"},
-            [], {"trades": {"count": 0}}]
+            [], {"trades": {"count": 0}},
+            {"status": "NOT_READY", "mode": "ADVISORY_ONLY", "missing_feature_counts": {}},
+            {"decisions": []}]
         app._strategies(client, {"research": research()})
         frames = [call.args[0] for call in ui.dataframe.call_args_list]
         self.assertEqual(frames[0].iloc[0]["name"], "orb_vwap")
@@ -182,4 +141,28 @@ class PaperActivityDashboardTests(TestCase):
         app._orders(client)
         client.get.assert_any_call("/paper/fills", limit=100)
         ui.subheader.assert_any_call("Actual simulated paper fills")
+        client.post.assert_not_called()
+
+    @patch.object(app, "st")
+    def test_fill_api_404_is_unavailable_not_an_empty_execution_ledger(self, ui):
+        client = Mock()
+        client.get.side_effect = [[], ApiError("API error 404 for /paper/fills", 404)]
+        app._orders(client)
+        self.assertIn("Paper fill history unavailable", ui.error.call_args.args[0])
+        self.assertFalse(any("No simulated fills" in str(call) for call in ui.info.call_args_list))
+        client.post.assert_not_called()
+
+    @patch.object(app, "st")
+    def test_prospective_readiness_and_decision_detail_are_read_only(self, ui):
+        ui.selectbox.return_value = {"decision_id": "decision-1"}
+        ui.expander.return_value = nullcontext()
+        client = Mock()
+        report = {"status": "NOT_READY", "mode": "ADVISORY_ONLY",
+                  "missing_feature_counts": {"news": 1}, "training": "NOT_PERFORMED"}
+        client.get.side_effect = [report, {"decisions": [{"decision_id": "decision-1"}]},
+                                  {"decision": {"decision_id": "decision-1"}, "attachments": []}]
+        app._prospective_evidence(client)
+        client.get.assert_any_call("/intelligence/prospective/readiness")
+        client.get.assert_any_call("/intelligence/prospective/decisions/decision-1")
+        ui.json.assert_any_call(report)
         client.post.assert_not_called()

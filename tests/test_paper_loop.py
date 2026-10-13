@@ -1,5 +1,8 @@
 import time
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock
@@ -61,6 +64,126 @@ def _loop(now, *, gate=None, cycles=None, mode=TradingMode.PAPER, **settings):
 
 
 class PaperLoopTests(TestCase):
+    def test_half_hour_scan_does_not_skip_monitoring_or_close_window(self):
+        loop, positions, clock = _loop(
+            NEAR_CLOSE.replace(minute=30), interval_minutes=30)
+        self.assertEqual(loop.tick()["action"], "CYCLE")
+        clock["now"] = NEAR_CLOSE.replace(minute=40)
+        self.assertEqual(loop.tick()["action"], "MONITOR")
+        clock["now"] = NEAR_CLOSE
+        self.assertEqual(loop.tick()["action"], "END_OF_DAY_FLATTEN")
+        self.assertEqual(len(loop.cycles.calls), 1)
+        positions.flatten.assert_called_once_with(market="US")
+        self.assertGreaterEqual(positions.manage.call_count, 2)
+
+    def test_worker_wakes_at_monitor_cadence_not_only_at_scan_boundary(self):
+        loop, positions, clock = _loop(
+            NEAR_CLOSE.replace(minute=30), interval_minutes=30,
+            monitor_interval_seconds=30)
+        waits = []
+        until = NEAR_CLOSE.replace(minute=53)
+
+        def advance(seconds):
+            waits.append(seconds)
+            clock["now"] += timedelta(seconds=seconds)
+            return False
+
+        loop._stop = SimpleNamespace(is_set=lambda: clock["now"] >= until, wait=advance)
+        loop._run()
+        self.assertEqual(len(loop.cycles.calls), 1)
+        self.assertTrue(waits)
+        self.assertLessEqual(max(waits), 30)
+        self.assertGreater(positions.flatten.call_count, 0)
+        self.assertGreater(positions.manage.call_count, 1)
+
+    def test_successful_monitoring_does_not_erase_failed_scan_count(self):
+        loop, positions, clock = _loop(IN_SESSION, max_consecutive_failures=2)
+        loop.cycles.run = Mock(side_effect=RuntimeError("research unavailable"))
+        self.assertEqual(loop.tick()["action"], "FAILED")
+        clock["now"] += timedelta(seconds=30)
+        self.assertEqual(loop.tick()["action"], "MONITOR")
+        self.assertEqual(loop.status()["consecutive_failures"], 1)
+        clock["now"] += timedelta(minutes=15)
+        self.assertEqual(loop.tick()["action"], "FAILED")
+        self.assertEqual(loop.status()["state"], "STOPPED_AFTER_FAILURES")
+        self.assertEqual(loop.tick()["action"], "EXITS_ONLY")
+
+    def test_early_close_and_holiday_calendar_are_authoritative(self):
+        early_close = datetime(2026, 11, 27, 17, 52, tzinfo=timezone.utc)
+        loop, positions, _ = _loop(early_close, interval_minutes=30)
+        self.assertEqual(loop.tick()["action"], "END_OF_DAY_FLATTEN")
+        positions.flatten.assert_called_once()
+        holiday = datetime(2026, 11, 26, 16, tzinfo=timezone.utc)
+        loop, positions, _ = _loop(holiday)
+        self.assertEqual(loop.tick()["action"], "MARKET_CLOSED")
+        positions.manage.assert_not_called()
+
+    def test_audited_pause_is_idempotent_keeps_exits_and_cannot_clear_failure_halt(self):
+        loop, positions, clock = _loop(IN_SESSION)
+        loop.record_control = Mock()
+        paused = loop.set_entries_enabled(False, operator="reviewer", reason="pause")
+        self.assertFalse(paused["entries_enabled"])
+        loop.set_entries_enabled(False, operator="reviewer", reason="repeat")
+        loop.record_control.assert_called_once_with(False, "reviewer", "pause")
+        self.assertEqual(loop.tick()["action"], "EXITS_ONLY")
+        positions.manage.assert_called_once()
+        self.assertEqual(loop.cycles.calls, [])
+        loop.set_entries_enabled(True, operator="reviewer", reason="resume")
+        self.assertEqual(loop.tick()["action"], "CYCLE")
+        loop._state = "STOPPED_AFTER_FAILURES"
+        with self.assertRaisesRegex(ValueError, "resolve failures"):
+            loop.set_entries_enabled(True, operator="reviewer", reason="override")
+        clock["now"] = NEAR_CLOSE
+        self.assertEqual(loop.tick()["action"], "END_OF_DAY_FLATTEN")
+
+    def test_collection_failure_blocks_new_scan_but_preserves_exit_monitoring(self):
+        loop, positions, _ = _loop(IN_SESSION, max_consecutive_failures=1)
+        loop.reconcile_evidence = Mock(side_effect=ValueError("integrity failure"))
+        self.assertEqual(loop.tick()["action"], "FAILED")
+        self.assertEqual(loop.cycles.calls, [])
+        positions.manage.assert_called_once()
+        self.assertEqual(loop.status()["state"], "STOPPED_AFTER_FAILURES")
+        loop.tick()
+        self.assertEqual(positions.manage.call_count, 2)
+        self.assertFalse(loop._stop.is_set())
+
+    def test_position_failure_blocks_scans_and_is_not_success_shaped(self):
+        loop, positions, _ = _loop(IN_SESSION)
+        positions.manage.return_value = {"positions": [
+            {"instrument_id": "XNAS:AAPL", "status": "MONITOR_FAILED", "error": "STALE_QUOTE"}]}
+        self.assertEqual(loop.tick()["action"], "FAILED")
+        self.assertEqual(loop.cycles.calls, [])
+
+    def test_concurrent_ticks_serialize_one_scan_per_slot(self):
+        loop, positions, _ = _loop(IN_SESSION)
+        entered, release = Event(), Event()
+        original_run = loop.cycles.run
+
+        def blocked_run(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("fixture scan was not released")
+            return original_run(*args, **kwargs)
+
+        loop.cycles.run = blocked_run
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(loop.tick)
+            self.assertTrue(entered.wait(5))
+            second = executor.submit(loop.tick)
+            release.set()
+            self.assertEqual(first.result()["action"], "CYCLE")
+            self.assertEqual(second.result()["action"], "MONITOR")
+        self.assertEqual(len(loop.cycles.calls), 1)
+
+    def test_shutdown_timeout_is_explicit_and_does_not_report_stopped(self):
+        loop, _, _ = _loop(IN_SESSION)
+        loop._thread = Mock()
+        loop._thread.is_alive.return_value = True
+        loop._state = "RUNNING"
+        with self.assertRaisesRegex(RuntimeError, "providers must remain open"):
+            loop.stop(timeout=.01)
+        self.assertEqual(loop.status()["state"], "STOPPING")
+
     def test_closed_market_and_weekend_do_nothing(self):
         for now in (CLOSED, SATURDAY):
             loop, positions, _ = _loop(now)
@@ -80,6 +203,8 @@ class PaperLoopTests(TestCase):
         self.assertEqual(first["action"], "CYCLE")
         self.assertEqual(first["idempotency_key"], "loop-US_ALL-20261005T1500")
         self.assertEqual(repeat["run_id"], first["run_id"])
+        self.assertEqual(repeat["action"], "MONITOR")
+        self.assertEqual(len(loop.cycles.calls), 1)
         call = loop.cycles.calls[0]
         self.assertIsNone(call["as_of"])
         self.assertEqual((call["top_n"], call["operator"]), (2, "paper-loop"))
@@ -114,11 +239,13 @@ class PaperLoopTests(TestCase):
         self.assertEqual(loop.tick()["consecutive_failures"], 0)
 
         loop.cycles.run = Mock(side_effect=RuntimeError("RateLimited"))
+        clock["now"] = IN_SESSION.replace(hour=16, minute=0)
         loop.tick()
+        clock["now"] = IN_SESSION.replace(hour=16, minute=15)
         loop.tick()
 
         self.assertEqual(loop.status()["state"], "STOPPED_AFTER_FAILURES")
-        self.assertTrue(loop._stop.is_set())
+        self.assertFalse(loop._stop.is_set())
 
     def test_unfinished_runs_are_recovered_and_recovery_failures_counted(self):
         cycles = _Cycles()
@@ -154,9 +281,9 @@ class PaperLoopTests(TestCase):
         loop.tick()
         self.assertEqual(loop.status()["state"], "STOPPED_AFTER_FAILURES")
         calls = len(loop.cycles.calls)
-        self.assertEqual(loop.tick()["action"], "STOPPED_AFTER_FAILURES")
+        self.assertEqual(loop.tick()["action"], "EXITS_ONLY")
         self.assertEqual(len(loop.cycles.calls), calls)
-        positions.manage.assert_not_called()
+        self.assertGreaterEqual(positions.manage.call_count, 1)
 
     def test_recovery_failure_threshold_blocks_first_entry_tick(self):
         cycles = _Cycles()
@@ -165,7 +292,7 @@ class PaperLoopTests(TestCase):
         loop, _, _ = _loop(IN_SESSION, cycles=cycles, max_consecutive_failures=2)
         loop.recover_unfinished()
         self.assertEqual(loop.status()["state"], "STOPPED_AFTER_FAILURES")
-        self.assertEqual(loop.tick()["action"], "STOPPED_AFTER_FAILURES")
+        self.assertEqual(loop.tick()["action"], "EXITS_ONLY")
         self.assertEqual(cycles.calls, [])
         self.assertEqual(len(loop.status()["recovery_failures"]), 2)
 

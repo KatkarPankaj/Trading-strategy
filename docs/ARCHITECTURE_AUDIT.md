@@ -902,6 +902,126 @@ Validation on Python 3.11.6, with `PYTHONPATH=src;tests`:
   The configured source-security gate is therefore **not clean**; previously missing
   tools are now available, but existing findings still need separate disposition.
 
+### Paper MVP reliability stage audit (baseline b28280a)
+
+Inspected main at b28280a570ccc929465e735bf13c22b58da9a4d1. Six existing
+uncommitted API/dashboard/test edits remove a manual quote-diagnostic feature;
+preserve them rather than reinstating that feature. Unchanged working-tree baseline:
+570 unittest tests passed in 89.849s; editor diagnostics clear; pip-audit reports no
+known vulnerabilities. Bandit still reports the seven previously recorded candidates.
+The URL-open calls use validated HTTPS/loopback endpoints, bounded reads and timeouts;
+SQL helper identifiers originate in application constants and values are parameterized;
+dashboard requests supply an explicit timeout expression. These facts limit the scanner
+claims, but do not constitute a new adversarial security certification or justify
+blanket suppression. Redirect hardening and independent security review remain separate.
+
+Traced reusable path: ResilientProvider/quality/calendar -> scanner ->
+candidate_research snapshots -> candidate_assessment/strategy_ranking ->
+signal_generation -> trade_proposals/RiskEngine -> paper_lifecycle submission ->
+TradingService/OrderManager/PaperBroker -> durable fills/portfolio ->
+PaperPositionManager -> outcome_feedback -> prospective decisions/datasets.
+Existing account leases, durable reservations, stable client IDs, recovery, risk
+controls, holdout boundaries and immutable manifests should not be replaced.
+
+Prioritized gaps and acceptance criteria:
+
+1. `core/paper_loop.py` ties stops/targets and close-window flattening to the
+   15/30-minute scan cadence. A 19:30 UTC scan followed by a 20:00 tick skips a
+   19:50 close window entirely. Separate bounded monitoring cadence; run no
+   duplicate scan within a slot; verify normal/early-close/holiday boundaries.
+   Entry failure exhaustion must not disable protective exit monitoring.
+2. `core/paper_lifecycle.py` aborts position monitoring at the first unavailable
+   quote and skips pending partial entry orders before refreshing prices.
+   Isolate per-instrument failures, reconcile pending entry/exit orders, cancel
+   outstanding entries before end-of-day flattening, retain risk-gated exits,
+   and verify partial-fill and missing-price behavior without fabricated fills.
+3. `core/prospective_evidence.py` exists but automatic follow-up collection is
+   disconnected. Wire explicit write-side scheduler/recovery reconciliation;
+   preserve original decision/label boundaries; collection failures block new
+   automatic entries but must not disable exits. Monitoring GETs remain read-only.
+4. Existing `/paper/loop` is read-only and the dashboard lacks prospective evidence
+   and model-readiness views. Add authenticated audited entry pause/resume that
+   persists across restart and never overrides kill/recovery gates; keep exits
+   running. Reuse existing Strategies/System health surfaces, not a new dashboard.
+5. Runtime `/paper/fills` now exists; historical 404 points to an older API process
+   or stale browser render, not a missing current handler. Verify UI refresh and
+   report stale/closed-session data honestly, without inventing fresh prices or
+   weakening independent per-order quote validation.
+
+Scope remains single-worker local PAPER MVP. No live execution, new strategies,
+model training/promotion, fabricated evidence or production-readiness claim.
+No running service restart or operator database migration is part of this stage.
+
+Implemented the bounded reliability increment:
+
+- Independent between-tick order/position monitoring, same-slot scan suppression,
+  close-window checks, failure exhaustion that preserves exits, serialized controls/
+  recovery and explicit shutdown timeout handling.
+- Pending-order quote reconciliation, partial-entry completion, cancellation before
+  flattening, per-position failure isolation and fail-closed cycle admission.
+- Automatic append-only prospective follow-up collection on the write-side loop.
+- Authenticated audited desired-state entry controls restored from existing audit
+  persistence; read-only execution readiness and existing dashboard evidence views.
+- Explicit unavailable-fill-history rendering rather than treating HTTP failures
+  as an empty ledger.
+
+Stage-owned source changes: `core/paper_loop.py`, `core/paper_lifecycle.py`,
+`core/autonomous_paper_trading.py`, `api/app.py`, `api/bootstrap.py`, `api/schemas.py`,
+`dashboard/app.py`, `dashboard/client.py` (paths under `src/stockmarket`).
+Tests: `tests/test_paper_loop.py`, `tests/test_paper_lifecycle.py`,
+`tests/test_dashboard_paper_activity.py`, new `tests/test_paper_mvp_reliability.py`.
+Related configuration/docs: `.env.example`, `README.md`, `docs/ARCHITECTURE.md`,
+`docs/OPERATIONS.md` and this audit. Existing diagnostic-removal edits in
+`tests/test_dashboard_client.py` and `tests/test_paper_end_to_end.py` are preserved,
+not changes introduced by this stage. No new migration or dependency is required:
+V23 remains current and pause/resume uses the existing audit log.
+
+Validation and execution evidence:
+
+- Baseline: `PYTHONPATH=src python -m unittest discover -s tests` -> 570 passed
+  in 89.849s on the unchanged dirty tree.
+- Focused: `PYTHONPATH=src;tests python -m unittest test_paper_loop
+  test_paper_lifecycle test_paper_end_to_end test_dashboard_paper_activity
+  test_prospective_evidence test_paper_mvp_reliability` -> 89 passed in 7.820s.
+- Full regression: `PYTHONPATH=src python -m unittest discover -s tests` ->
+  589 passed in 90.674s on the final code/test tree. Expected injected failures are logged; preexisting AnyIO
+  memory-stream ResourceWarnings remain. The editor test runner discovered no tests,
+  so validation used the configured unittest command directly.
+- `python -m pip_audit -r requirements.txt` -> no known vulnerabilities, exit 0.
+- `python -m bandit -r src/stockmarket -c bandit.yaml -ll` (JSON output retained
+  in the session) -> exit 1, the same seven MEDIUM candidates:
+  B310 `core/ai/openai_compatible.py:107`, `news/finnhub.py:93`;
+  B608 `core/persistence/repositories.py:82,335,544,2002`;
+  B113 `dashboard/client.py:63`. No new reported candidate and no blanket
+  suppression. URL redirect restrictions remain unresolved; dynamic SQL uses
+  trusted identifiers/parameterized values and the dashboard timeout is explicit.
+- Editor diagnostics and `git diff --check` clear. No repository-wide configured
+  formatter, linter or static type-check gate is claimed.
+- Real application composition on deterministic test data: scan -> risk-approved
+  BUY 100 at 102 -> same-slot monitored stop exit at 100 -> two durable orders,
+  completed net outcome -200, label -2/102, unchanged original decision, restart
+  with preserved state and zero duplicate attachments. This is fixture execution
+  evidence, never training data or profitability evidence.
+- Pending partial entry completes through normal broker accounting; a cancellation
+  failure retains its 40-unit partial exposure without another fill. Pending exits
+  reconcile once. Another instrument's unavailable quote does not prevent a target
+  exit. Worker wake tests cover a 30-minute scan/30-second monitor reaching the
+  close window, known US early close/holiday, overlap, pause/auth/restart, collection
+  integrity failures, risk-gate preservation and provider shutdown ordering.
+- Browser inspection of the running Orders panel displays "No simulated fills
+  recorded" with no `/paper/fills` 404. Existing services were not restarted and
+  `outputs/paper_auto_us.db` was not modified by development validation.
+
+Remaining acceptance limitations and next milestone: independently supervise
+protective monitoring so slow research/provider calls cannot delay exits, with a
+measured latency budget and interruption/recovery tests. Bound evidence replay as
+history grows. Verify controlled operator adoption on real feeds without claiming
+point-in-time vintage attestation or model readiness. Calendar/master coverage,
+single-worker deployment, redirect hardening and real matched prospective controls
+remain unresolved. Supervised learning remains NOT_READY/ADVISORY_ONLY, final
+holdouts remain isolated, and live execution/model promotion remain disabled.
+This closes specific MVP gaps, not every production-grade acceptance condition.
+
 ### Recommended next implementation phase (historical context)
 
 Next, connect persisted completed paper outcomes to sample-qualified,

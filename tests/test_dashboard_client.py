@@ -8,14 +8,6 @@ from stockmarket.dashboard.client import ApiClient, ApiError
 
 
 class ApiClientTests(unittest.TestCase):
-    @patch("stockmarket.dashboard.client.requests.post")
-    def test_data_check_preserves_safe_provider_failure_codes(self, post):
-        post.return_value = self.response(status_code=503, payload={"detail": {
-            "code": "STALE_DATA", "issues": ["STALE_QUOTE"], "execution": "NOT_SUBMITTED"}})
-        with self.assertRaisesRegex(ApiError, "STALE_QUOTE"):
-            self.client.post("/paper/data-check/XNAS:AAPL", {}, timeout=120)
-        self.assertEqual(post.call_args.kwargs["timeout"], 120)
-
     def setUp(self):
         self.client = ApiClient(
             "http://127.0.0.1:8000", Secret("dashboard-test-token"))

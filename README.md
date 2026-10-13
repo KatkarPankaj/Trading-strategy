@@ -33,6 +33,15 @@ NOT_READY / ADVISORY_ONLY until real, verified point-in-time evidence and a pros
 control experiment exist. No model is trained or automatically promoted.
 See [Prospective evidence operations](docs/OPERATIONS.md#prospective-decision-evidence-and-model-readiness).
 
+The optional API paper loop monitors pending orders and protective exits between
+research scans (30 seconds by default), cancels pending entries before end-of-day
+flattening, and automatically attaches paper events/outcomes to frozen decisions.
+Repeated entry failures pause scans without disabling exits. Authenticated entry
+pause/resume controls are audited and survive restart; they never clear a kill switch.
+Strategies shows prospective evidence/readiness, and System health explains
+closed-session/stale-data blockers without granting risk approval.
+See [Paper loop operations](docs/OPERATIONS.md#opt-in-paper-auto-loop-local-algorithm-verification).
+
 ## Personal research and human decisions
 
 Use `PERSONAL_RESEARCH=true` for a recommendation-only application with no broker

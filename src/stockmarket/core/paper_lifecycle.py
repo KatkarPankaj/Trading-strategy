@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from .audit_trail import AuditContext
+from .brokers import BrokerError
 from .executors import TradingMode
 from .models import (
     Instrument,
@@ -377,128 +378,130 @@ class PaperPositionManager:
         self.evaluation_repository = evaluation_repository
 
     def manage(self) -> dict[str, Any]:
+        with self.trading.paper_strategy_change():
+            orders = self._pending_orders()
+            evaluated = []
+            for position in list(self.trading.portfolio.positions().values()):
+                try:
+                    evaluated.extend(self._manage_position(position)["positions"])
+                except (PaperLifecycleError, InvalidOrderTransition, BrokerError) as exc:
+                    self.store.audit.append(
+                        "system:paper-position-manager", "PAPER_POSITION_MONITOR_FAILED",
+                        "instrument", position.instrument_id, {"error": str(exc), "at": self._now()})
+                    evaluated.append({"instrument_id": position.instrument_id,
+                                      "status": "MONITOR_FAILED", "error": str(exc)})
+            return {"trading_mode": TradingMode.PAPER.value, "orders": orders, "positions": evaluated}
+
+    def _pending_orders(self, *, cancel_entries: bool = False,
+                        market: str | None = None) -> list[dict[str, Any]]:
+        results = []
         now = self._now()
-        evaluated: list[dict[str, Any]] = []
-        for position in self.trading.portfolio.positions().values():
-            instrument = self.instruments.get(position.instrument_id)
-            if instrument is None:
-                raise PaperLifecycleError(
-                    f"open position references unknown instrument {position.instrument_id}")
-            entry = self._entry_proposal(position)
+        for order in self.trading.order_manager.open_orders():
+            instrument = self.instruments.get(order.instrument_id)
+            if instrument is not None and market is not None and instrument.market != market:
+                continue
             try:
-                entry_status = OrderStatus(entry["order"]["status"])
-            except (KeyError, ValueError) as exc:
-                raise PaperLifecycleError(
-                    f"entry order state is unavailable for {instrument.instrument_id}") from exc
-            if entry_status not in {
-                OrderStatus.FILLED,
-                OrderStatus.CANCELLED,
-                OrderStatus.REJECTED,
-                OrderStatus.FAILED,
-            }:
-                evaluated.append({
-                    "instrument_id": instrument.instrument_id,
-                    "status": "ENTRY_ORDER_PENDING",
-                    "client_order_id": entry["client_order_id"],
-                })
-                continue
-            proposal = entry["proposal"]
-            stop = proposal.get("stop_price")
-            target = proposal.get("target_price")
-            if stop is None:
-                raise PaperLifecycleError(
-                    f"position {instrument.instrument_id} has no persisted protective stop")
-            quote = self.quotes(instrument.instrument_id)
-            if quote is None:
-                raise PaperLifecycleError(
-                    f"fresh market quote is unavailable for {instrument.instrument_id}")
-            price, timestamp = quote
-            timestamp = _validate_quote(
-                instrument, price, timestamp, now, self.max_age)
-            if timestamp < position.opened_at:
-                raise PaperLifecycleError(
-                    f"quote predates the open position for {instrument.instrument_id}")
-            if not self.markets.is_regular_session(instrument.market, now):
-                self._record_evaluation(
-                    position, entry, timestamp, "SESSION_CLOSED", None,
-                    price=price, stop=stop, target=target)
-                evaluated.append({
-                    "instrument_id": instrument.instrument_id,
-                    "status": "SESSION_CLOSED",
-                    "quote_price": price,
-                    "quote_timestamp": timestamp,
-                })
-                continue
-            if (
-                not instrument.is_valid_price(stop)
-                or (target is not None and not instrument.is_valid_price(target))
-            ):
-                raise PaperLifecycleError(
-                    f"persisted exit levels are invalid for {instrument.instrument_id}")
-            if (
-                position.side is PositionSide.LONG
-                and (stop >= position.average_entry_price
-                     or (target is not None and target <= position.average_entry_price))
-            ) or (
-                position.side is PositionSide.SHORT
-                and (stop <= position.average_entry_price
-                     or (target is not None and target >= position.average_entry_price))
-            ):
-                raise PaperLifecycleError(
-                    f"persisted exit levels contradict position direction for {instrument.instrument_id}")
-            self.update_price(instrument.instrument_id, price, timestamp)
-            position = self.trading.portfolio.positions().get(
-                instrument.instrument_id)
-            if position is None:
-                self._record_evaluation(
-                    position=None,
-                    entry=entry,
-                    timestamp=timestamp,
-                    status="CLOSED_DURING_MARKET_UPDATE",
-                    reason=None,
-                    price=price,
-                    stop=stop,
-                    target=target,
-                    instrument_id=instrument.instrument_id,
-                )
-                evaluated.append({
-                    "instrument_id": instrument.instrument_id,
-                    "status": "CLOSED_DURING_MARKET_UPDATE",
-                    "quote_price": price,
-                    "quote_timestamp": timestamp,
-                })
-                continue
-            reason = _exit_trigger(position.side, price, stop, target)
-            if reason is None:
-                self._record_evaluation(
-                    position, entry, timestamp, "MONITORED", None,
-                    price=price, stop=stop, target=target)
-                evaluated.append({
-                    "instrument_id": instrument.instrument_id,
-                    "status": "MONITORED",
-                    "quote_price": price,
-                    "quote_timestamp": timestamp,
-                })
-                continue
-            outcome = self._submit_exit(
-                position=position,
-                instrument=instrument,
-                entry=entry,
-                price=price,
-                timestamp=timestamp,
-                reason=reason,
-            )
+                if instrument is None:
+                    raise PaperLifecycleError("pending order references unknown instrument")
+                if cancel_entries and order.trade_intent in {TradeIntent.BUY, TradeIntent.SHORT_SELL}:
+                    current = self.trading.cancel(
+                        order.client_order_id, actor="system:paper-position-manager")
+                elif self.markets.is_regular_session(instrument.market, now):
+                    quote = self.quotes(instrument.instrument_id)
+                    if quote is None:
+                        raise PaperLifecycleError("fresh pending-order quote is unavailable")
+                    price, timestamp = quote
+                    _validate_quote(instrument, price, timestamp, now, self.max_age)
+                    self.update_price(instrument.instrument_id, price, timestamp)
+                    current = self.trading.order_manager.sync(order.client_order_id)
+                else:
+                    current = self.trading.order_manager.sync(order.client_order_id)
+                results.append({"client_order_id": order.client_order_id,
+                                "instrument_id": order.instrument_id, "status": current.status.value})
+            except (PaperLifecycleError, InvalidOrderTransition, BrokerError) as exc:
+                self.store.audit.append(
+                    "system:paper-position-manager", "PAPER_ORDER_RECONCILE_FAILED",
+                    "order", order.client_order_id, {"error": str(exc), "at": now})
+                results.append({"client_order_id": order.client_order_id,
+                                "instrument_id": order.instrument_id,
+                                "status": "RECONCILE_FAILED", "error": str(exc)})
+        return results
+
+    def _manage_position(self, monitored_position: Any) -> dict[str, Any]:
+        now = self._now()
+        position = monitored_position
+        instrument = self.instruments.get(position.instrument_id)
+        if instrument is None:
+            raise PaperLifecycleError(
+                f"open position references unknown instrument {position.instrument_id}")
+        if not self.markets.is_regular_session(instrument.market, now):
+            return {"positions": [{"instrument_id": instrument.instrument_id, "status": "SESSION_CLOSED"}]}
+        entry = self._entry_proposal(position)
+        try:
+            entry_status = OrderStatus(entry["order"]["status"])
+        except (KeyError, ValueError) as exc:
+            raise PaperLifecycleError(
+                f"entry order state is unavailable for {instrument.instrument_id}") from exc
+        if entry_status not in {
+            OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED,
+        }:
+            return {"positions": [{"instrument_id": instrument.instrument_id,
+                                   "status": "ENTRY_ORDER_PENDING",
+                                   "client_order_id": entry["client_order_id"]}]}
+        proposal = entry["proposal"]
+        stop, target = proposal.get("stop_price"), proposal.get("target_price")
+        if stop is None:
+            raise PaperLifecycleError(
+                f"position {instrument.instrument_id} has no persisted protective stop")
+        quote = self.quotes(instrument.instrument_id)
+        if quote is None:
+            raise PaperLifecycleError(f"fresh market quote is unavailable for {instrument.instrument_id}")
+        price, timestamp = quote
+        timestamp = _validate_quote(instrument, price, timestamp, now, self.max_age)
+        if timestamp < position.opened_at:
+            raise PaperLifecycleError(f"quote predates the open position for {instrument.instrument_id}")
+        if not instrument.is_valid_price(stop) \
+                or target is not None and not instrument.is_valid_price(target):
+            raise PaperLifecycleError(f"persisted exit levels are invalid for {instrument.instrument_id}")
+        if (position.side is PositionSide.LONG and (
+                stop >= position.average_entry_price or target is not None and target <= position.average_entry_price)) \
+                or (position.side is PositionSide.SHORT and (
+                    stop <= position.average_entry_price or target is not None and target >= position.average_entry_price)):
+            raise PaperLifecycleError(
+                f"persisted exit levels contradict position direction for {instrument.instrument_id}")
+        self.update_price(instrument.instrument_id, price, timestamp)
+        position = self.trading.portfolio.positions().get(instrument.instrument_id)
+        if position is None:
             self._record_evaluation(
-                position, entry, timestamp, str(outcome["status"]), reason,
-                price=price, stop=stop, target=target,
-                exit_proposal_id=outcome.get("proposal_id"),
-                exit_client_order_id=outcome.get("client_order_id"),
-            )
-            evaluated.append(outcome)
-        return {"trading_mode": TradingMode.PAPER.value, "positions": evaluated}
+                position=None, entry=entry, timestamp=timestamp, status="CLOSED_DURING_MARKET_UPDATE",
+                reason=None, price=price, stop=stop, target=target, instrument_id=instrument.instrument_id)
+            return {"positions": [{"instrument_id": instrument.instrument_id,
+                                   "status": "CLOSED_DURING_MARKET_UPDATE",
+                                   "quote_price": price, "quote_timestamp": timestamp}]}
+        reason = _exit_trigger(position.side, price, stop, target)
+        if reason is None:
+            self._record_evaluation(
+                position, entry, timestamp, "MONITORED", None, price=price, stop=stop, target=target)
+            return {"positions": [{"instrument_id": instrument.instrument_id, "status": "MONITORED",
+                                   "quote_price": price, "quote_timestamp": timestamp}]}
+        outcome = self._submit_exit(
+            position=position, instrument=instrument, entry=entry,
+            price=price, timestamp=timestamp, reason=reason)
+        self._record_evaluation(
+            position, entry, timestamp, str(outcome["status"]), reason,
+            price=price, stop=stop, target=target,
+            exit_proposal_id=outcome.get("proposal_id"), exit_client_order_id=outcome.get("client_order_id"))
+        return {"positions": [outcome]}
 
     def flatten(
         self, *, reason: str = "END_OF_DAY_FLATTEN", market: str | None = None,
+    ) -> dict[str, Any]:
+        with self.trading.paper_strategy_change():
+            orders = self._pending_orders(cancel_entries=True, market=market)
+            return {**self._flatten(reason=reason, market=market), "orders": orders}
+
+    def _flatten(
+        self, *, reason: str, market: str | None,
     ) -> dict[str, Any]:
         """Close every open paper position (optionally one market) with a fresh in-session quote.
 
@@ -556,7 +559,10 @@ class PaperPositionManager:
                     exit_client_order_id=outcome.get("client_order_id"),
                 )
                 results.append(outcome)
-            except (PaperLifecycleError, InvalidOrderTransition) as exc:
+            except (PaperLifecycleError, InvalidOrderTransition, BrokerError) as exc:
+                self.store.audit.append(
+                    "system:paper-position-manager", "PAPER_POSITION_FLATTEN_FAILED",
+                    "instrument", instrument.instrument_id, {"error": str(exc), "at": now})
                 results.append({"instrument_id": instrument.instrument_id,
                                 "status": "FLATTEN_FAILED", "error": str(exc)})
         return {"trading_mode": TradingMode.PAPER.value, "reason": reason, "positions": results}

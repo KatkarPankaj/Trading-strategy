@@ -235,6 +235,7 @@ startup `ConfigurationError`s. Defaults are off.
 | `PAPER_AUTO_LOOP_UNIVERSE` | `<MARKET>_ALL` | scanner universe |
 | `PAPER_AUTO_LOOP_INTERVAL_MINUTES` | `15` | cadence, aligned to wall-clock slots |
 | `PAPER_AUTO_LOOP_TOP_N` | `3` | capped by the autonomous cycle bound |
+| `PAPER_MONITOR_INTERVAL_SECONDS` | `30` | 1-300 seconds; pending orders and protective exits between scans |
 | `PAPER_EOD_FLATTEN_MINUTES` | `10` | minutes before close to stop entries and flatten |
 | `MARKET_STATS_LOOKBACK_DAYS` | `20` | completed daily bars for ADV/slippage/correlation |
 
@@ -249,11 +250,58 @@ cycles use the service's current clock, and retries retain the persisted
 research timestamp. This avoids stale research after host sleep without
 relaxing freshness checks. Signal generation, like personal research, excludes
 the still-forming intraday bar after validating the full provider response.
-Unfinished cycles are recovered at startup. PARTIAL/FAILED cycles and startup
-recovery failures count towards the failure limit; a stopped loop cannot submit
-even through a direct tick. Resolve the reported failure before restarting the
-API. `GET /paper/loop` (bearer token) reports state, last result, failure counts
+Unfinished cycles are recovered at startup unless automatic entries have been
+explicitly paused. PARTIAL/FAILED cycles and startup recovery failures count
+towards the failure limit. `STOPPED_AFTER_FAILURES` disables new scans, not
+protective monitoring: ticks remain `EXITS_ONLY`. Resolve failures before restarting
+the API; operator resume cannot override failure exhaustion. A host shutdown stops
+the worker before closing its provider; a timed-out join is an explicit failure,
+not a reported successful stop. `GET /paper/loop` (bearer token) reports state,
+monitoring cadence, automatic-entry control, collection results, failure counts
 and per-cycle startup recovery failures.
+
+Repeated ticks within a scan slot manage positions without repeating research.
+The 30-second monitoring interval allows a 30-minute scan schedule to reach the
+10-minute close window, including known early closes. Pending entries/exits are
+refreshed with validated quotes and reconciled through the existing OrderManager;
+pending entries are cancelled before close-window flattening. One unavailable
+position quote yields an audited `MONITOR_FAILED` without preventing other
+positions from being checked. Any such failure blocks new entries. Real broker
+liquidity is not simulated: partial-fill tests use bounded test liquidity.
+
+The loop automatically reconciles prospective attachments after successful
+monitoring/recovery/cycles. Integrity/collection failures block new scans while
+exits remain enabled; immutable decisions and dataset boundaries do not change.
+All monitoring GETs remain read-only. Strategies exposes readiness, missing features,
+frozen decisions and their subsequent events. No model training is performed.
+
+Use the System health automatic-entry form, or authenticated
+`POST /paper/loop/control` with
+`{"entries_enabled": false, "operator": "reviewer", "reason": "maintenance"}`.
+Repeat requests for the same desired state are idempotent. Controls serialize
+after the active tick; pause does not undo already submitted orders. State is
+restored from the existing audit log at startup, without a new migration. Resume
+requires `true` and does not clear kill switches or grant risk authorization.
+Pending interrupted cycles are deferred while paused; restart with entries
+enabled to apply startup recovery before resuming ordinary scans.
+
+`GET /health` includes `paper_readiness`: closed/unsupported sessions, missing/stale
+execution data, unhealthy services, halted gates and disabled automatic entries
+are explicit blockers. `PER_ORDER_VALIDATION_REQUIRED` is not approval: every order
+still passes independent data, signal, sizing and risk checks. Closed-market stale
+quotes are not refreshed or fabricated to make health green.
+
+This remains a single-worker, in-process loop, not a hard-real-time or multi-worker
+scheduler. Slow research/provider calls delay monitoring while an active tick holds
+the execution boundary; the configured interval is a between-tick cadence, not a
+maximum protective-exit latency. Scan-boundary cycles also retain their own
+protective pass. Scale-bounded evidence reconciliation and independently supervised
+monitoring are remaining reliability work. Calendar coverage is still limited
+to registered supported years/markets, and unavailable calendars fail closed.
+Restart the operator-managed API with the updated code/configuration after
+backing up its database; this development stage does not restart running services.
+An old API/base URL can still return 404 for `/paper/fills`; the dashboard now
+reports unavailable history rather than misrepresenting that error as zero fills.
 
 When recovery finds a research idempotency conflict caused by configuration
 changes, it terminates the old cycle as `FAILED / RECOVERY_OBSOLETE` without

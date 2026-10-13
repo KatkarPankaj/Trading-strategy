@@ -776,6 +776,19 @@ def build_context(
         env, personal_research_mode=personal_research_mode,
         cycles=autonomous_paper_trading, positions=paper_position_manager,
         gate=gate, markets=registry, settings=settings, clock=now)
+    if paper_loop is not None:
+        previous_control = store.audit.latest(("PAPER_LOOP_ENTRIES_PAUSED", "PAPER_LOOP_ENTRIES_RESUMED"))
+        paper_loop.set_entries_enabled(
+            previous_control is None or previous_control["action"] == "PAPER_LOOP_ENTRIES_RESUMED",
+            operator="system:startup", reason="restore persisted automatic-entry control")
+
+        def record_loop_control(enabled: bool, operator: str, reason: str) -> None:
+            store.audit.append(
+                operator, "PAPER_LOOP_ENTRIES_RESUMED" if enabled else "PAPER_LOOP_ENTRIES_PAUSED",
+                "paper-loop", "automatic-entries",
+                {"reason": reason, "at": now(), "exits_remain_enabled": True})
+
+        paper_loop.record_control = record_loop_control
     # A polling paper loop has no continuous feed between ticks, so the feed-staleness trigger would
     # always fire; per-order quote freshness is still enforced by quote validation and RiskEngine.
     monitor = AutoTriggerMonitor(
@@ -809,6 +822,8 @@ def build_context(
                               "execution_mode": "PAPER", "research_is_risk_approval": False},
             provider=market_data.name)
         candidate_assessment.decision_snapshot = prospective.snapshot
+        if paper_loop is not None:
+            paper_loop.reconcile_evidence = prospective.reconcile
         strategy_ranking = StrategyRankingService(store, outcome_feedback, clock=now)
         strategy_ranking.strategy_source = lambda: registered_research_strategies
         candidate_assessment.outcome_feedback = strategy_ranking.evidence
@@ -899,6 +914,7 @@ def _paper_loop_from_env(
             interval_minutes=int(env.get("PAPER_AUTO_LOOP_INTERVAL_MINUTES") or 15),
             top_n=min(int(env.get("PAPER_AUTO_LOOP_TOP_N") or 3), cycles.max_candidates),
             eod_flatten_minutes=int(env.get("PAPER_EOD_FLATTEN_MINUTES") or 10),
+            monitor_interval_seconds=int(env.get("PAPER_MONITOR_INTERVAL_SECONDS") or 30),
         )
         return PaperTradingLoop(cycles=cycles, positions=positions, gate=gate,
                                 markets=markets, settings=loop_settings, clock=clock)

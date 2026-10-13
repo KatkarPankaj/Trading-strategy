@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 import unittest
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -128,42 +127,6 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertIs(producer.repository, self.store.news)
 
     # -- helpers driving the real HTTP API ------------------------------------------------
-
-    def test_explicit_data_check_validates_quote_without_orders_and_get_does_not_probe(self):
-        ctx = self.context()
-        client = self.client(ctx)
-        path = f"/paper/data-check/{self.instrument_id}"
-        before = self.state(client)
-        with patch.object(ctx.market_data, "get_quote", wraps=ctx.market_data.get_quote) as quote:
-            self.assertEqual(client.post(path).status_code, 401)
-            self.assertEqual(client.get(path, headers=HEADERS).status_code, 405)
-            self.assertEqual(client.get("/health").json()["status"], "DEGRADED")
-            quote.assert_not_called()
-            response = client.post(path, headers=HEADERS)
-            self.assertEqual(response.status_code, 200, response.text)
-            quote.assert_called_once()
-        self.assertEqual(response.json()["status"], "VALIDATED_QUOTE")
-        self.assertEqual(response.json()["execution"], "NOT_SUBMITTED")
-        self.assertEqual(response.json()["risk_status"], "NOT_EVALUATED")
-        self.assertTrue(response.json()["health"]["checks"]["market_data"]["healthy"])
-        self.assertEqual(self.state(client), before)
-        self.assertEqual(client.post("/paper/data-check/unknown", headers=HEADERS).status_code, 404)
-
-    def test_explicit_data_check_reports_stale_and_entitlement_failures_without_trades(self):
-        from stockmarket.core.data.provider import EntitlementMissing
-        ctx = self.context()
-        client = self.client(ctx)
-        before = self.state(client)
-        self.data.quote_at = self.clock.at - timedelta(hours=1)
-        response = client.post(f"/paper/data-check/{self.instrument_id}", headers=HEADERS)
-        self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(response.json()["detail"]["code"], "STALE_DATA")
-        self.assertFalse(ctx.health.report()["checks"]["market_data"]["healthy"])
-        with patch.object(ctx.market_data, "get_quote", side_effect=EntitlementMissing()):
-            response = client.post(f"/paper/data-check/{self.instrument_id}", headers=HEADERS)
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["detail"]["code"], "ENTITLEMENT_MISSING")
-        self.assertEqual(self.state(client), before)
 
     def run_research(self, client, key="e2e-run"):
         response = client.post("/research/autonomous", headers=HEADERS, json={

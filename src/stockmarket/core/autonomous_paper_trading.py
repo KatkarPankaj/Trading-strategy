@@ -225,6 +225,11 @@ class AutonomousPaperTradingService:
                 "recovering": recovering, "mode": TradingMode.PAPER.value})
             payload["position_management"] = self.positions.manage()
             self._assert_lease(run_id, owner_token, lease_lost, lease_error)
+            if any(row.get("status") in {"MONITOR_FAILED", "RECONCILE_FAILED", "FAILED", "REJECTED"}
+                   for row in (*payload["position_management"].get("orders", []),
+                               *payload["position_management"].get("positions", []))):
+                payload["failure"] = "position/order monitoring failed; no entries attempted"
+                return self._finish(run_id, payload, "PARTIAL", "MONITORING_FAILED", owner_token)
 
             if self.gate.halted:
                 payload["halt_reason"] = self.gate.blocked_reason()

@@ -90,7 +90,8 @@ class ApiClient:
             raise ApiError(
                 "Research is unavailable (503); check the server's research pipeline "
                 "and market-session configuration.", 503)
-        if response.status_code == 503 and path.startswith("/intelligence/"):
+        if response.status_code == 503 and path.startswith("/intelligence/") \
+                and not path.startswith("/intelligence/prospective/"):
             try:
                 payload = response.json()
             except requests.exceptions.JSONDecodeError:
@@ -110,7 +111,8 @@ class ApiClient:
                 "Proposal submission was rejected as stale or conflicting (409); "
                 "regenerate and review the proposal.", 409)
         if not response.ok:
-            if path.startswith(("/research/personal/", "/strategy-lab/", "/paper/data-check/")):
+            if path.startswith(("/research/personal/", "/strategy-lab/", "/paper/loop/",
+                                "/intelligence/prospective/")):
                 try:
                     detail = response.json().get("detail", "Request rejected")
                 except requests.exceptions.JSONDecodeError:

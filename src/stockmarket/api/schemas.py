@@ -375,6 +375,13 @@ class ResumeBody(BaseModel):
     acknowledged: list[str] = Field(default_factory=list, max_length=100)
 
 
+class PaperLoopControlBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    entries_enabled: bool = Field(strict=True)
+    operator: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class KillTriggerBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

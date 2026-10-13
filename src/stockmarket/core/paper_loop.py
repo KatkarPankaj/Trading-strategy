@@ -30,13 +30,15 @@ class PaperLoopSettings:
     eod_flatten_minutes: int = 10
     max_consecutive_failures: int = 3
     operator: str = "paper-loop"
+    monitor_interval_seconds: int = 30
 
     def __post_init__(self) -> None:
         if not self.universe_id.strip() or not self.market.strip():
             raise ValueError("paper loop needs a universe_id and a market")
         for name, low, high in (("interval_minutes", 1, 240), ("top_n", 1, 100),
                                 ("eod_flatten_minutes", 1, 120),
-                                ("max_consecutive_failures", 1, 100)):
+                                ("max_consecutive_failures", 1, 100),
+                                ("monitor_interval_seconds", 1, 300)):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer between {low} and {high}")
@@ -54,6 +56,9 @@ class PaperTradingLoop:
         markets: Any,
         settings: PaperLoopSettings,
         clock: Callable[[], datetime] | None = None,
+        reconcile_evidence: Callable[[], Any] | None = None,
+        entries_enabled: bool = True,
+        record_control: Callable[[bool, str, str], None] | None = None,
     ) -> None:
         if positions.trading.mode is not TradingMode.PAPER:
             raise ValueError("the paper loop requires PAPER execution")
@@ -64,6 +69,12 @@ class PaperTradingLoop:
         self.markets = markets
         self.settings = settings
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.reconcile_evidence = reconcile_evidence
+        self.record_control = record_control
+        self._entries_enabled = entries_enabled
+        self._last_scan_key: str | None = None
+        self._last_scan_run: str | None = None
+        self._last_evidence: Any = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -94,7 +105,15 @@ class PaperTradingLoop:
 
     def recover_unfinished(self) -> list[str]:
         """Resume runs interrupted by a restart; a failing recovery is reported, not hidden."""
+        with self._lock:
+            return self._recover_unfinished()
+
+    def _recover_unfinished(self) -> list[str]:
         recovered: list[str] = []
+        if not self._entries_enabled:
+            if self.reconcile_evidence is not None:
+                self._last_evidence = self.reconcile_evidence()
+            return recovered
         for run in self.cycles.repository.unfinished():
             try:
                 result = self.cycles.recover(run["run_id"])
@@ -109,16 +128,17 @@ class PaperTradingLoop:
                 self._failures += 1
                 if self._failures >= self.settings.max_consecutive_failures:
                     self._state = "STOPPED_AFTER_FAILURES"
-                    self._stop.set()
                     break
         self._recovered = recovered
+        if self.reconcile_evidence is not None:
+            self._last_evidence = self.reconcile_evidence()
         return recovered
 
     def tick(self) -> dict[str, Any]:
         """Run at most one cycle or one exit pass for the current time."""
         with self._lock:
-            if self._state == "STOPPED_AFTER_FAILURES":
-                return {"action": self._state, "consecutive_failures": self._failures}
+            if self._stop.is_set():
+                return {"action": "STOPPED", "consecutive_failures": self._failures}
             now = self.clock()
             self._ticks += 1
             market = self.settings.market
@@ -129,34 +149,73 @@ class PaperTradingLoop:
                 elif now >= self._close_at(now) - timedelta(minutes=self.settings.eod_flatten_minutes):
                     result = {"action": "END_OF_DAY_FLATTEN",
                               "result": self.positions.flatten(market=market)}
-                elif self.gate.halted:
+                    self._check_positions(result["result"])
+                elif self.gate.halted or not self._entries_enabled \
+                        or self._state == "STOPPED_AFTER_FAILURES":
                     # entries are blocked; keep stop/target exits running
-                    result = {"action": "EXITS_ONLY", "reason": self.gate.blocked_reason(),
+                    result = {"action": "EXITS_ONLY",
+                              "reason": self.gate.blocked_reason() or (
+                                  "STOPPED_AFTER_FAILURES" if self._state == "STOPPED_AFTER_FAILURES"
+                                  else "OPERATOR_PAUSED_ENTRIES"),
                               "result": self.positions.manage()}
+                    self._check_positions(result["result"])
                 else:
                     bucket = self.bucket(now)
                     key = self.idempotency_key(bucket)
-                    run = self.cycles.run(
-                        self.settings.universe_id, idempotency_key=key,
-                        operator=self.settings.operator,
-                        top_n=self.settings.top_n)
-                    result = {"action": "CYCLE", "idempotency_key": key,
-                              "run_id": run.get("run_id"), "status": run.get("status")}
-                    if run.get("status") != "COMPLETE":
-                        raise RuntimeError(
-                            f"paper cycle {run.get('run_id')} ended with {run.get('status')}")
-                self._failures = 0
+                    if key == self._last_scan_key:
+                        result = {"action": "MONITOR", "run_id": self._last_scan_run,
+                                  "result": self.positions.manage()}
+                        self._check_positions(result["result"])
+                    else:
+                        self._check_positions(self.positions.manage())
+                        # Collection integrity is checked before admitting another automatic scan.
+                        if self.reconcile_evidence is not None:
+                            self._last_evidence = self.reconcile_evidence()
+                        self._last_scan_key = key
+                        run = self.cycles.run(
+                            self.settings.universe_id, idempotency_key=key,
+                            operator=self.settings.operator,
+                            top_n=self.settings.top_n)
+                        self._last_scan_run = run.get("run_id")
+                        result = {"action": "CYCLE", "idempotency_key": key,
+                                  "run_id": run.get("run_id"), "status": run.get("status")}
+                        if run.get("status") != "COMPLETE":
+                            raise RuntimeError(
+                                f"paper cycle {run.get('run_id')} ended with {run.get('status')}")
+                if self.reconcile_evidence is not None:
+                    self._last_evidence = self.reconcile_evidence()
+                if result["action"] == "CYCLE" and self._state != "STOPPED_AFTER_FAILURES":
+                    self._failures = 0
             except Exception as exc:  # noqa: BLE001 - counted; repeated failures stop the loop
                 self._failures += 1
                 _log.exception("paper loop tick failed")
                 result = {"action": "FAILED", "error": f"{type(exc).__name__}: {exc}"}
                 if self._failures >= self.settings.max_consecutive_failures:
                     self._state = "STOPPED_AFTER_FAILURES"
-                    self._stop.set()
             result["at"] = now.isoformat()
             result["consecutive_failures"] = self._failures
             self._last = result
             return result
+
+    @staticmethod
+    def _check_positions(result: dict[str, Any]) -> None:
+        failed = [row for row in (*result.get("orders", []), *result.get("positions", []))
+                  if row.get("status") in {"MONITOR_FAILED", "RECONCILE_FAILED",
+                                          "FLATTEN_FAILED", "REJECTED", "FAILED"}]
+        if failed:
+            raise RuntimeError(f"paper position monitoring failed: {failed}")
+
+    def set_entries_enabled(self, enabled: bool, *, operator: str, reason: str) -> dict[str, Any]:
+        if not isinstance(enabled, bool) or not operator.strip() or not reason.strip():
+            raise ValueError("entry control requires a boolean, operator and reason")
+        with self._lock:
+            if enabled and self._state == "STOPPED_AFTER_FAILURES":
+                raise ValueError("resolve failures and restart the API before resuming automatic entries")
+            if enabled != self._entries_enabled:
+                if self.record_control is not None:
+                    self.record_control(enabled, operator, reason)
+                self._entries_enabled = enabled
+            return self.status()
 
     # --- background thread ------------------------------------------------------------
     def seconds_until_next(self, now: datetime) -> float:
@@ -177,20 +236,26 @@ class PaperTradingLoop:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
+            if self._thread.is_alive():
+                self._state = "STOPPING"
+                raise RuntimeError("paper loop is still processing; providers must remain open")
         if self._state == "RUNNING":
             self._state = "STOPPED"
 
     def _run(self) -> None:
-        self.recover_unfinished()
+        try:
+            self.recover_unfinished()
+        except Exception:
+            _log.exception("paper loop startup evidence reconciliation failed")
+            self._state = "STOPPED_AFTER_FAILURES"
+            self._failures += 1
         while not self._stop.is_set():
             self.tick()
             if self._stop.is_set():
                 break
-            due = self.bucket(self.clock()) + timedelta(minutes=self.settings.interval_minutes)
-            # Short waits re-read the wall clock: a single long wait can overrun by the time the
-            # host spent asleep (e.g. Windows Modern Standby), skipping scheduled slots.
-            while not self._stop.is_set() and self.clock() < due:
-                self._stop.wait(min(self.wait_poll_seconds, self.seconds_until_next(self.clock())))
+            self._stop.wait(min(self.wait_poll_seconds,
+                                self.settings.monitor_interval_seconds,
+                                self.seconds_until_next(self.clock())))
 
     def status(self) -> dict[str, Any]:
         return {
@@ -201,6 +266,11 @@ class PaperTradingLoop:
             "interval_minutes": self.settings.interval_minutes,
             "top_n": self.settings.top_n,
             "eod_flatten_minutes": self.settings.eod_flatten_minutes,
+            "monitor_interval_seconds": self.settings.monitor_interval_seconds,
+            "entries_enabled": self._entries_enabled and not self._stop.is_set()
+                               and self._state != "STOPPED_AFTER_FAILURES",
+            "operator_entries_enabled": self._entries_enabled,
+            "evidence_collection": self._last_evidence,
             "consecutive_failures": self._failures,
             "ticks": self._ticks,
             "recovered_runs": list(self._recovered),
