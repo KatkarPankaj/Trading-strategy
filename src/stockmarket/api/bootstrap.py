@@ -70,6 +70,8 @@ from ..core.trading_gate import TradingGate
 from ..core.security import SecurityError, get_secret
 from ..core.settings import AppSettings, ConfigurationError, Environment, load_settings
 from ..core.trading_service import TradingService
+from ..core.market_stats import MarketStatsProvider, MarketStatsSettings
+from ..core.paper_loop import PaperLoopSettings, PaperTradingLoop
 from .app import ApiContext, create_app
 
 
@@ -515,6 +517,19 @@ def build_context(
     fundamental_observation_provider = (
         YahooEarningsObservationProvider()
         if fundamental_provider_name == "yahoo" else None)
+    if market_stats is None:
+        try:
+            stats_settings = MarketStatsSettings(
+                lookback_days=int(env.get("MARKET_STATS_LOOKBACK_DAYS") or 20),
+                reference_order_notional=max_notional)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError([f"invalid MARKET_STATS_LOOKBACK_DAYS: {exc}"]) from exc
+        market_stats = MarketStatsProvider(
+            market_data=market_data, instruments=instruments, portfolio=portfolio,
+            settings=stats_settings, clock=now)
+    if sector_of is None:
+        sector_of = lambda iid: (  # noqa: E731
+            instruments[iid].sector if iid in instruments else None)
     sector_observation_provider = (
         NSESectorIndexObservationProvider(sector_map)
         if sector_provider_name == "nse" and sector_map else None)
@@ -663,7 +678,9 @@ def build_context(
         if raw_news_provider is not None:
             news_evidence_producer = NewsEvidenceProducer(
                 raw_news_provider,
+                research_analyst,
                 limit=5,
+                repository=store.news,
             )
         research_pipeline = StrategyResearchPipeline(
             market_data,
@@ -697,11 +714,17 @@ def build_context(
     kill_switch = KillSwitch(gate, services=lambda: [
                              paper], store=store, logger=logger, alerts=alerts, clock=now)
     kill_switch.restore()  # an engaged kill switch survives restarts
+    paper_loop = _paper_loop_from_env(
+        env, personal_research_mode=personal_research_mode,
+        cycles=autonomous_paper_trading, positions=paper_position_manager,
+        gate=gate, markets=registry, settings=settings, clock=now)
+    # A polling paper loop has no continuous feed between ticks, so the feed-staleness trigger would
+    # always fire; per-order quote freshness is still enforced by quote validation and RiskEngine.
     monitor = AutoTriggerMonitor(
         kill_switch, portfolio=portfolio, health=health,
         policy=AutoTriggerPolicy(
             settings.risk.max_daily_loss_pct, settings.risk.max_drawdown_pct),
-        data_expected=lambda: any(registry.is_regular_session(
+        data_expected=lambda: paper_loop is None and any(registry.is_regular_session(
             m, now()) for m in settings.markets),
         unexpected_positions=lambda: [
             d.subject for d in reconcile_positions(portfolio, broker)],
@@ -729,7 +752,51 @@ def build_context(
                       autonomous_paper_trading=None if personal_research_mode else autonomous_paper_trading,
                       personal_research=personal_research,
                       personal_research_mode=personal_research_mode,
-                      instrument_discovery=discovery)
+                      instrument_discovery=discovery,
+                      paper_loop=paper_loop)
+
+
+def _paper_loop_from_env(
+    env: Mapping[str, str],
+    *,
+    personal_research_mode: bool,
+    cycles: Any,
+    positions: Any,
+    gate: Any,
+    markets: MarketRegistry,
+    settings: AppSettings,
+    clock: Callable[[], datetime],
+) -> PaperTradingLoop | None:
+    """PAPER_AUTO_LOOP=true builds (but does not start) the opt-in paper loop; anything unsafe is a config error."""
+    enabled = (env.get("PAPER_AUTO_LOOP") or "false").strip().lower()
+    if enabled not in {"true", "false"}:
+        raise ConfigurationError(["PAPER_AUTO_LOOP must be true or false"])
+    if enabled == "false":
+        return None
+    errors: list[str] = []
+    if settings.execution.mode is not TradingMode.PAPER:
+        errors.append("PAPER_AUTO_LOOP requires PAPER mode")
+    if personal_research_mode:
+        errors.append("PAPER_AUTO_LOOP cannot run with PERSONAL_RESEARCH=true")
+    if cycles is None:
+        errors.append("PAPER_AUTO_LOOP requires autonomous paper cycles (configure an AI research provider)")
+    market = (env.get("PAPER_AUTO_LOOP_MARKET") or (settings.markets[0] if settings.markets else "")).strip().upper()
+    if market not in settings.markets:
+        errors.append(f"PAPER_AUTO_LOOP_MARKET {market!r} must be one of MARKETS")
+    if errors:
+        raise ConfigurationError(errors)
+    try:
+        loop_settings = PaperLoopSettings(
+            universe_id=(env.get("PAPER_AUTO_LOOP_UNIVERSE") or f"{market}_ALL").strip(),
+            market=market,
+            interval_minutes=int(env.get("PAPER_AUTO_LOOP_INTERVAL_MINUTES") or 15),
+            top_n=min(int(env.get("PAPER_AUTO_LOOP_TOP_N") or 3), cycles.max_candidates),
+            eod_flatten_minutes=int(env.get("PAPER_EOD_FLATTEN_MINUTES") or 10),
+        )
+        return PaperTradingLoop(cycles=cycles, positions=positions, gate=gate,
+                                markets=markets, settings=loop_settings, clock=clock)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ConfigurationError([f"invalid paper loop setting: {exc}"]) from exc
 
 
 def create_app_from_env() -> FastAPI:

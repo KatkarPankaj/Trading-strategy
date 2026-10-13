@@ -203,7 +203,7 @@ class AIAnalyst:
             attempts += 1
             try:
                 raw, usage = self._breaker.call(
-                    lambda: self._complete(system, user))
+                    lambda: self._complete(system, user, task, schema))
                 break
             except CircuitOpenError:
                 self._record_usage(attempts, None, None, False)
@@ -239,12 +239,19 @@ class AIAnalyst:
             output = schema.model_validate_json(
                 match.group(1) if match else str(raw))
         except (ValidationError, ValueError) as exc:
-            return self._result(task, False, None, f"SCHEMA_VALIDATION_FAILED: {type(exc).__name__}",
+            return self._result(task, False, None,
+                                f"SCHEMA_VALIDATION_FAILED: {_validation_summary(exc)}",
                                 prompt_hash, response_hash, now, started, **token_fields)
         return self._result(task, True, output, None, prompt_hash, response_hash, now, started,
                             **token_fields)
 
-    def _complete(self, system: str, user: str) -> tuple[str, Mapping[str, Any] | None]:
+    def _complete(
+        self, system: str, user: str, task: str, schema: type[BaseModel],
+    ) -> tuple[str, Mapping[str, Any] | None]:
+        structured = getattr(self._provider, "complete_structured_with_usage", None)
+        if callable(structured):
+            raw, usage = structured(system, user, task, schema.model_json_schema())
+            return raw, _validated_usage(usage)
         with_usage = getattr(self._provider, "complete_with_usage", None)
         if callable(with_usage):
             raw, usage = with_usage(system, user)
@@ -360,6 +367,18 @@ class AIAnalyst:
                 prompt_hash=prompt_hash, response_hash=response_hash, attempts=attempts,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
         return result
+
+
+def _validation_summary(exc: Exception, limit: int = 5) -> str:
+    """Field locations and error types only; model output values are never echoed."""
+    if not isinstance(exc, ValidationError):
+        return type(exc).__name__
+    parts = [
+        f"{'.'.join(str(p) for p in err.get('loc', ())) or '<root>'}:{err.get('type', 'error')}"
+        for err in exc.errors(include_url=False, include_input=False, include_context=False)[:limit]
+    ]
+    extra = exc.error_count() - len(parts)
+    return f"ValidationError [{', '.join(parts)}{f', +{extra} more' if extra > 0 else ''}]"
 
 
 def _estimate_tokens(text: str) -> int:

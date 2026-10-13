@@ -35,7 +35,7 @@ from stockmarket.core.portfolio import PortfolioManager
 from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
 from stockmarket.core.risk import RiskEngine, RiskLimits
 from stockmarket.core.risk_portfolio import CONTROLS
-from stockmarket.core.research import NewsEvidenceProducer
+from stockmarket.core.research import NewsEvidenceProducer, NewsResearchUnavailable
 from stockmarket.core.research import (
     FundamentalEvidenceProducer,
     ResearchEvidenceCollection,
@@ -411,10 +411,15 @@ class StrategyResearchPipelineTests(unittest.TestCase):
             })),
             clock=lambda: AS_OF.astimezone(timezone.utc),
         )
+        db = SQLiteDatabase()
+        migrate(db)
+        store = Store(db)
+        self.addCleanup(db.close)
         producer = NewsEvidenceProducer(
             StaticNewsProvider([event]),
             news_analyst,
             max_age=timedelta(hours=1),
+            repository=store.news,
         )
         pipeline, _ = self.pipeline()
         pipeline.news_evidence_producer = producer
@@ -427,6 +432,42 @@ class StrategyResearchPipelineTests(unittest.TestCase):
         self.assertEqual(provenance["observed_at"], event.timestamp.isoformat())
         self.assertTrue(provenance["source"].startswith("ai_news:"))
         self.assertIs(result.decision.action, AggregatedAction.BUY)
+        self.assertEqual(len(store.news.recent_events()), 1)
+        self.assertEqual(len(store.news.recent_analyses()), 1)
+        producer.collect(self.instrument, as_of=AS_OF)
+        self.assertEqual(len(store.news.recent_events()), 1)
+
+
+    def test_news_persistence_rejects_invalid_events_and_keeps_failed_ai_unavailable(self):
+        db = SQLiteDatabase()
+        migrate(db)
+        store = Store(db)
+        self.addCleanup(db.close)
+        analyst = AIAnalyst(StaticAIProvider("not valid JSON"), clock=lambda: AS_OF)
+        for symbol, timestamp, rejected in (
+            ("MSFT", AS_OF - timedelta(minutes=10), True),
+            (self.instrument.symbol, AS_OF - timedelta(days=2), True),
+            (self.instrument.symbol, AS_OF - timedelta(minutes=10), False),
+        ):
+            with self.subTest(symbol=symbol, timestamp=timestamp):
+                event = NewsEvent(
+                    timestamp=timestamp, source="fixture", headline="Fixture headline",
+                    event_type=NewsEventType.CONTRACT, sentiment=NewsSentiment.UNKNOWN,
+                    sentiment_confidence=0.0, market_impact=MarketImpact.HIGH,
+                    relevance=0.9, symbol=symbol, affected_market=self.instrument.market,
+                )
+                producer = NewsEvidenceProducer(
+                    StaticNewsProvider([event]), analyst, repository=store.news)
+                if rejected:
+                    with self.assertRaises(NewsResearchUnavailable):
+                        producer.collect(self.instrument, as_of=AS_OF)
+                    self.assertEqual(store.news.recent_events(), [])
+                else:
+                    result = producer.collect(self.instrument, as_of=AS_OF)
+                    self.assertEqual(len(store.news.recent_events()), 1)
+                    self.assertEqual(store.news.recent_analyses(), [])
+                    self.assertEqual(result.evidence, ())
+                    self.assertTrue(result.warnings[0].startswith("NEWS_ANALYSIS_UNAVAILABLE"))
 
     def test_sector_and_fundamental_producers_contribute_to_selection_and_aggregation(self):
         ai_provider = StaticAIProvider(selection_response())

@@ -135,6 +135,8 @@ class ResilientProvider:
             raise DataQualityError(report.issues)
         if require_fresh and self._health is not None:
             self._health.record_market_data(df.index.max().to_pydatetime())
+        elif self._health is not None:
+            self._health.record_research_data(df.index.max().to_pydatetime())
         return df
 
     def get_intraday_bars(self, instrument: Instrument, interval: str, lookback: timedelta) -> pd.DataFrame:

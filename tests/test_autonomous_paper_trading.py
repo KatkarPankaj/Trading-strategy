@@ -80,17 +80,20 @@ class _Gate:
         return None
 
 
-def _service(store, *, execution=None, positions=None, gate=None):
+def _service(
+    store, *, execution=None, positions=None, gate=None, research=None,
+    signals=None, proposals=None, clock=lambda: NOW,
+):
     return AutonomousPaperTradingService(
         repository=store.autonomous_paper_cycles,
-        research=_Research(),
-        signals=_Signals(),
-        proposals=_Proposals(),
+        research=research or _Research(),
+        signals=signals or _Signals(),
+        proposals=proposals or _Proposals(),
         execution=execution or _Execution(),
         positions=positions or _Positions(),
         gate=gate or _Gate(),
         max_candidates=3,
-        clock=lambda: NOW,
+        clock=clock,
         heartbeat_interval=60,
     )
 
@@ -128,6 +131,58 @@ class AutonomousPaperTradingTests(TestCase):
         self.assertEqual(len(execution.calls), 1)
         self.assertEqual(execution.calls[0][2:], ("AUTOMATIC_SIZING", None))
         self.assertEqual(self.store.autonomous_paper_cycles.unfinished(), [])
+
+    def test_candidate_evaluation_uses_time_after_research_evidence_is_created(self):
+        clock_state = {"now": NOW}
+        evaluation_times = []
+
+        class AdvancingResearch(_Research):
+            def run(self, *args, **kwargs):
+                result = super().run(*args, **kwargs)
+                clock_state["now"] = NOW + timedelta(seconds=5)
+                return result
+
+        class RecordingSignals(_Signals):
+            def generate(self, run_id, candidate_id, *, evaluation_as_of):
+                evaluation_times.append(evaluation_as_of)
+                return super().generate(
+                    run_id, candidate_id, evaluation_as_of=evaluation_as_of)
+
+        service = _service(
+            self.store,
+            research=AdvancingResearch(),
+            signals=RecordingSignals(),
+            clock=lambda: clock_state["now"],
+        )
+
+        result = service.run(
+            "us-equities",
+            idempotency_key="cycle-research-time",
+            operator="operator",
+            as_of=NOW,
+            top_n=1,
+        )
+
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(evaluation_times, [NOW + timedelta(seconds=5)])
+
+    def test_omitted_as_of_uses_current_time_and_preserves_retry_timestamp(self):
+        clock_state = {"now": NOW + timedelta(minutes=18)}
+        execution = _Execution()
+        service = _service(
+            self.store, execution=execution, clock=lambda: clock_state["now"])
+        first = service.run(
+            "us-equities", idempotency_key="loop-delayed-slot",
+            operator="operator", top_n=1)
+        clock_state["now"] += timedelta(minutes=2)
+        replay = service.run(
+            "us-equities", idempotency_key="loop-delayed-slot",
+            operator="operator", top_n=1)
+
+        self.assertEqual(first["as_of"], (NOW + timedelta(minutes=18)).isoformat())
+        self.assertEqual(replay["run_id"], first["run_id"])
+        self.assertEqual(replay["as_of"], first["as_of"])
+        self.assertEqual(len(execution.calls), 1)
 
     def test_failed_candidate_can_resume_from_checkpoint(self):
         execution = _Execution(fail_first=True)

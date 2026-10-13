@@ -423,6 +423,88 @@ class PaperPositionManagerTests(TestCase):
         trading.submit.assert_not_called()
 
 
+class PaperPositionFlattenTests(TestCase):
+    def _manager(self, *, in_session=True, quote=(100.5, NOW)):
+        proposal, signal_row = _persisted_signal()
+        store = _Store(proposal, signal_row)
+        store.fills.all.return_value = [{
+            "client_order_id": "proposal-entry",
+            "instrument_id": INSTRUMENT.instrument_id,
+            "timestamp": (NOW - timedelta(minutes=1)).isoformat(),
+        }]
+        store.orders.get.return_value = {
+            "side": OrderSide.BUY.value,
+            "strategy": "orb_vwap",
+            "status": OrderStatus.FILLED.value,
+        }
+        store.proposal_submissions.records["proposal-1"] = {
+            "proposal_id": "proposal-1",
+            "client_order_id": "proposal-entry",
+            "proposal_payload": proposal,
+            "state": "ORDER_FILLED",
+        }
+        position = SimpleNamespace(
+            instrument_id=INSTRUMENT.instrument_id,
+            side=PositionSide.LONG,
+            quantity=10,
+            average_entry_price=100.0,
+            opened_at=NOW - timedelta(minutes=1),
+        )
+        exit_order = SimpleNamespace(**{
+            **vars(_fake_order(OrderStatus.FILLED, "exit-order")),
+            "side": OrderSide.SELL, "quantity": 10,
+        })
+        trading = SimpleNamespace(
+            mode=TradingMode.PAPER,
+            portfolio=SimpleNamespace(
+                positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
+            submit=Mock(return_value=SimpleNamespace(
+                order=exit_order, risk=SimpleNamespace(decision_id=uuid4()))),
+        )
+        manager = PaperPositionManager(
+            store=store,
+            trading=trading,
+            instruments={INSTRUMENT.instrument_id: INSTRUMENT},
+            markets=SimpleNamespace(is_regular_session=Mock(return_value=in_session)),
+            quotes=lambda _: quote,
+            update_price=Mock(),
+            max_age=timedelta(minutes=5),
+            clock=lambda: NOW,
+        )
+        return manager, trading, store
+
+    def test_flatten_closes_a_position_that_no_stop_or_target_would_close(self):
+        manager, trading, store = self._manager()
+
+        result = manager.flatten()
+
+        self.assertEqual(result["positions"][0]["trigger_reason"], "END_OF_DAY_FLATTEN")
+        ticket = trading.submit.call_args.args[0]
+        self.assertEqual(ticket.intent, OrderIntent.EXIT)
+        self.assertEqual(ticket.side, OrderSide.SELL)
+        self.assertEqual(ticket.quantity, 10)
+        self.assertEqual(ticket.trade_intent.value, "SELL_TO_CLOSE")
+        self.assertEqual(store.position_exit_proposals.rows[0]["status"], "FILLED")
+
+    def test_flatten_outside_the_session_submits_nothing(self):
+        manager, trading, _ = self._manager(in_session=False)
+
+        result = manager.flatten()
+
+        self.assertEqual(result["positions"][0]["status"], "SESSION_CLOSED")
+        trading.submit.assert_not_called()
+
+    def test_flatten_filters_by_market_and_reports_stale_quotes(self):
+        manager, trading, _ = self._manager()
+        self.assertEqual(manager.flatten(market="ZZ")["positions"], [])
+        stale, trading, _ = self._manager(quote=(100.5, NOW - timedelta(hours=1)))
+
+        result = stale.flatten()
+
+        self.assertEqual(result["positions"][0]["status"], "FLATTEN_FAILED")
+        trading.submit.assert_not_called()
+
+
 class PaperFillPersistenceTests(TestCase):
     def test_paper_fill_is_linked_to_order_and_saved_idempotently(self):
         database = SQLiteDatabase()

@@ -1,0 +1,12 @@
+[
+  {"market":"US","mic":"XNAS","symbol":"AAPL","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"AAPL","shortable":false,"name":"Apple Inc.","sector":"Information Technology","industry":"Technology Hardware"},
+  {"market":"US","mic":"XNAS","symbol":"MSFT","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"MSFT","shortable":false,"name":"Microsoft Corporation","sector":"Information Technology","industry":"Software"},
+  {"market":"US","mic":"XNAS","symbol":"NVDA","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"NVDA","shortable":false,"name":"NVIDIA Corporation","sector":"Information Technology","industry":"Semiconductors"},
+  {"market":"US","mic":"XNAS","symbol":"AMD","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"AMD","shortable":false,"name":"Advanced Micro Devices, Inc.","sector":"Information Technology","industry":"Semiconductors"},
+  {"market":"US","mic":"XNAS","symbol":"AMZN","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"AMZN","shortable":false,"name":"Amazon.com, Inc.","sector":"Consumer Discretionary","industry":"Broadline Retail"},
+  {"market":"US","mic":"XNAS","symbol":"TSLA","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"TSLA","shortable":false,"name":"Tesla, Inc.","sector":"Consumer Discretionary","industry":"Automobiles"},
+  {"market":"US","mic":"XNAS","symbol":"META","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"META","shortable":false,"name":"Meta Platforms, Inc.","sector":"Communication Services","industry":"Interactive Media"},
+  {"market":"US","mic":"XNAS","symbol":"GOOGL","asset_class":"EQUITY","tick_size":0.01,"lot_size":1,"provider_symbol":"GOOGL","shortable":false,"name":"Alphabet Inc. Class A","sector":"Communication Services","industry":"Interactive Media"},
+  {"market":"US","mic":"ARCX","symbol":"SPY","asset_class":"ETF","tick_size":0.01,"lot_size":1,"provider_symbol":"SPY","shortable":false,"name":"SPDR S&P 500 ETF Trust","sector":"Broad Market ETF","industry":"Index ETF"},
+  {"market":"US","mic":"XNAS","symbol":"QQQ","asset_class":"ETF","tick_size":0.01,"lot_size":1,"provider_symbol":"QQQ","shortable":false,"name":"Invesco QQQ Trust","sector":"Broad Market ETF","industry":"Index ETF"}
+]

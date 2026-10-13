@@ -20,7 +20,7 @@ from .models import (
     TradeIntent,
 )
 from .risk import OrderIntent
-from .order_management import UnknownOrder
+from .order_management import InvalidOrderTransition, UnknownOrder
 from .trade_proposals import TradeProposalService
 from .trading_service import AutomaticSizingRejected, OrderTicket, TradingService
 
@@ -493,6 +493,70 @@ class PaperPositionManager:
             )
             evaluated.append(outcome)
         return {"trading_mode": TradingMode.PAPER.value, "positions": evaluated}
+
+    def flatten(
+        self, *, reason: str = "END_OF_DAY_FLATTEN", market: str | None = None,
+    ) -> dict[str, Any]:
+        """Close every open paper position (optionally one market) with a fresh in-session quote.
+
+        Exits go through the ordinary RiskEngine/OrderManager path with an explicit close intent.
+        A failure for one position is reported and does not stop the others.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("flatten reason is required")
+        now = self._now()
+        results: list[dict[str, Any]] = []
+        for position in list(self.trading.portfolio.positions().values()):
+            instrument = self.instruments.get(position.instrument_id)
+            if instrument is None:
+                results.append({"instrument_id": position.instrument_id,
+                                "status": "FLATTEN_FAILED",
+                                "error": "open position references unknown instrument"})
+                continue
+            if market is not None and instrument.market != market:
+                continue
+            try:
+                if not self.markets.is_regular_session(instrument.market, now):
+                    results.append({"instrument_id": instrument.instrument_id,
+                                    "status": "SESSION_CLOSED"})
+                    continue
+                entry = self._entry_proposal(position)
+                if entry["order"].get("status") not in {
+                    OrderStatus.FILLED.value, OrderStatus.CANCELLED.value,
+                    OrderStatus.REJECTED.value, OrderStatus.FAILED.value,
+                }:
+                    results.append({"instrument_id": instrument.instrument_id,
+                                    "status": "ENTRY_ORDER_PENDING",
+                                    "client_order_id": entry["client_order_id"]})
+                    continue
+                quote = self.quotes(instrument.instrument_id)
+                if quote is None:
+                    raise PaperLifecycleError(
+                        f"fresh market quote is unavailable for {instrument.instrument_id}")
+                price, timestamp = quote
+                timestamp = _validate_quote(instrument, price, timestamp, now, self.max_age)
+                self.update_price(instrument.instrument_id, price, timestamp)
+                current = self.trading.portfolio.positions().get(instrument.instrument_id)
+                if current is None:
+                    results.append({"instrument_id": instrument.instrument_id,
+                                    "status": "CLOSED_DURING_MARKET_UPDATE"})
+                    continue
+                outcome = self._submit_exit(
+                    position=current, instrument=instrument, entry=entry,
+                    price=price, timestamp=timestamp, reason=reason)
+                proposal = entry["proposal"]
+                self._record_evaluation(
+                    current, entry, timestamp, str(outcome["status"]), reason,
+                    price=price, stop=proposal.get("stop_price"),
+                    target=proposal.get("target_price"),
+                    exit_proposal_id=outcome.get("proposal_id"),
+                    exit_client_order_id=outcome.get("client_order_id"),
+                )
+                results.append(outcome)
+            except (PaperLifecycleError, InvalidOrderTransition) as exc:
+                results.append({"instrument_id": instrument.instrument_id,
+                                "status": "FLATTEN_FAILED", "error": str(exc)})
+        return {"trading_mode": TradingMode.PAPER.value, "reason": reason, "positions": results}
 
     def _record_evaluation(
         self,

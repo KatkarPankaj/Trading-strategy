@@ -54,26 +54,84 @@ def main() -> None:
     st.caption(
         "Research uses the platform API. Human decision only; no orders are submitted."
         if personal else
-        "Research and order review use the platform API. Only explicit PAPER proposal "
-        "acceptance is available here; arbitrary orders cannot be entered.")
+        "Manual research is advisory. Manual proposal acceptance is PAPER-only; "
+        "a separately enabled local paper loop can submit risk-checked simulated orders. "
+        "Arbitrary orders cannot be entered.")
     if st.sidebar.button("Refresh"):
         st.rerun()
+
+    activity = _paper_activity(client) if health and health.get("trading_mode") == "PAPER" and not personal else None
+    if activity is not None:
+        loop = activity.get("loop")
+        if loop is not None:
+            st.caption(
+                f"Local paper loop: {loop['state']} | "
+                f"Last cycle: {(loop.get('last') or {}).get('status', 'none')} | "
+                "When enabled, the loop may submit simulated orders through deterministic strategy and risk checks.")
 
     tabs = st.tabs(["Research (advisory)", "Opportunities", "Markets & regime",
                     "Signals", "Portfolio", "Orders", "PnL & drawdown",
                     "Strategies", "News & AI", "Risk", "System health", "Audit log"])
     renderers: list[Callable[[], None]] = [
-        lambda: _personal_research(client) if personal else _research(client),
-        lambda: _personal_results(client) if personal else _opportunities(client),
+        lambda: _personal_research(client) if personal else _research(client, activity),
+        lambda: _personal_results(client) if personal else _opportunities(client, activity),
         lambda: _markets(client), lambda: _signals(client),
         lambda: _portfolio(client), lambda: _orders(client),
-        lambda: _pnl(client), lambda: _strategies(client),
-        lambda: _news(client), lambda: _risk(client),
+        lambda: _pnl(client), lambda: _strategies(client, activity),
+        lambda: _news(client, activity), lambda: _risk(client),
         lambda: _health(health), lambda: _audit(client),
     ]
     for tab, render in zip(tabs, renderers):
         with tab:
             render()
+
+
+def _paper_activity(client: ApiClient) -> dict[str, Any]:
+    loop = _safe(client, "/paper/loop")
+    activity: dict[str, Any] = {"loop": loop, "cycles": [], "cycle": None, "research": None}
+    if loop is None or loop.get("state") == "DISABLED":
+        return activity
+    cycles = _safe(client, "/paper/cycles", limit=10)
+    if cycles is None:
+        return activity
+    activity["cycles"] = cycles
+    if not cycles:
+        return activity
+    selected = st.sidebar.selectbox(
+        "Paper cycle to inspect", [row["run_id"] for row in cycles],
+        index=next((index for index, row in enumerate(cycles) if row["status"] == "COMPLETE"), 0),
+        format_func=lambda key: next(
+            f"{row['as_of']} | {row['status']}" for row in cycles if row["run_id"] == key),
+    )
+    cycle = _safe(client, f"/paper/cycles/{quote(selected, safe='')}")
+    activity["cycle"] = cycle
+    if cycle is not None:
+        research_id = cycle["payload"].get("research_run_id")
+        if research_id:
+            activity["research"] = _safe(
+                client, f"/research/autonomous/{quote(research_id, safe='')}")
+    return activity
+
+
+def _cycle_outcomes(activity: dict[str, Any]) -> None:
+    st.subheader("Persisted paper-cycle outcomes")
+    st.caption(
+        "COMPLETE means cycle processing finished, not that a trade was placed. "
+        "NO_TRADE and NON_ACTIONABLE are expected when strategy conditions are not met.")
+    cycle = activity.get("cycle")
+    if cycle is None:
+        st.info("No paper cycle selected or available.")
+        return
+    st.caption(f"Cycle: {cycle['run_id']} | Status: {cycle['status']} | As-of: {cycle['as_of']}")
+    if cycle["payload"].get("failure"):
+        st.error(cycle["payload"]["failure"])
+    _table(
+        views.cycle_candidates(cycle.get("candidates", [])),
+        "Cycle is still processing. Refresh for updates or select a completed cycle."
+        if cycle["status"] in {"RUNNING", "RECOVERING"}
+        else "No candidates recorded for this cycle.")
+    with st.expander("Cycle events and position-management results"):
+        st.json({"payload": cycle["payload"], "events": cycle.get("events", [])})
 
 
 def _personal_research(client: ApiClient) -> None:
@@ -203,7 +261,17 @@ def _personal_results(client: ApiClient) -> None:
     _recommendations(next(run for run in runs if run["run_id"] == selected))
 
 
-def _research(client: ApiClient) -> None:
+def _research(client: ApiClient, activity: dict[str, Any] | None = None) -> None:
+    if activity is not None:
+        st.subheader("Automatic paper research history")
+        _table(views.frame([
+            {key: row.get(key) for key in ("run_id", "as_of", "status", "stage", "updated_at")}
+            for row in activity["cycles"]
+        ]), "No automatic paper cycles recorded yet.")
+        research = activity.get("research")
+        if research is not None:
+            with st.expander("Selected cycle's persisted research and strategy context"):
+                st.json(research)
     st.subheader("Run market research")
     st.warning(
         "This research form is advisory and never submits orders. AI rankings are advisory, "
@@ -259,7 +327,7 @@ def _research(client: ApiClient) -> None:
         ],
     }
     try:
-        result = client.post("/research", payload)
+        result = client.post("/research", payload, timeout=300)
     except ApiError as exc:
         st.error(str(exc))
         return
@@ -296,7 +364,12 @@ def _research(client: ApiClient) -> None:
             })
 
 
-def _opportunities(client: ApiClient) -> None:
+def _opportunities(client: ApiClient, activity: dict[str, Any] | None = None) -> None:
+    if activity is not None:
+        _cycle_outcomes(activity)
+        if activity.get("research") is not None:
+            st.subheader("Advisory candidates from the selected cycle")
+            _table(views.research_candidates(activity["research"].get("candidates", [])))
     st.subheader("Rank market opportunities")
     st.warning(
         "AI and research evidence are advisory. Proposals are not risk-approved. "
@@ -329,7 +402,7 @@ def _opportunities(client: ApiClient) -> None:
                 result = client.post("/intelligence/opportunities", {
                     "instrument_ids": [options[label] for label in selected],
                     "as_of": as_of,
-                })
+                }, timeout=300)
             except ApiError as exc:
                 st.error(str(exc))
             else:
@@ -462,7 +535,9 @@ def _portfolio(client: ApiClient) -> None:
 
 def _orders(client: ApiClient) -> None:
     st.subheader("Orders")
-    st.caption("Paper order review. Proposal entries are submitted only after explicit acceptance and final RiskEngine approval.")
+    st.caption(
+        "Paper order review. Manual entries require explicit proposal acceptance; "
+        "the enabled local paper loop may submit automatically. Both paths require final RiskEngine approval.")
     only_open = st.checkbox("Open orders only")
     _table(views.frame(_safe(client, "/orders", open_only=only_open)))
 
@@ -478,7 +553,13 @@ def _pnl(client: ApiClient) -> None:
     _table(curves.tail(50))
 
 
-def _strategies(client: ApiClient) -> None:
+def _strategies(client: ApiClient, activity: dict[str, Any] | None = None) -> None:
+    if activity is not None and activity.get("research") is not None:
+        st.subheader("Strategies configured for the selected research run")
+        request = activity["research"]["payload"].get("request", {})
+        _table(views.frame(request.get("strategy_catalog", [])))
+        st.caption("Registration and AI selection do not establish profitability or authorize an order.")
+        _table(views.research_candidates(activity["research"].get("candidates", [])))
     st.subheader("Strategy performance")
     _table(views.strategy_performance(
         _safe(client, "/trades", limit=1000) or []))
@@ -487,10 +568,25 @@ def _strategies(client: ApiClient) -> None:
         st.json(perf["trades"])
 
 
-def _news(client: ApiClient) -> None:
-    st.subheader("News")
+def _news(client: ApiClient, activity: dict[str, Any] | None = None) -> None:
+    if activity is not None and activity.get("research") is not None:
+        st.subheader("AI assessments used by the selected paper cycle")
+        st.caption("Persisted advisory assessments, not risk approvals. Confidence is not calibrated probability.")
+        for candidate in activity["research"].get("candidates", []):
+            with st.expander(f"Research evidence: {candidate['instrument_id']}"):
+                st.json(candidate.get("opportunity") or {
+                    "stage": candidate.get("stage"), "error": candidate.get("error")})
+                snapshot_id = candidate.get("snapshot_id")
+                if snapshot_id:
+                    evidence = _safe(client, f"/research/snapshots/{quote(snapshot_id, safe='')}")
+                    if evidence is not None:
+                        st.json(evidence)
+    st.subheader("Stored standalone news events")
+    st.caption(
+        "These tables contain standalone news research records. Automatic-cycle news "
+        "and AI evidence are shown above; older standalone events are not backfilled.")
     _table(views.frame(_safe(client, "/news", limit=100)))
-    st.subheader("AI explanations")
+    st.subheader("Stored standalone news analyses")
     st.caption("AI output is research input only; it never places orders.")
     _table(views.frame(_safe(client, "/ai-analyses", limit=100)))
 
@@ -519,6 +615,14 @@ def _health(health: Any) -> None:
     _table(views.health_checks(health))
     st.json({k: health[k] for k in ("last_market_data_timestamp", "market_data_age_seconds",
                                     "last_successful_order", "error_counts")})
+    st.caption(
+        "Market-data health tracks validated quotes and freshness-required bars, not all research reads. "
+        "Historical research activity does not prove a current executable price. "
+        "Missing or stale execution data still blocks new entries.")
+    st.json({
+        "last_research_data_timestamp": health.get("last_research_data_timestamp"),
+        "last_research_data_received_at": health.get("last_research_data_received_at"),
+    })
 
 
 def _audit(client: ApiClient) -> None:

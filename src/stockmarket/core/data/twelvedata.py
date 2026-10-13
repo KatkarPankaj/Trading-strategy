@@ -92,7 +92,6 @@ class TwelveDataProvider(MarketDataProvider):
         requests_per_minute: int = 8,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("Twelve Data API key must be a non-empty string")
@@ -110,7 +109,6 @@ class TwelveDataProvider(MarketDataProvider):
         self._rpm = requests_per_minute
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
-        self._sleep = sleep
         self._sent: deque[float] = deque()
         self._lock = threading.Lock()
 
@@ -143,12 +141,15 @@ class TwelveDataProvider(MarketDataProvider):
         if end <= start:
             raise ValueError("end must be after start")
         expected = int((end - start) / step) + 1
-        return self._fetch(instrument, {
+        df = self._fetch(instrument, {
             "interval": INTERVALS[interval],
             "start_date": start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "end_date": end.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "outputsize": str(min(_MAX_OUTPUTSIZE, max(1, expected))),
         })
+        # Daily/weekly bars are labelled with a bare date (midnight UTC), so the first one can
+        # precede an intraday start; honour the requested window at the provider boundary.
+        return df[(df.index >= start) & (df.index <= end)]
 
     def get_market_status(self, market: str) -> MarketStatus:
         now = self._clock()
@@ -157,14 +158,15 @@ class TwelveDataProvider(MarketDataProvider):
 
     # ---- internals ----
     def _throttle(self) -> None:
+        # Report an exhausted budget as RateLimited instead of sleeping here: a sleep inside a
+        # timeout-bounded call (ResilientProvider) would surface as ProviderTimeout. The caller
+        # waits retry_after outside its timeout and retries; no request slot is consumed.
         with self._lock:
             now = self._monotonic()
             while self._sent and now - self._sent[0] >= 60.0:
                 self._sent.popleft()
             if len(self._sent) >= self._rpm:
-                self._sleep(max(0.0, 60.0 - (now - self._sent[0])))
-                now = self._monotonic()
-                self._sent.popleft()
+                raise RateLimited(max(0.0, 60.0 - (now - self._sent[0])))
             self._sent.append(now)
 
     def _fetch(self, instrument: Instrument, extra: Mapping[str, str]) -> pd.DataFrame:

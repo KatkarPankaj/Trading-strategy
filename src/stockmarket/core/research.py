@@ -12,6 +12,7 @@ from typing import Literal, Protocol, Sequence
 from .ai.analyst import AIAnalyst, news_score
 from .ai.schemas import ResearchScoreSchema
 from .models import Instrument
+from .persistence.repositories import NewsRepository
 from ..news import NewsEvent, NewsProvider, NewsQuery
 
 RESEARCH_COMPONENTS = frozenset({
@@ -94,6 +95,7 @@ class NewsEvidenceProducer:
         *,
         max_age: timedelta = timedelta(hours=24),
         limit: int = 20,
+        repository: NewsRepository | None = None,
     ) -> None:
         if not isinstance(max_age, timedelta) or max_age <= timedelta(0):
             raise ValueError("max_age must be a positive timedelta")
@@ -103,6 +105,7 @@ class NewsEvidenceProducer:
         self.analyst = analyst
         self.max_age = max_age
         self.limit = limit
+        self.repository = repository
 
     def collect(
         self,
@@ -150,7 +153,11 @@ class NewsEvidenceProducer:
         analyzed_ids: list[str] = []
         warnings: list[str] = []
         for event in validated_events:
-            result, _ = self.analyst.analyze_news_event(event)
+            if self.repository is not None:
+                self.repository.save_event(event)
+            result, analysis = self.analyst.analyze_news_event(event)
+            if self.repository is not None and analysis is not None:
+                self.repository.save_analysis(analysis)
             score = news_score(result)
             if score is None:
                 warnings.append(

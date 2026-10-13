@@ -35,6 +35,8 @@ class HealthMonitor:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._checks: dict[str, Callable[[], CheckResult | bool]] = {}
         self._last_market_data: datetime | None = None
+        self._last_research_data: datetime | None = None
+        self._last_research_received: datetime | None = None
         self._last_order: tuple[datetime, str] | None = None
         self._lock = RLock()
 
@@ -55,6 +57,13 @@ class HealthMonitor:
             with self._lock:
                 self._last_order = (self._clock(), status)
 
+    def record_research_data(self, timestamp: datetime) -> None:
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("research data timestamp must be timezone-aware")
+        with self._lock:
+            self._last_research_data = timestamp
+            self._last_research_received = self._clock()
+
     def data_is_stale(self) -> bool:
         with self._lock:
             last = self._last_market_data
@@ -74,6 +83,7 @@ class HealthMonitor:
             checks[name] = {"healthy": result.healthy, "detail": result.detail}
         with self._lock:
             last_data, last_order = self._last_market_data, self._last_order
+            research_data, research_received = self._last_research_data, self._last_research_received
         stale = last_data is None or now - last_data > self._max_age
         checks["market_data"] = {
             "healthy": not stale,
@@ -93,6 +103,8 @@ class HealthMonitor:
             "checks": checks,
             "last_market_data_timestamp": last_data.isoformat() if last_data else None,
             "market_data_age_seconds": (now - last_data).total_seconds() if last_data else None,
+            "last_research_data_timestamp": research_data.isoformat() if research_data else None,
+            "last_research_data_received_at": research_received.isoformat() if research_received else None,
             "last_successful_order": (
                 {"timestamp": last_order[0].isoformat(), "status": last_order[1]} if last_order else None),
             "error_counts": self.errors.snapshot(),

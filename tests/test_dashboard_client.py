@@ -81,6 +81,24 @@ class ApiClientTests(unittest.TestCase):
         self.assertIn("market-session", str(raised.exception))
 
     @patch("stockmarket.dashboard.client.requests.post")
+    def test_unconfigured_intelligence_identifies_news_dependency(self, post):
+        post.return_value = self.response(status_code=503, payload={
+            "detail": "market intelligence service is not configured"})
+        with self.assertRaises(ApiError) as raised:
+            self.client.post("/intelligence/opportunities", {})
+        self.assertEqual(raised.exception.status, 503)
+        self.assertIn("NEWS_PROVIDER=finnhub", str(raised.exception))
+        self.assertIn("FINNHUB_API_KEY_FILE", str(raised.exception))
+        self.assertIn("separate workflow", str(raised.exception))
+
+    @patch("stockmarket.dashboard.client.requests.post")
+    def test_intelligence_non_json_error_uses_safe_generic_message(self, post):
+        post.return_value = self.response(status_code=503)
+        post.return_value.json.side_effect = requests.exceptions.JSONDecodeError("bad", "", 0)
+        with self.assertRaisesRegex(ApiError, "Market intelligence is unavailable"):
+            self.client.post("/intelligence/opportunities", {})
+
+    @patch("stockmarket.dashboard.client.requests.post")
     def test_stale_proposal_conflict_is_explained(self, post):
         post.return_value = self.response(status_code=409)
 
@@ -107,6 +125,17 @@ class ApiClientTests(unittest.TestCase):
 
         self.assertIn("API unreachable: ConnectionError", str(raised.exception))
         self.assertNotIn("private connection detail", str(raised.exception))
+
+    @patch("stockmarket.dashboard.client.requests.post")
+    def test_read_timeout_reports_uncertain_completion_without_retry(self, post):
+        post.side_effect = requests.ReadTimeout("private request detail")
+        with self.assertRaises(ApiError) as raised:
+            self.client.post("/intelligence/opportunities", {}, timeout=300)
+        self.assertIn("server may still be processing", str(raised.exception))
+        self.assertIn("No automatic retry", str(raised.exception))
+        self.assertNotIn("private request detail", str(raised.exception))
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["timeout"], 300)
 
     @patch("stockmarket.dashboard.client.requests.post")
     def test_personal_research_has_bounded_timeout_and_clear_rejection(self, post):

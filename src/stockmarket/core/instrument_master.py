@@ -41,7 +41,7 @@ def bootstrap_instruments(
     identities: set[str] = set()
     allowed = {
         "symbol", "market", "mic", "asset_class", "tick_size", "lot_size",
-        "provider_symbol", "active", "tradable", "shortable", "name",
+        "provider_symbol", "active", "tradable", "shortable", "name", "sector", "industry",
     }
     for row in payload:
         if not isinstance(row, dict) or set(row) - allowed:

@@ -418,6 +418,57 @@ class CandidateResearchTests(unittest.TestCase):
         self.assertEqual(len(provider.users), 2)
         self.assertIn(snapshot.as_of.isoformat(), provider.users[0])
 
+    def _advancing_assessment(self, snapshot, analyst_offsets):
+        provider = AssessmentProvider([
+            assessment_response(
+                instrument_id=snapshot.instrument_id,
+                snapshot_id=snapshot.snapshot_id,
+                key_evidence=[self.store.research_runs.evidence(
+                    snapshot.snapshot_id)[0]["evidence_id"]],
+            ),
+            strategy_response(),
+        ])
+        ticks = iter(range(1, 1000))
+        offsets = iter(analyst_offsets)
+
+        def service_clock():
+            return AS_OF + timedelta(seconds=next(ticks))
+
+        def analyst_clock():
+            return service_clock() + timedelta(seconds=next(offsets))
+
+        return CandidateAssessmentService(
+            AIAnalyst(provider, clock=analyst_clock),
+            self.store.research_runs,
+            {self.instrument.instrument_id: self.instrument},
+            default_markets(),
+            {"orb_vwap": OrbVwapStrategy()},
+            clock=service_clock,
+        )
+
+    def test_strategy_selection_made_after_assessment_time_is_accepted(self):
+        _, snapshots = self.service.run_scan("scan-test")
+        snapshot = snapshots[0]
+        service = self._advancing_assessment(snapshot, [0, 0])
+
+        opportunity = service.assess(snapshot.snapshot_id)
+
+        self.assertEqual(
+            opportunity.state.value, "STRATEGY_SELECTED", opportunity.assessment.error)
+        self.assertEqual(opportunity.assessment.recommended_strategy, "orb_vwap")
+
+    def test_future_dated_strategy_selection_fails_closed(self):
+        _, snapshots = self.service.run_scan("scan-test")
+        snapshot = snapshots[0]
+        service = self._advancing_assessment(snapshot, [0, 3600])
+
+        opportunity = service.assess(snapshot.snapshot_id)
+
+        self.assertEqual(opportunity.state.value, "REJECTED")
+        self.assertEqual(opportunity.assessment.status.value, "AI_INVALID")
+        self.assertIn("timestamp is invalid", opportunity.assessment.error)
+        self.assertEqual(self.store.db.query("SELECT COUNT(*) AS n FROM orders")[0]["n"], 0)
+
     def test_invalid_evidence_citation_fails_closed_and_is_persisted(self):
         _, snapshots = self.service.run_scan("scan-test")
         snapshot = snapshots[0]

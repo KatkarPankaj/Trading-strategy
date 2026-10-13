@@ -235,6 +235,7 @@ class AutonomousPaperTradingService:
                 as_of=datetime.fromisoformat(request["as_of"]),
                 top_n=request["top_n"],
             )
+            evaluation_as_of = self._now()
             research_run_id = str(research_result["run_id"])
             payload["research_run_id"] = research_run_id
             self.repository.update_run(
@@ -281,7 +282,7 @@ class AutonomousPaperTradingService:
                         research_run_id=research_run_id,
                         candidate_id=candidate_id,
                         operator=request["operator"],
-                        as_of=datetime.fromisoformat(request["as_of"]),
+                        as_of=evaluation_as_of,
                         lease_lost=lease_lost,
                         lease_error=lease_error,
                     )

@@ -413,8 +413,13 @@ class CandidateAssessmentService:
                     available_strategies=tuple(strategies),
                     research_context=selection_context,
                 )
-                if selection_result.ok and not self._result_time_is_valid(
-                        selection_result.created_at, assessed_at):
+                # Selection is a second AI call made after ``assessed_at`` was taken, so
+                # bound it by a fresh post-call time and by the assessment it builds on.
+                selected_at = self._now()
+                if selection_result.ok and not (
+                        self._result_time_is_valid(selection_result.created_at, selected_at)
+                        and selection_result.created_at.astimezone(timezone.utc)
+                        >= assessment_result.created_at.astimezone(timezone.utc)):
                     selection = None
                     selection_error = "AI strategy-selection timestamp is invalid"
         strategy = selection.ranked_strategies[0] if selection else None

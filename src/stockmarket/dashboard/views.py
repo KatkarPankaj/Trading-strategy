@@ -77,3 +77,44 @@ def rejection_summary(decisions: list[dict[str, Any]]) -> pd.DataFrame:
 
 def health_checks(health: Mapping[str, Any]) -> pd.DataFrame:
     return pd.DataFrame([{"check": name, **detail} for name, detail in (health.get("checks") or {}).items()])
+
+
+def cycle_candidates(candidates: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for candidate in candidates:
+        payload = candidate["payload"]
+        generation = payload.get("signal") or {}
+        signal = generation.get("signal") or {}
+        risk = payload.get("risk") or {}
+        order = payload.get("order") or {}
+        rows.append({
+            "instrument": candidate["candidate_id"],
+            "status": candidate["status"],
+            "intent": signal.get("intent", "NOT_GENERATED"),
+            "strategy": signal.get("strategy"),
+            "strategy_reasons": ", ".join(signal.get("reasons") or []),
+            "reason": payload.get("error") or payload.get("research_error") or risk.get("reason"),
+            "risk_status": risk.get("status", "NOT_EVALUATED"),
+            "order_id": order.get("client_order_id"),
+            "order_status": order.get("status", "NOT_SUBMITTED"),
+        })
+    return frame(rows)
+
+
+def research_candidates(candidates: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for candidate in candidates:
+        assessment = (candidate.get("opportunity") or {}).get("assessment") or {}
+        rows.append({
+            "instrument": candidate["instrument_id"],
+            "research_stage": candidate.get("stage"),
+            "assessed_at": assessment.get("assessed_at"),
+            "strategy": assessment.get("recommended_strategy"),
+            "outcome": assessment.get("outcome"),
+            "opportunity_score": assessment.get("opportunity_score"),
+            "directional_bias": assessment.get("directional_bias"),
+            "evidence_quality": assessment.get("evidence_quality"),
+            "reason": candidate.get("error") or ", ".join(assessment.get("rejection_reasons") or [])
+            or assessment.get("strategy_reason"),
+        })
+    return frame(rows)

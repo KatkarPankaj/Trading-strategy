@@ -108,6 +108,7 @@ class ApiContext:
     personal_research: PersonalResearchService | None = None
     personal_research_mode: bool = False
     instrument_discovery: Mapping[str, Any] = field(default_factory=dict)
+    paper_loop: Any = None
 
     @property
     def primary(self) -> TradingService:
@@ -129,6 +130,11 @@ def create_app(ctx: ApiContext) -> FastAPI:
     proposal_contexts_lock = RLock()
     if ctx.market_data is not None:
         app.add_event_handler("shutdown", ctx.market_data.close)
+    if ctx.paper_loop is not None:
+        if ctx.mode != TradingMode.PAPER.value or ctx.live is not None:
+            raise RuntimeError("the paper loop may only run with PAPER execution")
+        app.add_event_handler("startup", ctx.paper_loop.start)
+        app.add_event_handler("shutdown", ctx.paper_loop.stop)
 
     @app.middleware("http")
     async def show_mode(request: Request, call_next):  # the trading mode is never hidden
@@ -849,6 +855,13 @@ def create_app(ctx: ApiContext) -> FastAPI:
             else ctx.store.autonomous_paper_cycles.recent(limit)
         )
         return _plain(rows[:limit])
+
+    @app.get("/paper/loop", dependencies=[Depends(auth)])
+    def paper_loop_status() -> dict[str, Any]:
+        if ctx.paper_loop is None:
+            return {"state": "DISABLED", "trading_mode": TradingMode.PAPER.value,
+                    "detail": "set PAPER_AUTO_LOOP=true (PAPER mode only) to enable"}
+        return _plain(ctx.paper_loop.status())
 
     @app.get("/paper/cycles/{run_id}", dependencies=[Depends(auth)])
     def paper_cycle(run_id: str) -> dict[str, Any]:

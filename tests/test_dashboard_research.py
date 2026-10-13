@@ -46,6 +46,7 @@ class ResearchDashboardTests(unittest.TestCase):
         self.client.post.assert_called_once()
         path, payload = self.client.post.call_args.args
         self.assertEqual(path, "/research")
+        self.assertEqual(self.client.post.call_args.kwargs["timeout"], 300)
         self.assertEqual(payload["instrument_id"], "XNAS:AAPL")
         self.assertEqual(payload["evidence"][0]["component"], "news")
         self.assertEqual(payload["evidence"][0]["score"], 0.4)

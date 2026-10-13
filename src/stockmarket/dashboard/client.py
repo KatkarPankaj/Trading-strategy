@@ -66,6 +66,11 @@ class ApiClient:
                 headers=headers,
                 timeout=self._timeout if timeout is None else timeout,
             )
+        except requests.ReadTimeout as exc:
+            raise ApiError(
+                "API response timed out; the server may still be processing the request. "
+                "No automatic retry was made. Check run/order status before resubmitting."
+            ) from exc
         except requests.RequestException as exc:
             raise ApiError(f"API unreachable: {type(exc).__name__}") from exc
         return self._response_json(response, path)
@@ -86,6 +91,17 @@ class ApiClient:
                 "Research is unavailable (503); check the server's research pipeline "
                 "and market-session configuration.", 503)
         if response.status_code == 503 and path.startswith("/intelligence/"):
+            try:
+                payload = response.json()
+            except requests.exceptions.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("detail") == \
+                    "market intelligence service is not configured":
+                raise ApiError(
+                    "Market intelligence is not configured (503). This feature requires "
+                    "AI research, NEWS_PROVIDER=finnhub and FINNHUB_API_KEY or "
+                    "FINNHUB_API_KEY_FILE on the API server, then an API restart. "
+                    "The paper auto loop is a separate workflow; check its cycle results.", 503)
             raise ApiError(
                 "Market intelligence is unavailable (503); check provider credentials, "
                 "news configuration and market-session coverage.", 503)

@@ -31,6 +31,7 @@ from stockmarket.core.models import (
 from stockmarket.core.resilience import RetryPolicy
 from stockmarket.core.trading_service import OrderTicket, TradingService
 from stockmarket.core.risk_portfolio import PortfolioRiskState
+from stockmarket.core.observability.health import HealthMonitor
 
 
 NOW = datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc)
@@ -96,6 +97,36 @@ class MarketDataProviderTests(unittest.TestCase):
         self.assertEqual(quote.instrument_id, self.instrument.instrument_id)
         self.assertEqual(quote.provider, self.raw_provider.name)
         self.assertEqual(self.raw_provider.quote_calls, 1)
+
+    def test_research_reads_record_activity_without_clearing_stale_execution_health(self):
+        health = HealthMonitor(clock=lambda: NOW)
+        self.provider._health = health
+        self.provider.get_ohlcv(
+            self.instrument, "1m", NOW - timedelta(minutes=3), NOW)
+        report = health.report()
+        self.assertEqual(report["last_research_data_timestamp"],
+                         self.raw_provider.bars.index.max().isoformat())
+        self.assertEqual(report["last_research_data_received_at"], NOW.isoformat())
+        self.assertIsNone(report["last_market_data_timestamp"])
+        self.assertFalse(report["checks"]["market_data"]["healthy"])
+        self.assertTrue(health.data_is_stale())
+
+    def test_rejected_research_bars_do_not_record_successful_activity(self):
+        health = HealthMonitor(clock=lambda: NOW)
+        self.provider._health = health
+        self.raw_provider.bars = pd.DataFrame()
+        with self.assertRaises(DataQualityError):
+            self.provider.get_ohlcv(
+                self.instrument, "1m", NOW - timedelta(minutes=3), NOW)
+        self.assertIsNone(health.report()["last_research_data_timestamp"])
+
+    def test_freshness_required_bars_update_execution_health_separately(self):
+        health = HealthMonitor(clock=lambda: NOW)
+        self.provider._health = health
+        self.provider.get_ohlcv(
+            self.instrument, "1m", NOW - timedelta(minutes=3), NOW, require_fresh=True)
+        self.assertTrue(health.report()["checks"]["market_data"]["healthy"])
+        self.assertIsNone(health.report()["last_research_data_timestamp"])
 
     def test_quote_for_wrong_instrument_is_rejected(self):
         self.raw_provider.quote = Quote(

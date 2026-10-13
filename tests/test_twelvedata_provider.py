@@ -66,6 +66,16 @@ class TwelveDataProviderTest(unittest.TestCase):
             self.sap, "1d", NOW - timedelta(days=5), NOW)
         self.assertTrue(df.empty)
 
+    def test_daily_bars_dated_before_intraday_start_are_trimmed_to_request(self):
+        from stockmarket.core.data.quality import validate_bars
+        start = NOW - timedelta(days=3)
+        transport = FakeTransport(bars("2026-10-02", "2026-10-05"))
+        df = self.provider(transport).get_ohlcv(self.sap, "1d", start, NOW)
+        self.assertEqual(list(df.index), [datetime(2026, 10, 5, tzinfo=timezone.utc)])
+        report = validate_bars(df, "1d", timezone=self.sap.timezone,
+                               requested_start=start, requested_end=NOW)
+        self.assertNotIn("OUT_OF_REQUEST_RANGE", report.issues)
+
     def test_error_json_with_http_200_is_mapped(self):
         cases = [(429, RateLimited), (401, DataUnavailable), (403, DataUnavailable),
                  (400, DataUnavailable), (500, ConnectionError)]
@@ -136,7 +146,27 @@ class TwelveDataProviderTest(unittest.TestCase):
         self.assertEqual(quote.timestamp, NOW)
         self.assertEqual(quote.provider, "twelvedata")
 
-    def test_requests_are_paced_per_minute(self):
+    def test_exhausted_minute_budget_raises_rate_limited_without_sending(self):
+        clock = [0.0]
+        transport = FakeTransport(*[bars("2026-10-05 14:00:00")] * 3)
+        provider = self.provider(transport, requests_per_minute=2,
+                                 monotonic=lambda: clock[0])
+        provider.get_quote(self.sap)
+        clock[0] = 15.0
+        provider.get_quote(self.sap)
+        clock[0] = 20.0
+        with self.assertRaises(RateLimited) as caught:
+            provider.get_quote(self.sap)
+        self.assertEqual(caught.exception.retry_after, 40.0)
+        self.assertEqual(len(transport.calls), 2)
+        clock[0] = 60.0
+        provider.get_quote(self.sap)
+        self.assertEqual(len(transport.calls), 3)
+
+    def test_resilient_scan_beyond_budget_waits_outside_timeout(self):
+        # Regression: the pacing wait used to run inside ResilientProvider's 10s timeout, so the
+        # first request over budget failed with ProviderTimeout -> DataUnavailable.
+        from stockmarket.core.data import DataPolicy, ResilientProvider
         clock = [0.0]
         slept = []
 
@@ -144,12 +174,18 @@ class TwelveDataProviderTest(unittest.TestCase):
             slept.append(seconds)
             clock[0] += seconds
 
-        transport = FakeTransport(*[bars("2026-10-05 14:00:00")] * 3)
-        provider = self.provider(transport, requests_per_minute=2,
-                                 monotonic=lambda: clock[0], sleep=sleep)
-        for _ in range(3):
-            provider.get_quote(self.sap)
-        self.assertEqual(slept, [60.0])
+        transport = FakeTransport(*[bars("2026-10-02", "2026-10-05")] * 3)
+        raw = self.provider(transport, requests_per_minute=2, monotonic=lambda: clock[0])
+        wrapped = ResilientProvider(raw, policy=DataPolicy(), clock=lambda: NOW, sleep=sleep)
+        try:
+            for _ in range(3):
+                df = wrapped.get_ohlcv(self.sap, "1d", NOW - timedelta(days=5), NOW)
+                self.assertEqual(len(df), 2)
+        finally:
+            wrapped.close()
+        self.assertEqual(len(transport.calls), 3)
+        self.assertIn(60.0, slept)
+        self.assertEqual(wrapped.breaker_state, "closed")
 
     def test_invalid_construction_rejected(self):
         with self.assertRaises(ValueError):

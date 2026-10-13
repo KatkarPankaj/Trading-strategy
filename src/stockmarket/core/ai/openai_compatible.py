@@ -52,6 +52,7 @@ class OpenAICompatibleProvider:
         self._api_key = api_key
         self._timeout = float(timeout)
         self._max_output_tokens = max_output_tokens
+        self._structured_outputs = parsed.hostname == "api.openai.com"
 
     def complete(self, system: str, user: str) -> str:
         return self.complete_with_usage(system, user)[0]
@@ -60,6 +61,23 @@ class OpenAICompatibleProvider:
         self, system: str, user: str,
     ) -> tuple[str, dict[str, int] | None]:
         """Return the chat message and provider-reported token usage when present."""
+        return self._request(system, user, {"type": "json_object"})
+
+    def complete_structured_with_usage(
+        self, system: str, user: str, name: str, schema: dict[str, Any],
+    ) -> tuple[str, dict[str, int] | None]:
+        if not self._structured_outputs:
+            return self.complete_with_usage(system, user)
+        return self._request(system, user, {
+            "type": "json_schema",
+            "json_schema": {
+                "name": name, "strict": True, "schema": _strict_schema(schema),
+            },
+        })
+
+    def _request(
+        self, system: str, user: str, response_format: dict[str, Any],
+    ) -> tuple[str, dict[str, int] | None]:
         options: dict[str, Any] = {}
         if self._max_output_tokens is not None:
             # Chat Completions "max_tokens"; some reasoning models require
@@ -72,7 +90,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            "response_format": response_format,
             **options,
         }).encode("utf-8")
         request = Request(
@@ -117,3 +135,23 @@ class OpenAICompatibleProvider:
                 and not isinstance(value, bool) and value >= 0
             } or None
         return content, reported
+
+
+def _strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Require every object field for OpenAI strict mode; nullable fields stay nullable."""
+    result: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "default":
+            continue
+        if isinstance(value, dict):
+            result[key] = _strict_schema(value)
+        elif isinstance(value, list):
+            result[key] = [
+                _strict_schema(item) if isinstance(item, dict) else item for item in value
+            ]
+        else:
+            result[key] = value
+    if result.get("type") == "object":
+        result["required"] = list(result.get("properties", {}))
+        result["additionalProperties"] = False
+    return result

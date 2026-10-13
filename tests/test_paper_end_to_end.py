@@ -21,7 +21,7 @@ from stockmarket.core.markets import default_markets
 from stockmarket.core.models import AssetClass
 from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
 from stockmarket.core.recovery import rebuild_portfolio
-from stockmarket.core.settings import load_settings
+from stockmarket.core.settings import ConfigurationError, load_settings
 from stockmarket.core.strategies import OrbVwapStrategy
 
 from test_personal_research import AS_OF, AdvisoryAI, ResearchData
@@ -105,6 +105,24 @@ class PaperEndToEndTests(unittest.TestCase):
         client = TestClient(create_app(ctx))
         self.addCleanup(client.close)
         return client
+
+    def test_finnhub_configuration_builds_market_intelligence_without_network(self):
+        env = dict(ENV, NEWS_PROVIDER="finnhub", FINNHUB_API_KEY="fixture-news-key")
+        analyst = AIAnalyst(self.ai, clock=self.clock)
+        ctx = build_context(
+            load_settings(env), env, store=self.store,
+            market_stats=market_stats, sector_of=lambda _: "TECHNOLOGY",
+            research_analyst=analyst,
+            research_strategies={"orb_vwap": OrbVwapStrategy()},
+            clock=self.clock, market_data_provider=self.data,
+        )
+        self.addCleanup(ctx.market_data.close)
+        self.assertIsNotNone(ctx.market_intelligence)
+        self.assertIsNotNone(ctx.research_pipeline)
+        producer = ctx.research_pipeline.news_evidence_producer
+        self.assertIs(producer.analyst, analyst)
+        self.assertEqual(producer.provider.name, "finnhub")
+        self.assertIs(producer.repository, self.store.news)
 
     # -- helpers driving the real HTTP API ------------------------------------------------
 
@@ -350,6 +368,61 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(blocked.json()["execution"], "PAPER_ORDER_REJECTED")
         self.assertIn("KILL_SWITCH", blocked.json()["order"]["error"])
         self.assert_untouched(client, audit_orders=("REJECTED",))
+
+    # -- opt-in paper auto loop ---------------------------------------------------------
+
+    def loop_context(self, **overrides):
+        env = dict(ENV, **overrides)
+        ctx = build_context(
+            load_settings(env), env, store=self.store,
+            market_stats=market_stats, sector_of=lambda _: "TECHNOLOGY",
+            research_analyst=AIAnalyst(self.ai, clock=self.clock),
+            research_strategies={"orb_vwap": OrbVwapStrategy()},
+            clock=self.clock, market_data_provider=self.data,
+        )
+        self.addCleanup(ctx.market_data.close)
+        return ctx
+
+    def test_paper_loop_is_disabled_by_default(self):
+        ctx = self.context()
+        self.assertIsNone(ctx.paper_loop)
+        response = self.client(ctx).get("/paper/loop", headers=HEADERS)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["state"], "DISABLED")
+
+    def test_paper_loop_is_built_from_env_but_only_started_with_the_app(self):
+        ctx = self.loop_context(PAPER_AUTO_LOOP="true", PAPER_AUTO_LOOP_TOP_N="2",
+                                PAPER_AUTO_LOOP_INTERVAL_MINUTES="30")
+        status = ctx.paper_loop.status()
+        self.assertEqual((status["state"], status["trading_mode"]), ("IDLE", "PAPER"))
+        self.assertEqual((status["universe_id"], status["market"]), ("US_ALL", "US"))
+        self.assertEqual((status["top_n"], status["interval_minutes"]), (2, 30))
+
+        client = self.client(ctx)
+        self.assertEqual(client.get("/paper/loop").status_code, 401)
+        self.assertEqual(client.get("/paper/loop", headers=HEADERS).json()["state"], "IDLE")
+
+        started, stopped = [], []
+        ctx.paper_loop.start = lambda: started.append(True)
+        ctx.paper_loop.stop = lambda: stopped.append(True)
+        with TestClient(create_app(ctx)):
+            self.assertEqual(started, [True])
+        self.assertEqual(stopped, [True])
+
+    def test_polling_loop_does_not_use_the_continuous_feed_staleness_trigger(self):
+        self.assertTrue(self.context().markets.is_regular_session("US", self.clock()))
+        codes = {code for code, _ in self.context().monitor.evaluate()}
+        self.assertIn("STALE_MARKET_DATA", codes)
+        loop_codes = {code for code, _ in self.loop_context(PAPER_AUTO_LOOP="true").monitor.evaluate()}
+        self.assertNotIn("STALE_MARKET_DATA", loop_codes)
+
+    def test_unsafe_paper_loop_configuration_fails_closed(self):
+        for overrides in ({"PAPER_AUTO_LOOP": "yes"},
+                          {"PAPER_AUTO_LOOP": "true", "PAPER_AUTO_LOOP_MARKET": "IN"},
+                          {"PAPER_AUTO_LOOP": "true", "PAPER_AUTO_LOOP_INTERVAL_MINUTES": "0"},
+                          {"PAPER_AUTO_LOOP": "true", "PAPER_AUTO_LOOP_TOP_N": "many"}):
+            with self.subTest(overrides=overrides), self.assertRaises(ConfigurationError):
+                self.loop_context(**overrides)
 
 
 if __name__ == "__main__":

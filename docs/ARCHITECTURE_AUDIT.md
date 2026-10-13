@@ -547,6 +547,66 @@ Remaining Milestone 2 limitations:
 - **Providers:** Twelve Data silently caps requests at 5000 bars; sector evidence is often UNKNOWN; Yahoo/Twelve Data/Mock remain research-only; no streaming.
 - **AI:** token estimates are coarse; component scores are model judgments, not measured factors; outcome feedback is still missing.
 
+Post-Milestone 2 dashboard verification (live US scan, Twelve Data free plan) found and fixed three defects. The suite now runs 441 tests, OK:
+
+- Twelve Data `get_ohlcv` now trims bars to the requested `[start, end]` window, which removes the false `OUT_OF_REQUEST_RANGE`.
+- Client-side pacing now raises `RateLimited(retry_after)` instead of sleeping inside the `ResilientProvider` timeout.
+- The AI strategy-selection timestamp was validated against the earlier assessment time, so a correctly timed second AI call failed as `AI_INVALID`. It is now bounded by the assessment's `created_at` and a post-call clock.
+
+`SCHEMA_VALIDATION_FAILED` errors now report field locations and error types only, never model output values, so intermittent schema failures can be diagnosed. The News & AI tab shows only news AI analyses, and no news provider is configured; candidate AI results appear in Research and Opportunities. Health reports `market_data` unhealthy because research scans do not update the health market-data timestamp.
+
+### 18.3 Opt-in local PAPER auto loop
+
+At the user's request, a paper-only local loop was added to verify algorithm behaviour with live quotes. Before this, the API bootstrap supplied no `market_stats` or `sector`, so every autonomous entry failed closed with `*_UNKNOWN`. Changes:
+
+- `core/market_stats.py` derives ADV, expected slippage and correlated exposure from completed daily bars, and fails closed when bars or FX are missing. Instrument masters may carry `sector`/`industry`; `config/instruments_us_paper.json` lists 10 US names.
+- `PaperPositionManager.flatten` closes open positions through RiskEngine/OrderManager (`END_OF_DAY_FLATTEN`).
+- `core/paper_loop.py` (`PAPER_AUTO_LOOP`, default off) runs deterministic slot-keyed cycles during the regular session. It flattens near the close, switches to exits only while the kill switch is active, recovers unfinished cycles at startup, and stops after repeated failures. It is rejected in LIVE mode, with a live executor, or in personal-research mode. `GET /paper/loop` reports its status. With the loop enabled, the auto kill-switch monitor skips only the continuous-feed `STALE_MARKET_DATA` trigger, because it tripped immediately in a live run under polling. Per-order quote freshness checks still fail closed, and all other auto triggers remain active.
+- Design decision: under a kill switch the loop keeps managing exits instead of stopping. This follows the existing documented policy that exits are allowed and still risk-checked.
+- Tests: `test_market_stats.py`, `test_paper_loop.py`, flatten tests, and bootstrap/API loop tests. The full suite ran 461 tests, OK.
+
+This is not a production scheduler. Reservations and the loop are process-local, and fills are simulated. Results show rule and plumbing behaviour, not strategy edge.
+
+The October 13 paper cycles rejected SPY and QQQ before deterministic signal
+generation because the model emitted unsupported `component_scores.momentum`
+and `component_scores.volume` fields. JSON mode guaranteed syntax, not schema
+adherence. Requests to `api.openai.com` now supply the exact task schema with
+strict structured outputs; local validation and trading safety gates remain
+authoritative. Other compatible endpoints retain their existing JSON-mode
+contract. Research scans do not establish execution-feed freshness, and PC
+sleep can interrupt the local loop.
+
+After strict AI outputs were enabled, delayed slots still failed with
+`OPPORTUNITY_STALE`: a 12:00 ET slot actually began at 12:18 ET but retained
+12:00 as the research timestamp. The loop now omits the optional `as_of`,
+using the cycle service's existing current-time default for new requests and
+persisted-time default for retries. Slot keys remain unchanged; stale evidence
+continues to be rejected.
+
+Enabling Finnhub exposed a bootstrap constructor bug: `NewsEvidenceProducer`
+was built without its required analyst. Bootstrap now passes the configured
+research analyst; a network-free composition regression test verifies the
+news-backed market-intelligence service can be constructed.
+
+October 13 Trading Monitor inspection confirmed four visibility defects: no
+automatic-cycle history/candidate explanations in the tabs, candidate AI evidence
+absent from News & AI, research reads missing from health telemetry, and captions
+claiming all entries require manual acceptance despite the opt-in loop.
+The monitor now reuses authenticated persisted cycle/research/snapshot routes
+with a bounded ten-cycle selector and shows signal intent, no-trade reasons,
+risk stage, order status, configured strategy catalog and advisory AI evidence.
+Standalone NewsEvidenceProducer writes validated events and successful analyses
+through the existing NewsRepository; no migration/backfill or execution change.
+Separate process-local research-read timestamps make health reporting explicit,
+without treating historical reads as current execution prices or clearing stale
+data checks. Read-only monitoring never creates orders or invokes AI. Empty
+orders/positions/performance remain truthful when strategies produce NO_TRADE.
+Restart verification exposed Windows task-shell quoting stripping the research
+session JSON. The US task now supplies it through `options.env`; the task started
+the real API successfully. Older PARTIAL cycles still report research
+idempotency conflicts after prior configuration changes; those records are
+preserved and the monitor displays their failure, not a successful recovery.
+
 ### Recommended next implementation phase
 
 Milestone 3 should add cross-process reservations and leases (DB-backed), inject the remaining real clocks, add timestamped FX observations, verify official India calendars, and close the outcome-feedback loop. Keep scheduled or unattended trading and live brokers out of scope until a separate safety phase. The earlier paragraph below remains as historical context.

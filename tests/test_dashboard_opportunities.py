@@ -65,6 +65,7 @@ class OpportunityDashboardTests(unittest.TestCase):
         self.client.post.assert_called_once()
         path, payload = self.client.post.call_args.args
         self.assertEqual(path, "/intelligence/opportunities")
+        self.assertEqual(self.client.post.call_args.kwargs["timeout"], 300)
         self.assertEqual(payload["instrument_ids"], ["XNAS:AAPL"])
         self.assertTrue(payload["as_of"].endswith("+00:00"))
         self.assertEqual(ui.session_state["market_intelligence_result"]["execution"],

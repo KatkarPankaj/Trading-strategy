@@ -28,6 +28,26 @@ registry, or explicit research market-session map. Consequently `POST
 OpenAI-compatible endpoint with `AI_BASE_URL` (base URL ending in `/v1` where
 applicable), `AI_MODEL`, and `AI_API_KEY` or `AI_API_KEY_FILE`. The endpoint
 must use HTTPS; HTTP is accepted only for loopback development.
+For `api.openai.com`, advisory requests use strict JSON Schema structured
+outputs derived from the task's Pydantic schema. Use a model supporting
+structured outputs (the local setup uses `gpt-4.1-mini`). All object fields
+are required on the wire; nullable fields may be null. Local validation still
+checks ranges, identities, citations and cross-field rules. Unsupported models
+fail closed; requests never silently retry using weaker JSON mode.
+Other OpenAI-compatible endpoints retain JSON mode and local strict validation
+because their structured-output support has not been established.
+The Opportunities tab's `/intelligence/opportunities` workflow additionally
+requires a news provider: configure `NEWS_PROVIDER=finnhub` and
+`FINNHUB_API_KEY` or `FINNHUB_API_KEY_FILE`, then restart the API. OpenAI and
+Twelve Data keys do not provide Finnhub news access. Without this configuration,
+that feature returns 503; the separately configured paper auto loop can still
+run and reject candidates for missing evidence or absent deterministic signals.
+The local "Start US Paper Auto-Loop API" task reads the Finnhub key from the
+ignored `secrets/finhub-api-key` file. The key is never embedded in the task.
+Dashboard advisory research and opportunity ranking use a bounded 300-second
+read timeout for provider and AI processing; other requests retain the normal
+10-second timeout. A read timeout does not cancel server-side processing and
+does not trigger an automatic retry. Check run/order status before resubmitting.
 `AI_TIMEOUT_SECONDS` defaults to 20 and is bounded to 1-120 seconds.
 Optional cost controls: `AI_MAX_RETRIES` (0-3, default 0) retries only
 timeouts and HTTP 408/429/5xx; `AI_TOKEN_BUDGET` caps per-process token use
@@ -179,6 +199,82 @@ before it can fill. An expiring account-scope lease prevents concurrent cycle
 runs; expired runs still require explicit recovery rather than automatic
 takeover.
 
+## Opt-in PAPER auto loop (local algorithm verification)
+
+The Trading Monitor shows loop state above the tabs. Use the sidebar's
+"Paper cycle to inspect" selector to review up to ten recent persisted cycles:
+Research shows run history/context; Opportunities shows deterministic intent,
+strategy reasons, risk stage and order status; Strategies shows the run's
+configured catalog and advisory selections; News & AI shows persisted
+assessments and snapshot evidence. These views use authenticated read-only API
+routes and do not start research or submit orders. COMPLETE means processing
+finished, not that an entry was generated or filled.
+
+Standalone news research now saves validated news events and successful news
+analyses through the existing news repository. Old events are not backfilled;
+automatic-cycle snapshot evidence remains a separate persisted source and is
+displayed separately. A failed AI analysis never becomes a successful record.
+
+Health exposes `last_research_data_timestamp` (the newest bar in the most recent
+validated historical response) and `last_research_data_received_at` (when that
+read completed). Neither is an execution-feed freshness approval. Only validated
+quotes/freshness-required bars update `last_market_data_timestamp`; missing or
+stale execution data continues to report DEGRADED. Activity timestamps are
+process-local and reset at restart; cycle/research history remains in the database.
+
+`PAPER_AUTO_LOOP=true` builds a background loop inside the single API process
+that runs the existing restart-safe PAPER cycle on a fixed cadence during the
+regular session of one market. It never runs in LIVE mode, with a live
+executor, or with `PERSONAL_RESEARCH=true`; unsafe or unparseable settings are
+startup `ConfigurationError`s. Defaults are off.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PAPER_AUTO_LOOP` | `false` | `true`/`false` only |
+| `PAPER_AUTO_LOOP_MARKET` | first of `MARKETS` | must be an enabled market |
+| `PAPER_AUTO_LOOP_UNIVERSE` | `<MARKET>_ALL` | scanner universe |
+| `PAPER_AUTO_LOOP_INTERVAL_MINUTES` | `15` | cadence, aligned to wall-clock slots |
+| `PAPER_AUTO_LOOP_TOP_N` | `3` | capped by the autonomous cycle bound |
+| `PAPER_EOD_FLATTEN_MINUTES` | `10` | minutes before close to stop entries and flatten |
+| `MARKET_STATS_LOOKBACK_DAYS` | `20` | completed daily bars for ADV/slippage/correlation |
+
+Each tick: outside the session it does nothing; in the last
+`PAPER_EOD_FLATTEN_MINUTES` it closes every open paper position for the market
+(`END_OF_DAY_FLATTEN`, `SELL_TO_CLOSE`/`COVER` through RiskEngine and
+OrderManager); while the kill switch is active it only manages exits; otherwise
+it runs one cycle with the deterministic idempotency key
+`loop-<UNIVERSE>-<UTC slot>` so a restart within a slot cannot duplicate
+entries. The slot identifies the request, not the age of its evidence: new
+cycles use the service's current clock, and retries retain the persisted
+research timestamp. This avoids stale research after host sleep without
+relaxing freshness checks. Unfinished cycles are recovered at startup. Consecutive failures
+(including provider rate limits) stop the loop; restart the API to resume.
+`GET /paper/loop` (bearer token) reports state, last result and the next slot.
+
+Entries need liquidity, slippage, correlation and sector inputs. The API now
+derives ADV, expected slippage and correlated exposure from completed daily
+bars (`core/market_stats.py`) and sector from the instrument master; if any
+input is missing, entries fail closed with the existing `*_UNKNOWN` reasons.
+Use `config/instruments_us_paper.json` (via `INSTRUMENT_MASTER_FILE`) or another
+reviewed master, a separate database, and the VS Code task
+"Start US Paper Auto-Loop API". When AI research is configured, startup also
+requires `RESEARCH_SESSIONS` for the loop market (fail closed otherwise).
+
+With `KILL_SWITCH_AUTO=true`, the auto monitor still enforces daily-loss,
+drawdown, broker-error, abnormal-move, unexpected-position and health triggers.
+While the loop is enabled, it skips the continuous-feed `STALE_MARKET_DATA`
+trigger: a polling loop receives no data between ticks, so that trigger would
+fire within seconds of every session open. Per-order quote freshness
+(`ResilientProvider` validation and RiskEngine `max_market_data_age`) still
+blocks any entry on stale data.
+
+Limitations: fills are simulated against quotes (no queue, partial-fill or
+market-impact realism); Twelve Data free-plan pacing and daily credits limit
+universe size and cadence (prefer a 30-minute interval and `TOP_N` 1–2); every
+cycle may spend AI tokens; reservations remain process-local (one worker).
+A profitable or unprofitable run verifies the plumbing and rule behaviour, not
+strategy edge; judge the strategy only with proper backtests and many sessions.
+
 ## Docker Compose
 
 The sample stack runs a single paper API process and PostgreSQL. Before startup:
@@ -241,9 +337,11 @@ restore in an isolated environment.
   recovery objective.
 - The API process keeps runtime order and gate state in memory and is limited to
   one worker.
-- PAPER cycle runs and executor/fill records are durable, but cycles and
-  position-exit evaluations are invoked manually. There is no scheduler,
-  unattended-operation evidence, or production-readiness claim. Active-order
+- PAPER cycle runs and executor/fill records are durable. Cycles and
+  position-exit evaluations are invoked manually unless the opt-in, paper-only
+  `PAPER_AUTO_LOOP` is enabled (see above); it is an in-process local
+  verification aid, not unattended-operation evidence or a production
+  scheduler. Active-order
   reservations are process-local; multi-worker order submission remains
   unsupported.
 - The repository does not bundle AI/Finnhub credentials/configuration, research-

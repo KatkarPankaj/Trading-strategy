@@ -117,6 +117,8 @@ class AIStrategySelectionTests(unittest.TestCase):
         failed_result, failed_selection = self.select(self.make_analyst(malformed))
         self.assertFalse(failed_result.ok)
         self.assertIn("SCHEMA_VALIDATION_FAILED", failed_result.error)
+        self.assertIn("action:extra_forbidden", failed_result.error)
+        self.assertNotIn("BUY", failed_result.error)
         self.assertIsNone(failed_selection)
 
         unavailable = StaticProvider(RuntimeError("provider offline"))

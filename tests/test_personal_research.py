@@ -413,3 +413,5 @@ class PersonalBootstrapTests(unittest.TestCase):
             item.universe_id for item in context.scanner.list_universes()})
         with self.assertRaises(ConfigurationError):
             build_context(load_settings(env), dict(env, PERSONAL_RESEARCH="false", INSTRUMENT_BOOTSTRAP="none"), store=store)
+        with self.assertRaisesRegex(ConfigurationError, "PERSONAL_RESEARCH"):
+            build_context(load_settings(env), dict(env, PAPER_AUTO_LOOP="true"), store=store)
