@@ -247,9 +247,40 @@ it runs one cycle with the deterministic idempotency key
 entries. The slot identifies the request, not the age of its evidence: new
 cycles use the service's current clock, and retries retain the persisted
 research timestamp. This avoids stale research after host sleep without
-relaxing freshness checks. Unfinished cycles are recovered at startup. Consecutive failures
-(including provider rate limits) stop the loop; restart the API to resume.
-`GET /paper/loop` (bearer token) reports state, last result and the next slot.
+relaxing freshness checks. Signal generation, like personal research, excludes
+the still-forming intraday bar after validating the full provider response.
+Unfinished cycles are recovered at startup. PARTIAL/FAILED cycles and startup
+recovery failures count towards the failure limit; a stopped loop cannot submit
+even through a direct tick. Resolve the reported failure before restarting the
+API. `GET /paper/loop` (bearer token) reports state, last result, failure counts
+and per-cycle startup recovery failures.
+
+When recovery finds a research idempotency conflict caused by configuration
+changes, it terminates the old cycle as `FAILED / RECOVERY_OBSOLETE` without
+retrying entries. The original request, failure, candidate records and events
+are retained; a timestamped recovery disposition and new events explain the
+termination. It releases the old cycle scope so a new slot can use current
+configuration. This is a resolved obsolete cycle, not a successful trade.
+
+Migration V17 adds a durable account submission reservation. A competing
+submitter cannot acquire it, including after expiry, without reconciliation.
+Submission checks persisted order/fill identities against its in-memory state;
+stale workers fail closed rather than spend stale cash. Interrupted claims
+require reconciliation. Startup recovery removes failed or expired claims only
+after a clean order/position reconciliation; an unexpired ACTIVE claim blocks
+recovery. Never run a second worker as a way to clear a claim. Cycle lease
+renewal/ownership checks use the injected decision clock and do not revive an
+expired lease.
+
+PaperBroker independently rejects stale/future/naive quotes and will not match
+a resting order against an expired cached quote. Durable resting fills and
+executor state are written transactionally; a persistence failure restores the
+in-memory portfolio and executor record instead of leaving a phantom fill.
+The Orders tab separates accepted orders from actual simulated fills using
+the authenticated read-only `GET /paper/fills` route. Health displays loop and
+startup-recovery errors. These monitoring reads do not invoke AI or execution.
+Realized PnL is gross price PnL; fees are recorded separately and deducted from
+cash. For a fully closed fixture, net PnL is gross realized PnL minus fees.
 
 Entries need liquidity, slippage, correlation and sector inputs. The API now
 derives ADV, expected slippage and correlated exposure from completed daily
@@ -271,7 +302,11 @@ blocks any entry on stale data.
 Limitations: fills are simulated against quotes (no queue, partial-fill or
 market-impact realism); Twelve Data free-plan pacing and daily credits limit
 universe size and cadence (prefer a 30-minute interval and `TOP_N` 1–2); every
-cycle may spend AI tokens; reservations remain process-local (one worker).
+cycle may spend AI tokens; the token budget and OrderManager remain
+process-local. Account submission claims are durable, but this is still a
+single-worker application, not a validated multi-worker execution system.
+Actual reported AI usage above the configured token budget invalidates that
+response; it never supplies fallback trading advice. Budgets reset on restart.
 A profitable or unprofitable run verifies the plumbing and rule behaviour, not
 strategy edge; judge the strategy only with proper backtests and many sessions.
 

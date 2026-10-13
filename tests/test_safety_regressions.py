@@ -116,7 +116,7 @@ class KillSwitchTests(Harness):
 
         # Documented policy: risk-reducing exits stay possible while entries are halted.
         self.clock.at = AS_OF + timedelta(minutes=10)
-        self.data.price = proposal["provenance"]["signal_summary"]["target_price"] + 0.3
+        self.data.price = round(proposal["provenance"]["signal_summary"]["target_price"] + 0.3, 2)
         managed = restarted.post("/paper/positions/manage", headers=HEADERS)
         self.assertEqual(managed.status_code, 200, managed.text)
         exit_order = managed.json()["positions"][0]["order"]

@@ -30,7 +30,7 @@ class _Gate:
 class _Cycles:
     """Mirrors AutonomousPaperTradingService.run idempotency: one run per key."""
 
-    def __init__(self, status="COMPLETED"):
+    def __init__(self, status="COMPLETE"):
         self.status = status
         self.runs = {}
         self.calls = []
@@ -109,7 +109,7 @@ class PaperLoopTests(TestCase):
                                max_consecutive_failures=2)
         self.assertEqual(loop.tick()["action"], "FAILED")
         self.assertEqual(loop.status()["consecutive_failures"], 1)
-        loop.cycles.status = "COMPLETED"
+        loop.cycles.status = "COMPLETE"
         clock["now"] = IN_SESSION.replace(minute=30)
         self.assertEqual(loop.tick()["consecutive_failures"], 0)
 
@@ -145,6 +145,34 @@ class PaperLoopTests(TestCase):
     def test_next_wait_aligns_to_the_bucket_boundary(self):
         loop, _, _ = _loop(IN_SESSION)
         self.assertAlmostEqual(loop.seconds_until_next(IN_SESSION), 7 * 60 + 29 - 0.0, places=0)
+
+    def test_partial_cycles_exhaust_failure_limit_and_stopped_ticks_do_not_submit(self):
+        loop, positions, clock = _loop(
+            IN_SESSION, cycles=_Cycles(status="PARTIAL"), max_consecutive_failures=2)
+        loop.tick()
+        clock["now"] = IN_SESSION.replace(minute=30)
+        loop.tick()
+        self.assertEqual(loop.status()["state"], "STOPPED_AFTER_FAILURES")
+        calls = len(loop.cycles.calls)
+        self.assertEqual(loop.tick()["action"], "STOPPED_AFTER_FAILURES")
+        self.assertEqual(len(loop.cycles.calls), calls)
+        positions.manage.assert_not_called()
+
+    def test_recovery_failure_threshold_blocks_first_entry_tick(self):
+        cycles = _Cycles()
+        cycles.repository.unfinished.return_value = [{"run_id": "r1"}, {"run_id": "r2"}]
+        cycles.recover.side_effect = RuntimeError("IdempotencyConflict")
+        loop, _, _ = _loop(IN_SESSION, cycles=cycles, max_consecutive_failures=2)
+        loop.recover_unfinished()
+        self.assertEqual(loop.status()["state"], "STOPPED_AFTER_FAILURES")
+        self.assertEqual(loop.tick()["action"], "STOPPED_AFTER_FAILURES")
+        self.assertEqual(cycles.calls, [])
+        self.assertEqual(len(loop.status()["recovery_failures"]), 2)
+
+    def test_naive_loop_clock_is_rejected_without_running_a_cycle(self):
+        loop, _, _ = _loop(IN_SESSION.replace(tzinfo=None))
+        self.assertEqual(loop.tick()["action"], "FAILED")
+        self.assertEqual(loop.cycles.calls, [])
 
     def test_background_wait_rechecks_the_wall_clock_after_host_sleep(self):
         loop, _, clock = _loop(IN_SESSION)

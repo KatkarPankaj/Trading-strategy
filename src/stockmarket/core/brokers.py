@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from math import isclose
 from threading import RLock
 from typing import Callable, Mapping
@@ -196,10 +197,14 @@ class PaperBroker(BrokerAdapter):
         market_status_fn: Callable[[str], bool] | None = None,
         execution_repository: object | None = None,
         fills_repository: object | None = None,
+        max_quote_age: timedelta = timedelta(seconds=60),
     ) -> None:
         if slippage_bps < 0 or fee_rate < 0:
             raise BrokerConfigError(
                 "slippage_bps and fee_rate must be non-negative")
+        if not isinstance(max_quote_age, timedelta) or max_quote_age <= timedelta(0):
+            raise BrokerConfigError("max_quote_age must be positive")
+        self._max_quote_age = max_quote_age
         self._pf = portfolio
         self._instruments = dict(instruments)
         self.supported_markets = frozenset(
@@ -274,6 +279,9 @@ class PaperBroker(BrokerAdapter):
             if order.order_type is OrderType.MARKET and order.instrument_id not in self._prices:
                 self._record_rejection(order, "no price available for market order")
                 raise BrokerRejected("no price available for market order")
+            if order.order_type is OrderType.MARKET and not self._quote_is_fresh(order.instrument_id):
+                self._record_rejection(order, "stale or future price for market order")
+                raise BrokerRejected("stale or future price for market order")
             broker_id = "PAPER-" + uuid5(
                 NAMESPACE_URL, f"paper-execution:{order.client_order_id}").hex
             rec = _PaperOrder(
@@ -391,23 +399,62 @@ class PaperBroker(BrokerAdapter):
         self._require_connected()
         if isinstance(price, bool) or not isinstance(price, (int, float)) or not 0 < price < float("inf"):
             raise BrokerError("price must be finite and greater than zero")
+        at = timestamp or self._clock()
+        now = self._clock()
+        if at.tzinfo is None or at.utcoffset() is None or now.tzinfo is None or now.utcoffset() is None:
+            raise BrokerError("quote and broker clock must be timezone-aware")
+        if not timedelta(0) <= now - at <= self._max_quote_age:
+            raise BrokerError("stale or future price update rejected")
         with self._lock:
             self._prices[instrument_id] = float(price)
-            self._price_times[instrument_id] = timestamp or self._clock()
+            self._price_times[instrument_id] = at
             if instrument_id in self._pf.positions():
-                self._pf.mark(instrument_id, price, timestamp or self._clock())
+                self._pf.mark(instrument_id, price, at)
             for rec in list(self._orders.values()):
                 if rec.order.instrument_id == instrument_id:
                     self._match(rec)
 
+    def _quote_is_fresh(self, instrument_id: str) -> bool:
+        at = self._price_times.get(instrument_id)
+        now = self._clock()
+        return (at is not None and at.tzinfo is not None and at.utcoffset() is not None
+                and now.tzinfo is not None and now.utcoffset() is not None
+                and timedelta(0) <= now - at <= self._max_quote_age)
+
     def _match(self, rec: _PaperOrder, *, persist: bool = True) -> None:
         if rec.status not in (OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED):
             return
+        checkpoint = self._pf.execution_checkpoint()
+        state = rec.status, rec.filled, rec.average_price, rec.error, rec.fill_events
+        transaction = (
+            self._execution_repository.transaction()
+            if self._execution_repository is not None else nullcontext())
+        try:
+            with transaction:
+                if self._execution_repository is not None:
+                    row = self._execution_repository.lock_order(rec.order.client_order_id)
+                    if row is None or (row["status"], row["filled_quantity"]) != (
+                        rec.status.value, rec.filled
+                    ):
+                        raise BrokerError("EXECUTION_STATE_STALE: reconcile the paper executor before matching")
+                if self._fills_repository is not None:
+                    durable = {(row["client_order_id"], row["fill_sequence"])
+                               for row in self._fills_repository.all()}
+                    local = {(fill.client_order_id, fill.fill_sequence) for fill in self._pf.fills}
+                    if durable != local:
+                        raise BrokerError("EXECUTION_STATE_STALE: rebuild the portfolio before matching")
+                self._apply_match(rec, persist=persist)
+        except BaseException:
+            self._pf.restore_execution_checkpoint(checkpoint)
+            rec.status, rec.filled, rec.average_price, rec.error, rec.fill_events = state
+            raise
+
+    def _apply_match(self, rec: _PaperOrder, *, persist: bool) -> None:
         instrument = self._instruments[rec.order.instrument_id]
         if not self._market_open(instrument.market):
             return
         price = self._prices.get(rec.order.instrument_id)
-        if price is None:
+        if price is None or not self._quote_is_fresh(rec.order.instrument_id):
             return
         buy = rec.order.side is OrderSide.BUY
         kind = rec.order.order_type

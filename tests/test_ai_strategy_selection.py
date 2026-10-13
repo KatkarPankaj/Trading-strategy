@@ -65,6 +65,7 @@ class AIStrategySelectionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIsInstance(result.output, StrategySelectionSchema)
         self.assertIsNotNone(selection)
+
         self.assertEqual(selection.instrument_id, "us-equity:NYSE:ABC")
         self.assertEqual(selection.as_of, NOW)
         self.assertEqual(selection.generated_at, NOW)
@@ -78,6 +79,18 @@ class AIStrategySelectionTests(unittest.TestCase):
         self.assertFalse(hasattr(selection, "action"))
         self.assertFalse(hasattr(selection, "order"))
         self.assertIn("cannot place orders", provider.last_system)
+
+    def test_response_exceeding_budget_is_not_actionable_advice(self):
+        class UsageProvider(StaticProvider):
+            def complete_with_usage(self, system, user):
+                return self.complete(system, user), {
+                    "prompt_tokens": 500, "completion_tokens": 600}
+        analyst = AIAnalyst(UsageProvider(response()), clock=lambda: NOW, token_budget=1000)
+        result, selection = self.select(analyst)
+        self.assertFalse(result.ok)
+        self.assertIsNone(selection)
+        self.assertEqual(result.error, "AI_BUDGET_EXHAUSTED")
+        self.assertTrue(analyst.usage.budget_exhausted)
 
     def test_unknown_strategy_name_is_rejected_without_a_selection(self):
         provider = StaticProvider(response(ranked_strategies=[{

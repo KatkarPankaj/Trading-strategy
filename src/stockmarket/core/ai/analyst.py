@@ -234,6 +234,12 @@ class AIAnalyst:
             "completion_tokens": completion_tokens, "usage_estimated": estimated,
         }
         response_hash = hashlib.sha256(str(raw).encode("utf-8")).hexdigest()
+        usage_total = self.usage
+        if self._token_budget is not None and (
+            usage_total.prompt_tokens + usage_total.completion_tokens > self._token_budget
+        ):
+            return self._result(task, False, None, "AI_BUDGET_EXHAUSTED",
+                                prompt_hash, response_hash, now, started, **token_fields)
         try:
             match = _FENCE.match(str(raw))
             output = schema.model_validate_json(

@@ -128,3 +128,12 @@ class PaperActivityDashboardTests(TestCase):
         interrupted["payload"]["failure"] = "IdempotencyConflict: changed research request"
         app._cycle_outcomes({"cycle": interrupted})
         ui.error.assert_called_once_with("IdempotencyConflict: changed research request")
+
+    @patch.object(app, "st")
+    def test_order_review_separates_orders_and_fills_without_execution(self, ui):
+        client = Mock()
+        client.get.side_effect = [[], {"trading_mode": "PAPER", "fills": []}]
+        app._orders(client)
+        client.get.assert_any_call("/paper/fills", limit=100)
+        ui.subheader.assert_any_call("Actual simulated paper fills")
+        client.post.assert_not_called()

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from threading import RLock
-from typing import Any, Callable, Mapping
-from uuid import UUID
+from typing import Any, Callable, Iterator, Mapping
+from uuid import UUID, uuid4
 
 from .aggregation import AggregatedDecision
 from .audit_trail import AuditContext, live_gaps
@@ -16,6 +17,7 @@ from .models import (
     RiskDecisionStatus, Signal, SignalSide, TradeIntent, coerce_trade_intent,
 )
 from .order_management import (
+    IdempotencyConflict,
     ManagedOrder,
     OrderManager,
     OrderRequest,
@@ -132,6 +134,7 @@ class TradingService:
         self._sizing_limits = sizing_limits
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._submit_lock = RLock()
+        self._reservation_depth = 0
         if store is not None:  # write-ahead: each transition is stored before the next step runs
             order_manager.on_change = self._persist_transition
 
@@ -143,16 +146,56 @@ class TradingService:
         strategy_decision: AggregatedDecision | None = None,
     ) -> TicketResult:
         with self._submit_lock:
-            return self._submit_locked(
-                ticket, actor=actor, strategy_decision=strategy_decision)
+            ticket = self._validated_ticket(ticket, strategy_decision=strategy_decision)
+            with self._execution_reservation():
+                return self._submit_locked(
+                    ticket, actor=actor, strategy_decision=strategy_decision)
 
-    def _submit_locked(
+    @contextmanager
+    def _execution_reservation(self) -> Iterator[None]:
+        if self._store is None or self._reservation_depth:
+            yield
+            return
+        owner = uuid4().hex
+        repository = self._store.execution_reservations
+        repository.acquire("PAPER", owner, self._clock())
+        self._reservation_depth += 1
+        try:
+            durable_fills = {
+                (row["client_order_id"], row["fill_sequence"])
+                for row in self._store.fills.all()
+            }
+            local_fills = {(fill.client_order_id, fill.fill_sequence) for fill in self.portfolio.fills}
+            durable_orders = {
+                (row["client_order_id"], row["status"], row["filled_quantity"])
+                for row in self._store.orders.all()
+            }
+            local_orders = {
+                (order.client_order_id, order.status.value, order.filled_quantity)
+                for order in self.order_manager.orders()
+            }
+            if durable_fills != local_fills or durable_orders != local_orders:
+                raise RuntimeError("EXECUTION_STATE_STALE: reconstruct and reconcile before submitting")
+            yield
+        except (AmbiguousTradeIntent, IdempotencyConflict, AutomaticSizingRejected):
+            repository.finish("PAPER", owner, failed=False)
+            raise
+        except BaseException:
+            repository.finish("PAPER", owner, failed=True)
+            if self._gate is not None:
+                self._gate.halt("EXECUTION_RESERVATION", "submission interrupted; reconcile before retrying")
+            raise
+        else:
+            repository.finish("PAPER", owner, failed=False)
+        finally:
+            self._reservation_depth -= 1
+
+    def _validated_ticket(
         self,
         ticket: OrderTicket,
         *,
-        actor: str = "system",
         strategy_decision: AggregatedDecision | None = None,
-    ) -> TicketResult:
+    ) -> OrderTicket:
         instrument = self.instruments.get(ticket.instrument_id)
         if instrument is None:
             raise UnknownInstrument(ticket.instrument_id)
@@ -181,6 +224,17 @@ class TradingService:
         trade_intent = ticket_trade_intent(ticket)
         if ticket.trade_intent is not trade_intent:
             ticket = replace(ticket, trade_intent=trade_intent)
+        return ticket
+
+    def _submit_locked(
+        self,
+        ticket: OrderTicket,
+        *,
+        actor: str = "system",
+        strategy_decision: AggregatedDecision | None = None,
+    ) -> TicketResult:
+        instrument = self.instruments[ticket.instrument_id]
+        trade_intent = ticket_trade_intent(ticket)
         now = self._clock()
         client_order_id = ticket.client_order_id or new_client_order_id()
 
@@ -234,7 +288,7 @@ class TradingService:
         if instrument is None:
             raise UnknownInstrument(signal.instrument_id)
 
-        with self._submit_lock:
+        with self._submit_lock, self._execution_reservation():
             now = self._clock()
             quote = self._quotes(signal.instrument_id)
             if quote is None:

@@ -132,6 +132,53 @@ class AutonomousPaperTradingTests(TestCase):
         self.assertEqual(execution.calls[0][2:], ("AUTOMATIC_SIZING", None))
         self.assertEqual(self.store.autonomous_paper_cycles.unfinished(), [])
 
+    def test_obsolete_configuration_recovery_terminates_without_retrying_entries(self):
+        from stockmarket.core.autonomous_research import IdempotencyConflict
+
+        class ChangedResearch(_Research):
+            def run(self, *args, **kwargs):
+                raise IdempotencyConflict("configuration changed")
+
+        execution = _Execution()
+        service = _service(self.store, research=ChangedResearch(), execution=execution)
+        with self.assertRaises(AutonomousPaperCycleError):
+            service.run("us-equities", idempotency_key="old-config",
+                        operator="operator", top_n=1)
+        failed = service.get_run(self.store.autonomous_paper_cycles.get_by_key("old-config")["run_id"])
+        self.assertEqual(failed["status"], "PARTIAL")
+        service.clock = lambda: NOW + timedelta(minutes=16)
+        recovered = service.recover(failed["run_id"])
+        self.assertEqual((recovered["status"], recovered["stage"]),
+                         ("FAILED", "RECOVERY_OBSOLETE"))
+        self.assertEqual(execution.calls, [])
+        self.assertEqual(self.store.autonomous_paper_cycles.unfinished(), [])
+        self.assertEqual(recovered["payload"]["failure"], failed["payload"]["failure"])
+        self.assertFalse(recovered["payload"]["recovery_disposition"]["entries_retried"])
+        self.assertGreater(len(recovered["events"]), len(failed["events"]))
+
+    def test_expired_cycle_cannot_submit_before_the_next_heartbeat(self):
+        state = {"now": NOW}
+
+        class SlowResearch(_Research):
+            def run(self, *args, **kwargs):
+                state["now"] += timedelta(minutes=16)
+                return super().run(*args, **kwargs)
+
+        execution = _Execution()
+        service = _service(self.store, research=SlowResearch(), execution=execution,
+                           clock=lambda: state["now"])
+        with self.assertRaisesRegex(AutonomousPaperCycleError, "lease was lost"):
+            service.run("us-equities", idempotency_key="expired-during-research",
+                        operator="operator", top_n=1)
+        self.assertEqual(execution.calls, [])
+        run = self.store.autonomous_paper_cycles.get_by_key("expired-during-research")
+        owner = self.database.query(
+            "SELECT owner_token FROM autonomous_paper_cycle_locks WHERE run_id = ?",
+            (run["run_id"],))[0]["owner_token"]
+        self.assertFalse(self.store.autonomous_paper_cycles.renew_lock(
+            run["run_id"], owner_token=owner,
+            lease_until=state["now"] + timedelta(minutes=15), now=state["now"]))
+
     def test_candidate_evaluation_uses_time_after_research_evidence_is_created(self):
         clock_state = {"now": NOW}
         evaluation_times = []
@@ -275,7 +322,7 @@ class AutonomousPaperTradingTests(TestCase):
             as_of=NOW,
             payload=payload,
             owner_token="previous-process",
-            lease_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+            lease_until=NOW - timedelta(seconds=1),
         )
 
         recovered = service.recover(run_id)

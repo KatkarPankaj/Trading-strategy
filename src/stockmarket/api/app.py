@@ -631,6 +631,11 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def trades(limit: int = Query(default=100, ge=1, le=1000)) -> list[dict[str, Any]]:
         return _plain(ctx.store.trades.recent(limit))
 
+    @app.get("/paper/fills", dependencies=[Depends(auth)])
+    def paper_fills(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
+        return {"trading_mode": TradingMode.PAPER.value,
+                "fills": _plain(ctx.store.fills.recent(limit))}
+
     @app.get("/portfolio", dependencies=[Depends(auth)])
     def portfolio() -> dict[str, Any]:
         p = ctx.primary.portfolio

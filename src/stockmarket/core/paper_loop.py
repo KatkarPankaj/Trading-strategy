@@ -72,10 +72,12 @@ class PaperTradingLoop:
         self._last: dict[str, Any] | None = None
         self._ticks = 0
         self._recovered: list[str] = []
+        self._recovery_failures: list[dict[str, str]] = []
         self.wait_poll_seconds = 30.0
 
     # --- deterministic scheduling primitives -------------------------------------------
     def bucket(self, at: datetime) -> datetime:
+        self._aware(at)
         at = at.astimezone(timezone.utc)
         minutes = at.hour * 60 + at.minute
         floored = minutes - minutes % self.settings.interval_minutes
@@ -95,21 +97,33 @@ class PaperTradingLoop:
         recovered: list[str] = []
         for run in self.cycles.repository.unfinished():
             try:
-                self.cycles.recover(run["run_id"])
+                result = self.cycles.recover(run["run_id"])
+                if result is not None and result.get("status") != "COMPLETE" \
+                        and result.get("stage") != "RECOVERY_OBSOLETE":
+                    raise RuntimeError(f"recovery ended with {result.get('status')}")
                 recovered.append(run["run_id"])
-            except Exception:  # noqa: BLE001 - reported and counted, the loop keeps its fail-closed limits
+            except Exception as exc:  # noqa: BLE001 - reported and counted, the loop keeps its fail-closed limits
                 _log.exception("paper loop could not recover cycle %s", run["run_id"])
+                self._recovery_failures.append({
+                    "run_id": run["run_id"], "error": f"{type(exc).__name__}: {exc}"})
                 self._failures += 1
+                if self._failures >= self.settings.max_consecutive_failures:
+                    self._state = "STOPPED_AFTER_FAILURES"
+                    self._stop.set()
+                    break
         self._recovered = recovered
         return recovered
 
     def tick(self) -> dict[str, Any]:
         """Run at most one cycle or one exit pass for the current time."""
         with self._lock:
+            if self._state == "STOPPED_AFTER_FAILURES":
+                return {"action": self._state, "consecutive_failures": self._failures}
             now = self.clock()
             self._ticks += 1
             market = self.settings.market
             try:
+                self._aware(now)
                 if not self.markets.is_regular_session(market, now):
                     result = {"action": "MARKET_CLOSED"}
                 elif now >= self._close_at(now) - timedelta(minutes=self.settings.eod_flatten_minutes):
@@ -128,8 +142,9 @@ class PaperTradingLoop:
                         top_n=self.settings.top_n)
                     result = {"action": "CYCLE", "idempotency_key": key,
                               "run_id": run.get("run_id"), "status": run.get("status")}
-                    if run.get("status") == "FAILED":
-                        raise RuntimeError(f"paper cycle {run.get('run_id')} failed")
+                    if run.get("status") != "COMPLETE":
+                        raise RuntimeError(
+                            f"paper cycle {run.get('run_id')} ended with {run.get('status')}")
                 self._failures = 0
             except Exception as exc:  # noqa: BLE001 - counted; repeated failures stop the loop
                 self._failures += 1
@@ -151,6 +166,8 @@ class PaperTradingLoop:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        if self._state == "STOPPED_AFTER_FAILURES":
+            raise RuntimeError("restart the API after resolving paper-loop failures")
         self._stop.clear()
         self._state = "RUNNING"
         self._thread = threading.Thread(target=self._run, name="paper-loop", daemon=True)
@@ -188,4 +205,10 @@ class PaperTradingLoop:
             "ticks": self._ticks,
             "recovered_runs": list(self._recovered),
             "last": self._last,
+            "recovery_failures": list(self._recovery_failures),
         }
+
+    @staticmethod
+    def _aware(at: datetime) -> None:
+        if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+            raise ValueError("paper-loop clock must be timezone-aware")

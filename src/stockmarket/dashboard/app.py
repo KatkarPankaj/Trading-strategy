@@ -79,7 +79,7 @@ def main() -> None:
         lambda: _portfolio(client), lambda: _orders(client),
         lambda: _pnl(client), lambda: _strategies(client, activity),
         lambda: _news(client, activity), lambda: _risk(client),
-        lambda: _health(health), lambda: _audit(client),
+        lambda: _health(health, activity), lambda: _audit(client),
     ]
     for tab, render in zip(tabs, renderers):
         with tab:
@@ -540,6 +540,10 @@ def _orders(client: ApiClient) -> None:
         "the enabled local paper loop may submit automatically. Both paths require final RiskEngine approval.")
     only_open = st.checkbox("Open orders only")
     _table(views.frame(_safe(client, "/orders", open_only=only_open)))
+    st.subheader("Actual simulated paper fills")
+    st.caption("An accepted order is not a fill. Fees, slippage and realized PnL below come from execution.")
+    fills = _safe(client, "/paper/fills", limit=100)
+    _table(views.frame(fills["fills"]) if fills else None, "No simulated fills recorded.")
 
 
 def _pnl(client: ApiClient) -> None:
@@ -606,8 +610,16 @@ def _risk(client: ApiClient) -> None:
     _table(views.frame(risk["recent_decisions"]))
 
 
-def _health(health: Any) -> None:
+def _health(health: Any, activity: dict[str, Any] | None = None) -> None:
     st.subheader("System health")
+    loop = (activity or {}).get("loop")
+    if loop is not None:
+        st.subheader("Paper loop and startup recovery")
+        st.json(loop)
+        if loop.get("state") == "STOPPED_AFTER_FAILURES":
+            st.error("Paper loop halted after repeated failures. Resolve failures before restarting the API.")
+        for failure in loop.get("recovery_failures", []):
+            st.error(f"Cycle {failure['run_id']}: {failure['error']}")
     if not health:
         st.error("Health report unavailable.")
         return

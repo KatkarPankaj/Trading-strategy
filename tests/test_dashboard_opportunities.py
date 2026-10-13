@@ -131,15 +131,16 @@ class OpportunityDashboardTests(unittest.TestCase):
     @patch.object(dashboard_app, "st")
     def test_order_review_reads_server_order_state(self, ui):
         ui.checkbox.return_value = False
-        self.client.get.return_value = [{
+        self.client.get.side_effect = [[{
             "mode": "PAPER",
             "symbol": "AAPL",
             "status": "FILLED",
-        }]
+        }], {"trading_mode": "PAPER", "fills": []}]
 
         dashboard_app._orders(self.client)
 
-        self.client.get.assert_called_once_with("/orders", open_only=False)
+        self.client.get.assert_any_call("/orders", open_only=False)
+        self.client.get.assert_any_call("/paper/fills", limit=100)
         ui.dataframe.assert_called_once()
 
     @patch.object(dashboard_app, "st")

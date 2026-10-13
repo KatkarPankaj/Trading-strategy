@@ -23,6 +23,7 @@ from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
 from stockmarket.core.recovery import rebuild_portfolio
 from stockmarket.core.settings import ConfigurationError, load_settings
 from stockmarket.core.strategies import OrbVwapStrategy
+from stockmarket.core.strategies.orb_vwap import OrbVwapConfig
 
 from test_personal_research import AS_OF, AdvisoryAI, ResearchData
 
@@ -90,12 +91,13 @@ class PaperEndToEndTests(unittest.TestCase):
         self.data = ControlledData(self.clock)
         self.ai = AdvisoryAI()
 
-    def context(self):
+    def context(self, *, auto_loop=False, allow_short=False, token_budget=None):
+        env = dict(ENV, PAPER_AUTO_LOOP=str(auto_loop).lower(), PAPER_AUTO_LOOP_TOP_N="1")
         ctx = build_context(
-            load_settings(ENV), ENV, store=self.store,
+            load_settings(env), env, store=self.store,
             market_stats=market_stats, sector_of=lambda _: "TECHNOLOGY",
-            research_analyst=AIAnalyst(self.ai, clock=self.clock),
-            research_strategies={"orb_vwap": OrbVwapStrategy()},
+            research_analyst=AIAnalyst(self.ai, clock=self.clock, token_budget=token_budget),
+            research_strategies={"orb_vwap": OrbVwapStrategy(OrbVwapConfig(allow_short=allow_short))},
             clock=self.clock, market_data_provider=self.data,
         )
         self.addCleanup(ctx.market_data.close)
@@ -180,6 +182,155 @@ class PaperEndToEndTests(unittest.TestCase):
 
     # -- tests -----------------------------------------------------------------------------
 
+    def test_actual_auto_loop_entry_exit_restart_and_no_duplicate_fill(self):
+        ctx = self.context(auto_loop=True)
+        client = self.client(ctx)
+        tick = ctx.paper_loop.tick()
+        self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
+        orders = self.store.orders.all()
+        self.assertEqual(len(orders), 1)
+        entry = orders[0]
+        self.assertEqual((entry["status"], entry["trade_intent"]), ("FILLED", "BUY"))
+        quantity, price = entry["filled_quantity"], entry["average_fill_price"]
+        opened = self.state(client)
+        self.assertEqual(opened["cash"]["USD"], STARTING_CASH - quantity * price)
+        self.assertEqual(opened["positions"], [(self.instrument_id, "LONG", quantity)])
+        self.assertEqual(len(opened["fills"]), 1)
+        self.assertEqual(ctx.paper_loop.tick()["run_id"], tick["run_id"])
+        self.assertEqual(self.state(client), opened)
+
+        self.clock.at += timedelta(minutes=1)
+        self.data.price = price - 2.0
+        exited = ctx.paper_position_manager.manage()
+        self.assertEqual(exited["positions"][0]["trigger_reason"], "STOP_LOSS")
+        final = self.state(client)
+        self.assertEqual(final["positions"], [])
+        self.assertEqual(len(final["fills"]), 2)
+        self.assertEqual(self.store.orders.all()[-1]["trade_intent"], "SELL_TO_CLOSE")
+        self.assertAlmostEqual(final["realized_pnl"], -2.0 * quantity)
+        self.assertAlmostEqual(final["cash"]["USD"], STARTING_CASH - 2.0 * quantity)
+        restarted = self.context(auto_loop=True)
+        self.assertEqual(self.state(self.client(restarted)), final)
+        self.assertTrue(restarted.recovery.recover().clean)
+        self.assertEqual(restarted.paper_loop.tick()["run_id"], tick["run_id"])
+        self.assertEqual(self.state(self.client(restarted)), final)
+
+    def test_actual_auto_loop_no_trade_produces_no_order(self):
+        self.data.intraday = ResearchData(breakout=False).intraday
+        self.data.price = 100.0
+        ctx = self.context(auto_loop=True)
+        tick = ctx.paper_loop.tick()
+        self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
+        run = ctx.autonomous_paper_trading.get_run(tick["run_id"])
+        self.assertTrue(run["candidates"])
+        self.assertTrue(all(candidate["status"] in {"NON_ACTIONABLE", "RESEARCH_REJECTED"}
+                            for candidate in run["candidates"]), run["candidates"])
+        self.assert_untouched(self.client(ctx), audit_orders=())
+
+    def test_actual_auto_loop_short_and_eod_cover_survive_restart(self):
+        from dataclasses import replace
+        instrument = self.store.instruments.get(self.instrument_id)
+        from stockmarket.api.bootstrap import instrument_from_row
+        self.store.instruments.save(replace(instrument_from_row(instrument), shortable=True))
+        self.data.intraday = self.data.frame(
+            self.data.intraday.index, [100.0] * 29 + [98.0, 150.0],
+            [1000.0] * 29 + [10000.0, 100000.0])
+        self.data.price = 98.0
+        self.ai = AdvisoryAI(bias="BEARISH")
+        ctx = self.context(auto_loop=True, allow_short=True)
+        tick = ctx.paper_loop.tick()
+        self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
+        entry = self.store.orders.all()[0]
+        quantity = entry["filled_quantity"]
+        self.assertEqual(entry["trade_intent"], "SHORT_SELL")
+        self.assertEqual(ctx.paper.portfolio.cash["USD"], STARTING_CASH + quantity * 98.0)
+        self.clock.at = AS_OF.replace(hour=19, minute=55)
+        self.data.price = 97.0
+        restarted = self.context(auto_loop=True, allow_short=True)
+        flattened = restarted.paper_loop.tick()
+        self.assertEqual(flattened["action"], "END_OF_DAY_FLATTEN")
+        self.assertEqual(flattened["result"]["positions"][0]["status"], "FILLED")
+        self.assertEqual(self.store.orders.all()[-1]["trade_intent"], "COVER")
+        final = self.state(self.client(restarted))
+        self.assertEqual(final["positions"], [])
+        self.assertEqual(len(final["fills"]), 2)
+        self.assertAlmostEqual(final["cash"]["USD"], STARTING_CASH + quantity)
+        self.assertAlmostEqual(final["realized_pnl"], quantity)
+        restarted.paper_loop.tick()
+        self.assertEqual(self.state(self.client(restarted)), final)
+
+    def assert_execution_quote_rejected(self, quote):
+        ctx = self.context(auto_loop=True)
+        ctx.paper_proposal_execution.quotes = lambda _: quote
+        tick = ctx.paper_loop.tick()
+        self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
+        run = ctx.autonomous_paper_trading.get_run(tick["run_id"])
+        candidate = run["candidates"][0]
+        self.assertEqual(candidate["status"], "EXECUTION_REJECTED")
+        self.assertEqual(candidate["payload"]["signal"]["status"], "SIGNAL_GENERATED")
+        self.assertEqual(candidate["payload"]["risk"]["status"], "RISK_APPROVED")
+        self.assert_untouched(self.client(ctx), audit_orders=())
+
+    def test_actual_loop_missing_execution_quote_is_rejected(self):
+        self.assert_execution_quote_rejected(None)
+
+    def test_actual_loop_fresh_research_cannot_replace_stale_execution_quote(self):
+        self.assert_execution_quote_rejected((102.0, AS_OF - timedelta(minutes=6)))
+
+    def test_actual_loop_ai_budget_exhaustion_never_creates_fallback_trade(self):
+        ctx = self.context(auto_loop=True, token_budget=1)
+        tick = ctx.paper_loop.tick()
+        self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
+        self.assertEqual(self.ai.users, [])
+        self.assert_untouched(self.client(ctx), audit_orders=())
+
+    def test_monitoring_orders_and_fills_is_read_only(self):
+        ctx = self.context(auto_loop=True)
+        ctx.paper_loop.tick()
+        client = self.client(ctx)
+        before, calls = self.state(client), len(self.ai.users)
+        for route in ("/paper/loop", "/paper/cycles", "/orders", "/portfolio",
+                      "/positions", "/signals", "/paper/fills", "/recovery"):
+            response = client.get(route, headers=HEADERS)
+            self.assertEqual(response.status_code, 200, response.text)
+            if route == "/paper/fills":
+                self.assertEqual(response.json()["trading_mode"], "PAPER")
+                self.assertEqual(len(response.json()["fills"]), 1)
+        self.assertEqual(self.state(client), before)
+        self.assertEqual(len(self.ai.users), calls)
+
+    def test_stale_second_context_cannot_submit_using_old_cash_or_positions(self):
+        first = self.context()
+        second = self.context()
+        client = self.client(first)
+        proposal = self.propose(client)
+        self.assertEqual(self.submit(client, proposal["proposal_id"]).status_code, 200)
+        before = self.state(client)
+        from stockmarket.core.trading_service import OrderTicket
+        from stockmarket.core.models import OrderSide, OrderType, TradeIntent
+        with self.assertRaisesRegex(RuntimeError, "EXECUTION_STATE_STALE"):
+            second.paper.submit(OrderTicket(
+                self.instrument_id, OrderSide.BUY, 1, OrderType.MARKET, "manual",
+                client_order_id="stale-worker",
+                trade_intent=TradeIntent.BUY))
+        self.assertEqual(self.state(client), before)
+        self.assertTrue(second.gate.halted)
+        restarted = self.context()
+        self.assertTrue(restarted.recovery.recover().clean)
+        self.assertEqual(self.state(self.client(restarted)), before)
+
+    def test_recovery_does_not_touch_an_active_execution_claim(self):
+        ctx = self.context()
+        self.store.execution_reservations.acquire("PAPER", "active-worker", self.clock())
+        report = ctx.recovery.recover()
+        self.assertFalse(report.clean)
+        self.assertEqual(report.discrepancies[0].kind, "EXECUTION_RESERVED")
+        self.assertEqual(report.orders_restored, 0)
+        self.assertEqual(self.store.db.query("SELECT owner_id FROM execution_reservations"),
+                         [{"owner_id": "active-worker"}])
+        self.assertEqual(self.store.fills.all(), [])
+        self.assertTrue(ctx.gate.halted)
+
     def test_research_to_paper_round_trip_survives_restart(self):
         client = self.client(self.context())
 
@@ -216,14 +367,14 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(self.state(client), after_entry)
 
         self.clock.at = AS_OF + timedelta(minutes=5)
-        self.data.price = 149.9
+        self.data.price = entry_price + 0.1
         monitored = client.post("/paper/positions/manage", headers=HEADERS)
         self.assertEqual(monitored.status_code, 200, monitored.text)
         self.assertEqual(monitored.json()["positions"][0]["status"], "MONITORED")
 
         self.clock.at = AS_OF + timedelta(minutes=10)
         target = proposal["provenance"]["signal_summary"]["target_price"]
-        self.data.price = target + 0.3
+        self.data.price = round(target + 0.3, 2)
         managed = client.post("/paper/positions/manage", headers=HEADERS)
         self.assertEqual(managed.status_code, 200, managed.text)
         exit_outcome = managed.json()["positions"][0]
@@ -267,7 +418,7 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertTrue(restarted.post("/recovery/reconcile", headers=HEADERS).json()["clean"])
 
         self.clock.at = AS_OF + timedelta(minutes=5)
-        self.data.price = proposal["provenance"]["signal_summary"]["stop_price"] - 0.1
+        self.data.price = round(proposal["provenance"]["signal_summary"]["stop_price"] - 0.1, 2)
         managed = restarted.post("/paper/positions/manage", headers=HEADERS)
         self.assertEqual(managed.status_code, 200, managed.text)
         outcome = managed.json()["positions"][0]

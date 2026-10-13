@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import fields, is_dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timezone, timedelta
 from enum import Enum
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -82,6 +82,49 @@ class _Repository:
             f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)}) "
             f"ON CONFLICT({key}) DO UPDATE SET {updates}",
             [row[c] for c in cols])
+
+
+class ExecutionReservationRepository(_Repository):
+    """A durable account-wide submission claim; expiry never permits automatic takeover."""
+
+    def acquire(self, account_id: str, owner_id: str, now: datetime) -> None:
+        with self._db.transaction():
+            self._db.execute(
+                """INSERT INTO execution_reservations
+                   (account_id, owner_id, state, acquired_at, lease_until)
+                   VALUES (?, ?, 'ACTIVE', ?, ?) ON CONFLICT(account_id) DO NOTHING""",
+                (account_id, owner_id, ts(now), ts(now + timedelta(minutes=5))))
+            row = self._db.query(
+                "SELECT owner_id FROM execution_reservations WHERE account_id = ?", (account_id,))[0]
+            if row["owner_id"] != owner_id:
+                raise ValueError("EXECUTION_RESERVED: account requires completion or reconciliation")
+
+    def finish(self, account_id: str, owner_id: str, *, failed: bool) -> None:
+        if failed:
+            self._db.execute(
+                """UPDATE execution_reservations SET state = 'RECOVERY_REQUIRED'
+                   WHERE account_id = ? AND owner_id = ?""", (account_id, owner_id))
+        else:
+            self._db.execute(
+                "DELETE FROM execution_reservations WHERE account_id = ? AND owner_id = ?",
+                (account_id, owner_id))
+
+    def recover(self, now: datetime) -> list[str]:
+        with self._db.transaction():
+            self.assert_recovery_allowed(now)
+            rows = self._db.query("SELECT * FROM execution_reservations")
+            for row in rows:
+                self._db.execute(
+                    """DELETE FROM execution_reservations
+                       WHERE account_id = ? AND owner_id = ? AND state = ? AND lease_until = ?""",
+                    (row["account_id"], row["owner_id"], row["state"], row["lease_until"]))
+            return [row["account_id"] for row in rows]
+
+    def assert_recovery_allowed(self, now: datetime) -> None:
+        rows = self._db.query(
+            "SELECT lease_until FROM execution_reservations WHERE state = 'ACTIVE'")
+        if any(datetime.fromisoformat(row["lease_until"]) > now for row in rows):
+            raise ValueError("EXECUTION_RESERVED: an account submission may still be active")
 
 
 class InstrumentRepository(_Repository):
@@ -248,6 +291,10 @@ class FillRepository(_Repository):
             "SELECT * FROM fills WHERE client_order_id = ? ORDER BY fill_sequence, timestamp",
             (client_order_id,))
 
+    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self._db.query(
+            "SELECT * FROM fills ORDER BY timestamp DESC, fill_id DESC LIMIT ?", (limit,))
+
 
 class PositionRepository(_Repository):
     def replace_all(self, positions: Iterable[Any], as_of: datetime) -> None:
@@ -276,6 +323,13 @@ class PaperExecutionRepository(_Repository):
             rows[0]["order_payload"] = json.loads(rows[0]["order_payload"])
             return rows[0]
         return None
+
+    def lock_order(self, client_order_id: str) -> dict[str, Any] | None:
+        suffix = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+        rows = self._db.query(
+            "SELECT status, filled_quantity FROM paper_execution_orders WHERE client_order_id = ?"
+            + suffix, (client_order_id,))
+        return rows[0] if rows else None
 
     def get_by_broker_order_id(self, broker_order_id: str) -> dict[str, Any] | None:
         rows = self._db.query(
@@ -1483,8 +1537,9 @@ class AutonomousPaperCycleRepository(_Repository):
         payload: Mapping[str, Any],
         owner_token: str,
         lease_until: datetime,
+        now: datetime | None = None,
     ) -> None:
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
         with self._db.transaction():
             existing = self._db.query(
                 "SELECT run_id FROM autonomous_paper_cycle_locks WHERE scope_key = ?",
@@ -1513,8 +1568,9 @@ class AutonomousPaperCycleRepository(_Repository):
         *,
         owner_token: str,
         lease_until: datetime,
+        now: datetime | None = None,
     ) -> bool:
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
         with self._db.transaction():
             run = self.get_run(run_id)
             if run is None or run["status"] in {"COMPLETE", "FAILED"}:
@@ -1554,19 +1610,28 @@ class AutonomousPaperCycleRepository(_Repository):
         *,
         owner_token: str,
         lease_until: datetime,
+        now: datetime | None = None,
     ) -> bool:
         with self._db.transaction():
             rows = self._db.query(
-                """SELECT scope_key FROM autonomous_paper_cycle_locks
+                """SELECT scope_key, lease_until FROM autonomous_paper_cycle_locks
                    WHERE run_id = ? AND owner_token = ?""",
                 (run_id, owner_token))
-            if not rows:
+            if not rows or datetime.fromisoformat(rows[0]["lease_until"]) <= (
+                now or datetime.now(timezone.utc)
+            ):
                 return False
             self._db.execute(
                 """UPDATE autonomous_paper_cycle_locks
                    SET lease_until = ? WHERE run_id = ? AND owner_token = ?""",
                 (ts(lease_until), run_id, owner_token))
             return True
+
+    def owns_lock(self, run_id: str, owner_token: str, now: datetime) -> bool:
+        rows = self._db.query(
+            """SELECT lease_until FROM autonomous_paper_cycle_locks
+               WHERE run_id = ? AND owner_token = ?""", (run_id, owner_token))
+        return bool(rows and datetime.fromisoformat(rows[0]["lease_until"]) > now)
 
     def update_run(
         self,
@@ -1797,3 +1862,4 @@ class Store:
         self.autonomous_research = AutonomousResearchRepository(db)
         self.signal_generations = SignalGenerationRepository(db)
         self.trade_proposals = TradeProposalRepository(db)
+        self.execution_reservations = ExecutionReservationRepository(db)

@@ -10,6 +10,8 @@ from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from .executors import TradingMode
+from .autonomous_research import IdempotencyConflict
+from .paper_lifecycle import PaperLifecycleError
 
 
 class AutonomousPaperCycleError(RuntimeError):
@@ -132,6 +134,7 @@ class AutonomousPaperTradingService:
                 payload=payload,
                 owner_token=owner_token,
                 lease_until=self._lease_until(),
+                now=now,
             )
         except ValueError as exc:
             raise AutonomousPaperCycleError(str(exc)) from exc
@@ -159,6 +162,7 @@ class AutonomousPaperTradingService:
             run_id,
             owner_token=owner_token,
             lease_until=self._lease_until(),
+            now=self._now(),
         ):
             return self.get_run(run_id)
         return self._execute(run_id, owner_token, recovering=True)
@@ -220,28 +224,40 @@ class AutonomousPaperTradingService:
             self._event(run_id, None, "CYCLE_STARTED", {
                 "recovering": recovering, "mode": TradingMode.PAPER.value})
             payload["position_management"] = self.positions.manage()
-            self._assert_lease(lease_lost, lease_error)
+            self._assert_lease(run_id, owner_token, lease_lost, lease_error)
 
             if self.gate.halted:
                 payload["halt_reason"] = self.gate.blocked_reason()
                 return self._finish(
                     run_id, payload, "PARTIAL", "HALTED", owner_token)
 
-            research_result = self.research.run(
-                request["universe_id"],
-                idempotency_key="paper-" + hashlib.sha256(
-                    request["idempotency_key"].encode()).hexdigest(),
-                mode=TradingMode.PAPER.value,
-                as_of=datetime.fromisoformat(request["as_of"]),
-                top_n=request["top_n"],
-            )
+            try:
+                research_result = self.research.run(
+                    request["universe_id"],
+                    idempotency_key="paper-" + hashlib.sha256(
+                        request["idempotency_key"].encode()).hexdigest(),
+                    mode=TradingMode.PAPER.value,
+                    as_of=datetime.fromisoformat(request["as_of"]),
+                    top_n=request["top_n"],
+                )
+            except IdempotencyConflict as exc:
+                if not recovering:
+                    raise
+                payload["recovery_disposition"] = {
+                    "reason": "RESEARCH_CONFIGURATION_CHANGED",
+                    "error": str(exc),
+                    "at": self._now().isoformat(),
+                    "entries_retried": False,
+                }
+                return self._finish(
+                    run_id, payload, "FAILED", "RECOVERY_OBSOLETE", owner_token)
             evaluation_as_of = self._now()
             research_run_id = str(research_result["run_id"])
             payload["research_run_id"] = research_run_id
             self.repository.update_run(
                 run_id, status="RUNNING", stage="RESEARCH_COMPLETE",
                 payload=payload, owner_token=owner_token)
-            self._assert_lease(lease_lost, lease_error)
+            self._assert_lease(run_id, owner_token, lease_lost, lease_error)
             selected = [
                 candidate for candidate in research_result.get("candidates", [])
                 if candidate.get("stage") == "STRATEGY_SELECTED"
@@ -267,7 +283,7 @@ class AutonomousPaperTradingService:
                 if candidate.get("stage") == "FAILED")
             completed = 0
             for candidate in selected:
-                self._assert_lease(lease_lost, lease_error)
+                self._assert_lease(run_id, owner_token, lease_lost, lease_error)
                 candidate_id = str(candidate["instrument_id"])
                 previous = self.repository.get_candidate(run_id, candidate_id)
                 if previous is not None and previous["status"] not in {
@@ -279,6 +295,7 @@ class AutonomousPaperTradingService:
                 try:
                     outcome = self._process_candidate(
                         run_id=run_id,
+                        owner_token=owner_token,
                         research_run_id=research_run_id,
                         candidate_id=candidate_id,
                         operator=request["operator"],
@@ -312,7 +329,7 @@ class AutonomousPaperTradingService:
                         run_id, candidate_id, "CANDIDATE_FAILED", outcome)
 
             payload["position_management"] = self.positions.manage()
-            self._assert_lease(lease_lost, lease_error)
+            self._assert_lease(run_id, owner_token, lease_lost, lease_error)
             payload["completed_candidates"] = completed
             payload["failed_candidates"] = failures
             status = "PARTIAL" if failures else "COMPLETE"
@@ -339,6 +356,7 @@ class AutonomousPaperTradingService:
         self,
         *,
         run_id: str,
+        owner_token: str,
         research_run_id: str,
         candidate_id: str,
         operator: str,
@@ -351,14 +369,14 @@ class AutonomousPaperTradingService:
             payload={"instrument_id": candidate_id, "stage": "SIGNAL_GENERATION"})
         signal_result = self.signals.generate(
             research_run_id, candidate_id, evaluation_as_of=as_of)
-        self._assert_lease(lease_lost, lease_error)
+        self._assert_lease(run_id, owner_token, lease_lost, lease_error)
         outcome: dict[str, Any] = {
             "instrument_id": candidate_id,
             "signal": signal_result,
             "execution": "PAPER",
         }
         if signal_result.get("status") != "SIGNAL_GENERATED":
-            outcome["status"] = "FAILED"
+            outcome["status"] = "SIGNAL_REJECTED"
             outcome["error"] = signal_result.get(
                 "reason", "signal generation rejected")
             return outcome
@@ -368,7 +386,7 @@ class AutonomousPaperTradingService:
             payload={**outcome, "stage": "RISK_EVALUATION"})
         risk_result = self.proposals.evaluate(
             research_run_id, candidate_id, evaluation_as_of=as_of)
-        self._assert_lease(lease_lost, lease_error)
+        self._assert_lease(run_id, owner_token, lease_lost, lease_error)
         outcome["risk"] = risk_result
         proposal = risk_result.get("trade_proposal")
         if risk_result.get("status") != "RISK_APPROVED" or not proposal:
@@ -383,13 +401,18 @@ class AutonomousPaperTradingService:
         self.repository.save_candidate(
             run_id, candidate_id, status="IN_PROGRESS",
             payload={**outcome, "stage": "ORDER_SUBMISSION"})
-        execution_result = self.execution.submit(
-            proposal_id,
-            operator=operator,
-            sizing_mode="AUTOMATIC_SIZING",
-            quantity=None,
-        )
-        self._assert_lease(lease_lost, lease_error)
+        try:
+            execution_result = self.execution.submit(
+                proposal_id,
+                operator=operator,
+                sizing_mode="AUTOMATIC_SIZING",
+                quantity=None,
+            )
+        except PaperLifecycleError as exc:
+            outcome["status"] = "EXECUTION_REJECTED"
+            outcome["error"] = str(exc)
+            return outcome
+        self._assert_lease(run_id, owner_token, lease_lost, lease_error)
         order = execution_result["order"]
         outcome["order"] = {
             "client_order_id": order.client_order_id,
@@ -471,6 +494,7 @@ class AutonomousPaperTradingService:
                     run_id,
                     owner_token=owner_token,
                     lease_until=self._lease_until(),
+                    now=self._now(),
                 ):
                     lease_error.append("paper cycle execution lease was lost")
                     lease_lost.set()
@@ -481,11 +505,15 @@ class AutonomousPaperTradingService:
                 lease_lost.set()
                 return
 
-    @staticmethod
     def _assert_lease(
+        self,
+        run_id: str,
+        owner_token: str,
         lease_lost: threading.Event,
         lease_error: list[str],
     ) -> None:
+        if not self.repository.owns_lock(run_id, owner_token, self._now()):
+            lease_lost.set()
         if lease_lost.is_set():
             raise AutonomousPaperCycleError(
                 "; ".join(lease_error) or "paper cycle execution lease was lost")
@@ -494,7 +522,7 @@ class AutonomousPaperTradingService:
         return self._aware(self.clock(), "clock").astimezone(timezone.utc)
 
     def _lease_until(self) -> datetime:
-        return datetime.now(timezone.utc) + self.lease_duration
+        return self._now() + self.lease_duration
 
     @staticmethod
     def _aware(value: datetime, name: str) -> datetime:

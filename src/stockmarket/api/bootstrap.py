@@ -491,10 +491,11 @@ def build_context(
     broker = PaperBroker(portfolio, instruments, clock=now,
         market_status_fn=lambda m: registry.is_regular_session(m, now()),
         execution_repository=store.paper_execution,
-        fills_repository=store.fills)
+        fills_repository=store.fills,
+        max_quote_age=timedelta(seconds=settings.max_market_data_age_seconds))
     gate = TradingGate(clock=now)
     order_manager = OrderManager(broker, clock=now)
-    strategies = StrategyConfigRegistry(store.strategy_configs)
+    strategies = StrategyConfigRegistry(store.strategy_configs, clock=now)
     risk_engine = RiskEngine(limits, settings.risk.to_portfolio_limits())
     health = HealthMonitor(max_market_data_age=timedelta(seconds=settings.max_market_data_age_seconds),
                            errors=ErrorCounter(), clock=now)
@@ -693,7 +694,7 @@ def build_context(
         if news_evidence_producer is not None:
             market_intelligence = MarketIntelligenceOrchestrator(research_pipeline)
     recovery = RecoveryManager(store=store, order_manager=order_manager, portfolio=portfolio,
-                               broker=broker, gate=gate)
+                               broker=broker, gate=gate, clock=now)
     # connects the broker, restores orders, and halts entries on any discrepancy
     recovery.recover()
     if personal_research_mode:

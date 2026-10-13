@@ -19,7 +19,7 @@ from .data.provider import (
     MarketDataProvider,
     interval_delta,
 )
-from .data.quality import validate_bars
+from .data.quality import completed_intraday_bars, validate_bars
 from .market_session import MarketSession
 from .markets import MarketRegistry, SessionPhase, UnknownMarket
 from .models import Instrument, Signal, SignalSide, TradingStatus
@@ -694,6 +694,18 @@ class SignalGenerationService:
                 started=started,
                 detail=",".join(report.issues),
             )
+        bars = completed_intraday_bars(bars, interval, evaluation_as_of)
+        completed_report = validate_bars(
+            bars, interval, timezone=instrument.timezone,
+            now=evaluation_as_of, max_age=self.settings.max_market_data_age)
+        if not completed_report.ok:
+            return self._reject(
+                "COMPLETED_MARKET_DATA_UNAVAILABLE",
+                run_id=run_id, candidate_id=instrument_id,
+                opportunity_id=opportunity_id, snapshot_id=snapshot_id,
+                instrument_id=instrument_id, strategy_name=strategy_name,
+                strategy_version=metadata.version, evaluation_as_of=evaluation_as_of,
+                started=started, detail=",".join(completed_report.issues))
         data_timestamp = bars.index.max().to_pydatetime()
         if data_timestamp > evaluation_as_of:
             return self._reject(

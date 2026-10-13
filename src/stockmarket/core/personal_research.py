@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from .ai.candidate_assessment import CandidateAssessmentService, CandidateAssessmentError
 from .candidate_research import CandidateResearchService
 from .data.provider import DataProviderError, DataQualityError, expected_provider_name, interval_delta
-from .data.quality import validate_bars, validate_quote
+from .data.quality import completed_intraday_bars, validate_bars, validate_quote
 from .data.resilient import ResilientProvider
 from .market_session import MarketSession
 from .market_profiles import MarketProfileService
@@ -279,7 +279,7 @@ class PersonalResearchService:
                     requested_start=timestamp - timedelta(days=5), requested_end=timestamp)
                 if not report.ok:
                     raise DataQualityError(report.issues)
-                bars = bars.loc[bars.index + step <= timestamp].copy()
+                bars = completed_intraday_bars(bars, interval, timestamp)
                 report = validate_bars(
                     bars, interval, timezone=instrument.timezone,
                     now=timestamp, max_age=step * 2)

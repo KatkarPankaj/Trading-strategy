@@ -348,6 +348,12 @@ _V16 = [
     "ALTER TABLE orders ADD COLUMN trade_intent TEXT",
 ]
 
+_V17 = [
+    """CREATE TABLE execution_reservations (
+        account_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+        state TEXT NOT NULL, acquired_at TEXT NOT NULL, lease_until TEXT NOT NULL)""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -361,7 +367,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (13, "durable_paper_execution_and_autonomous_cycles", _V13),
     (14, "autonomous_paper_cycle_lock_leases", _V14),
     (15, "personal_research_recommendations", _V15),
-    (16, "explicit_trade_intent", _V16)]
+    (16, "explicit_trade_intent", _V16),
+    (17, "atomic_account_execution_reservations", _V17)]
 
 
 def applied_versions(db: Database) -> set[int]:

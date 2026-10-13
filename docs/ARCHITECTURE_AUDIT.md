@@ -607,8 +607,58 @@ the real API successfully. Older PARTIAL cycles still report research
 idempotency conflicts after prior configuration changes; those records are
 preserved and the monitor displays their failure, not a successful recovery.
 
+### 18.5 Milestone 3: Priority 1 execution implementation
+
+Implemented against baseline `105823b96d3b7c0a44245fa8149b21857037e5f9`;
+no deployment, live broker connection or changes to user-created paper state:
+
+- Confirmed defect: deterministic signal generation included the still-forming
+  intraday bar although personal research excluded it. Both now use the same
+  completed-bar filter after full-response validation. The controlled actual
+  loop previously proposed near $150 against a fresh $102 quote and correctly
+  failed the stop check; it now generates the $102 completed-bar signal.
+- PARTIAL cycles no longer reset consecutive failures. Startup recovery errors
+  are counted and exposed; STOPPED_AFTER_FAILURES refuses further ticks.
+  Legitimate signal/execution validation rejections remain explicit candidate
+  outcomes rather than forced trades or infrastructure failures.
+- Existing durable cycle leases are reused, with injected-clock expiry checks
+  and ownership verification between stages. Obsolete research configuration
+  conflicts are resolved as FAILED/RECOVERY_OBSOLETE, retaining history and
+  recording the recovery disposition instead of rerunning an incompatible key.
+- V17 account execution claims serialize submissions across database
+  connections. Persisted order/fill identity checks reject stale in-memory
+  workers. Expiry alone never permits submission takeover; clean reconciliation
+  is required. In-memory executor, token budget and portfolio coordination still
+  require a single worker; this does not certify PostgreSQL or multi-worker use.
+- PaperBroker validates quote timestamps at update and match boundaries.
+  Resting fills lock the durable executor row and atomically persist fill and
+  executor state, with in-memory rollback on persistence errors.
+- AI responses reporting usage above the token budget are invalidated.
+  Read-only fills monitoring distinguishes orders from simulated fills; Health
+  exposes loop failure and startup recovery details.
+- Production composition is exercised by deterministic auto-loop long entry,
+  stop exit, short entry, EOD cover, restart, same-slot replay and NO_TRADE
+  scenarios. Missing/stale execution quotes cannot be replaced by fresh research
+  timestamps or preliminary risk approvals. Fee fixtures verify gross realized
+  PnL, fee deductions and net cash changes for both long and short round trips.
+
+Remaining gaps: persisted closed-outcome feedback into strategy rankings,
+additional executable strategies, timestamped/historical FX accounting, official
+calendar verification, provider factory clocks, and broader multi-worker/crash
+validation. Some infrastructure metadata still uses wall time. No profitability
+or real-market execution-feed readiness claim follows from these fixtures.
+Earlier process-local reservation and unrecoverable configuration-conflict
+statements above describe the prior baseline; this section supersedes them.
+
 ### Recommended next implementation phase
 
-Milestone 3 should add cross-process reservations and leases (DB-backed), inject the remaining real clocks, add timestamped FX observations, verify official India calendars, and close the outcome-feedback loop. Keep scheduled or unattended trading and live brokers out of scope until a separate safety phase. The earlier paragraph below remains as historical context.
+Next, connect persisted completed paper outcomes to sample-qualified,
+strictly historical/out-of-sample strategy ranking evidence, with no automatic
+risk increases. Then extend the existing strategy interface and implement
+timestamped FX observations/historical conversion before cross-currency
+execution. Verify official India calendars and provider access before claiming
+market support. Keep live brokers disconnected and multi-worker execution out
+of scope until separately validated. The earlier paragraph below remains as
+historical context.
 
 The separate market-intelligence orchestrator ranks timestamped proposals using the existing regime/news/strategy/aggregation pipeline; those opportunities remain advisory. Phase 2C-3 persists risk-approved proposals from stored signals; Phase 2C-4 submits only those proposals after fresh validation; Phase 2C-5 manages quote-triggered exits through RiskEngine and OrderManager; Phases 2C-6/2C-7 persist and reconcile paper executor state and support a bounded, explicitly invoked PAPER cycle. Next priorities are broader crash/concurrency/fill-ledger and API-route validation, scheduled position monitoring only after a separately approved safety phase, cross-process portfolio reservations, and timestamped FX observations. Scheduled or unattended trading has not been implemented or validated. Finnhub and OpenAI require explicit credentials/configuration. NSE sector context requires operator-reviewed symbol/index mappings; the public endpoint is not a guaranteed feed. Verify and add official BSE/NSE calendar schedules before India is treated as session-covered. Keep German and US calendars updated annually. Then migrate legacy workflows selectively without deleting local paper-state paths. Deterministic signals and RiskEngine retain authority. Do not enable live trading.

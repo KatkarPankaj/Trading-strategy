@@ -16,6 +16,15 @@ from .provider import OHLCV, Quote, interval_delta
 FROZEN_BARS = 5
 
 
+def completed_intraday_bars(bars: pd.DataFrame, interval: str, as_of: datetime) -> pd.DataFrame:
+    """Filter validated, bar-open timestamped intraday data at a decision boundary."""
+    if interval == "1d":
+        raise ValueError("daily bar completion requires the exchange calendar")
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
+    return bars.loc[bars.index + interval_delta(interval) <= as_of].copy()
+
+
 @dataclass(frozen=True, slots=True)
 class DataQualityReport:
     issues: tuple[str, ...]

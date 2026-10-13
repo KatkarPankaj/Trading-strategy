@@ -258,20 +258,26 @@ class RecoveryManager:
         alerts: Any = None,
         retry: RetryPolicy = RetryPolicy(),
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store, self._orders, self._portfolio = store, order_manager, portfolio
         self._broker, self._gate, self._log, self._alerts = broker, gate, logger, alerts
         self._retry, self._sleep = retry, sleep
+        self._clock = clock or _now
 
     def recover(self) -> ReconciliationReport:
         """Startup sequence: load state, connect, reconcile, and halt new entries unless clean."""
+        blocked = self._active_execution_report(0)
+        if blocked is not None:
+            self._conclude(blocked, "STARTUP_RECONCILIATION")
+            return blocked
         restored = self._restore_orders()
         try:
             call_with_retry(self._broker.connect, self._retry,
                             retry_on=(ConnectionError, TimeoutError, BrokerError), sleep=self._sleep)
         except Exception as exc:
             report = ReconciliationReport(
-                _now(), (Discrepancy("BROKER:UNREACHABLE",
+                self._clock(), (Discrepancy("BROKER:UNREACHABLE",
                                      "BROKER_UNREACHABLE", "broker", "", "", str(exc)),),
                 restored)
             self._conclude(report, "STARTUP_RECONCILIATION")
@@ -316,6 +322,9 @@ class RecoveryManager:
         return count
 
     def _reconcile(self, restored: int) -> ReconciliationReport:
+        blocked = self._active_execution_report(restored)
+        if blocked is not None:
+            return blocked
         try:
             order_issues, actions = reconcile_orders(
                 self._orders, self._broker, store=self._store)
@@ -328,9 +337,26 @@ class RecoveryManager:
             position_issues = reconcile_positions(
                 self._portfolio, self._broker)
         except BrokerError as exc:
-            return ReconciliationReport(_now(), (Discrepancy(
+            return ReconciliationReport(self._clock(), (Discrepancy(
                 "BROKER:QUERY_FAILED", "BROKER_ERROR", "broker", "", "", str(exc)),), restored)
-        return ReconciliationReport(_now(), tuple(order_issues + position_issues), restored, tuple(actions))
+        issues = order_issues + position_issues
+        if not issues:
+            try:
+                recovered = self._store.execution_reservations.recover(self._clock())
+                actions.extend(f"reconciled execution reservation for {account}" for account in recovered)
+                self._gate.clear("EXECUTION_RESERVATION")
+            except ValueError as exc:
+                issues.append(Discrepancy(
+                    "EXECUTION:RESERVED", "EXECUTION_RESERVED", "account", "", "", str(exc)))
+        return ReconciliationReport(self._clock(), tuple(issues), restored, tuple(actions))
+
+    def _active_execution_report(self, restored: int) -> ReconciliationReport | None:
+        try:
+            self._store.execution_reservations.assert_recovery_allowed(self._clock())
+        except ValueError as exc:
+            return ReconciliationReport(self._clock(), (Discrepancy(
+                "EXECUTION:RESERVED", "EXECUTION_RESERVED", "account", "", "", str(exc)),), restored)
+        return None
 
     def _reconcile_submission_claims(self) -> list[str]:
         actions: list[str] = []
