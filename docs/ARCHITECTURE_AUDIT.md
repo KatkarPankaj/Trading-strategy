@@ -758,7 +758,65 @@ use that bar open without leaking the future close into reported equity.
 No provider/paid-AI run, running-service restart or existing-user database
 migration was performed.
 
-### Recommended next implementation phase
+### Evidence-based strategy intelligence v1 continuation
+
+Inspection at baseline `6108eaf` found that paper lifecycle/ORB/SMA execution already
+worked, but final holdout metrics leaked into future strategy selection. Ranking
+used one confidence-adjusted mean return and treated unknown evidence as score zero;
+there was no matched baseline report. `learning.py` implements governance and
+configuration evidence, not a fitted predictive model. The unchanged baseline suite
+ran 545 tests with one dashboard mock error: its GET sequence omitted the ranking
+endpoint, shifting the trade response. This fixture is corrected, not hidden by a
+production fallback.
+
+Current implementation excludes final holdout metrics from research/ranking and
+protects reserved windows across proposals for the same instrument. Historical
+selection context contains only validation summaries. Exact instrument/version/hash/
+timeframe outcomes now drive a sample-qualified chronology/uncertainty/drawdown policy
+with explicit catalog multiplicity, costs, profit factor and provenance. Unknown
+performance is not treated as a profitable/neutral numerical baseline. Qualified
+nonpositive comparisons can abstain in the actual assessment path before any signal.
+The existing Strategies monitor shows evidence source, sample status and scores.
+
+Authenticated matched comparisons reuse the laboratory's data validation, deterministic
+strategy adapter, sizing, cost model and session-aware BacktestEngine. They reserve
+TRAIN, select on VALIDATE, embargo segment boundaries and use nonoverlapping TEST
+windows. Fixed ORB and ranking-only arms share data and costs; NO_TRADE is a real
+result. V22 persists the frozen report and canonical OHLCV input atomically, with
+read-only retrieval and replay without refetch. Test observations, metrics, decisions
+and hashes remain inspectable after reconstruction.
+
+This is retrospective exploratory evidence, not prospective predictive certification.
+The supervised-model arm is blocked by absent registered versioned point-in-time
+features/labels/training artifacts; categorical historical regime conditioning is
+also unavailable. Historical provider revisions/corporate actions and dependencies
+among observations remain unverified. Current reordering covers AI-recommended
+alternatives, not a complete counterfactual catalog evaluation. Catalog Bonferroni
+uncertainty is an approximation and does not cover undisclosed previous experiments.
+No live broker, risk increase, service restart or migration of user state occurred.
+
+The reproducible deterministic comparison fixture has two nonoverlapping TEST
+windows: fixed ORB closes 60 trades, gross PnL -746.40, fees 1,244.00 and net PnL
+-1,990.40; ranking abstains. Paired uncertainty remains INSUFFICIENT_WINDOWS and
+improvement NOT_ESTABLISHED. The actual paper lifecycle still produces two fills
+and one -200 outcome for both ORB and SMA versions across restart. Synthetic fixtures
+do not prove market profitability.
+
+Validation: 54 focused evidence/assessment/accounting/window/dashboard checks passed,
+12 additional qualified-selection/dashboard checks passed, and the complete suite
+passed 556 tests (`PYTHONPATH=src;tests python -m unittest discover -s tests`).
+Comparison replay after service reconstruction also passed its focused check.
+Selected-file Pylance diagnostics and `git diff --check` were clean; this is not a
+repository-wide configured type-check gate. Existing AnyIO stream ResourceWarnings
+remain. Configured Bandit and pip-audit commands could not run because those modules
+are absent from the selected interpreter; no security/dependency audit pass is claimed.
+
+Next highest-value gate: preregister an independent prospective matched selection
+experiment; capture timestamped versioned features/labels before fitting an advisory
+supervised model with drift/retraining/rollback validation. Multi-worker certification,
+cross-currency historical FX and calendar/provider entitlements remain separate blockers.
+
+### Recommended next implementation phase (historical context)
 
 Next, connect persisted completed paper outcomes to sample-qualified,
 strictly historical/out-of-sample strategy ranking evidence, with no automatic

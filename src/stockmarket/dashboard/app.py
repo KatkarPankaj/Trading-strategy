@@ -617,6 +617,20 @@ def _strategies(client: ApiClient, activity: dict[str, Any] | None = None) -> No
     ranking = _safe(client, "/paper/strategy-rankings")
     if ranking:
         st.caption("Observational forward results, not causal proof of improvement or profitability.")
+        st.caption("Evidence v2 compares exact instrument/version/timeframe outcomes with at least "
+                   "30 trades across 10 observation dates and three chronological blocks. "
+                   "Unknown regimes are not regime-conditioned evidence. Final holdouts are review-only, "
+                   "never selection features. Insufficient evidence preserves the AI preference; "
+                   "all compared qualified scores below NO_TRADE cause abstention.")
+        _table(views.frame([
+            {"assessment": record["assessment_id"], "strategy": item["strategy"],
+             "source": item["source"], "sample": item["sample_size"],
+             "status": item.get("metrics", {}).get("sample_status", "LEGACY_POLICY"),
+             "score": item["conservative_net_return"],
+             "profit_factor": item.get("metrics", {}).get("profit_factor"),
+             "window_instability": item.get("metrics", {}).get("window_instability"),
+             "recommendation": record.get("recommendation", "LEGACY_POLICY")}
+            for record in ranking.get("rankings", []) for item in record["evidence"]]))
         st.json(ranking)
     st.subheader("Legacy/backtest strategy performance (separate from paper feedback)")
     _table(views.strategy_performance(

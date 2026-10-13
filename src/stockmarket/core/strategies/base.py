@@ -15,12 +15,18 @@ from ..market_session import MarketSession
 from ..models import AssetClass, Instrument, Signal
 
 
-def strategy_parameters_hash(strategy: Any) -> str | None:
+def strategy_parameters(strategy: Any) -> dict[str, Any] | None:
     config = getattr(strategy, "config", None)
     if config is None or not is_dataclass(config) or isinstance(config, type):
         return None
-    parameters = {k: v.total_seconds() if isinstance(v, timedelta) else v
-                  for k, v in asdict(config).items()}
+    return {k: v.total_seconds() if isinstance(v, timedelta) else v
+            for k, v in asdict(config).items()}
+
+
+def strategy_parameters_hash(strategy: Any) -> str | None:
+    parameters = strategy_parameters(strategy)
+    if parameters is None:
+        return None
     return hashlib.sha256(json.dumps(
         parameters, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()).hexdigest()

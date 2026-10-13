@@ -54,6 +54,7 @@ from ..core.trade_proposals import TradeProposalService
 from ..core.security import Secret
 from ..core.strategy_lab import StrategyLabService, StrategyLabError
 from ..core.strategy_ranking import StrategyRankingService
+from ..core.strategy_comparison import StrategyComparisonService
 from ..core.outcome_feedback import OutcomeFeedbackService
 from ..core.data.provider import DataProviderError
 from ..core.settings import AppSettings
@@ -66,6 +67,7 @@ from .schemas import (
     StrategyLabProposalBody,
     StrategyLabEvaluationBody,
     StrategyLabTransitionBody,
+    StrategyComparisonBody,
     PersonalResearchBody,
     CandidateResearchRunBody,
     AutonomousPaperCycleBody,
@@ -721,6 +723,35 @@ def create_app(ctx: ApiContext) -> FastAPI:
         return {"trading_mode": TradingMode.PAPER.value, "as_of": as_of.isoformat(),
                 "performance": service.performance(as_of)}
 
+    @app.post("/strategy-lab/comparisons", dependencies=[Depends(auth)])
+    def compare_strategies(body: StrategyComparisonBody) -> dict[str, Any]:
+        if ctx.strategy_lab is None:
+            raise HTTPException(503, "strategy laboratory is not configured")
+        if ctx.mode != TradingMode.PAPER.value:
+            raise HTTPException(403, "strategy comparison is available only in PAPER mode")
+        try:
+            return StrategyComparisonService(ctx.strategy_lab).compare(**body.model_dump())
+        except DataProviderError as exc:
+            raise HTTPException(503, f"historical data unavailable: {exc.code}") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/strategy-lab/comparisons/{comparison_id}", dependencies=[Depends(auth)])
+    def strategy_comparison(comparison_id: str) -> dict[str, Any]:
+        report = ctx.store.strategy_lab.comparison(comparison_id)
+        if report is None:
+            raise HTTPException(404, "unknown strategy comparison")
+        return {"trading_mode": "PAPER", "monitoring_only": True, **report}
+
+    @app.get("/strategy-lab/comparisons/{comparison_id}/data", dependencies=[Depends(auth)])
+    def strategy_comparison_data(comparison_id: str) -> dict[str, Any]:
+        report = ctx.store.strategy_lab.comparison(comparison_id)
+        if report is None:
+            raise HTTPException(404, "unknown strategy comparison")
+        data = ctx.store.strategy_lab.comparison_data(report["data_hash"])
+        if data is None:
+            raise HTTPException(503, "comparison data snapshot unavailable")
+        return {"trading_mode": "PAPER", "monitoring_only": True, **data}
     @app.get("/paper/strategy-rankings", dependencies=[Depends(auth)])
     def strategy_rankings() -> dict[str, Any]:
         if ctx.strategy_ranking is None:

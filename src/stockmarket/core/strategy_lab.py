@@ -15,13 +15,14 @@ import pandas as pd
 
 from .ai.candidate_assessment import CandidateAssessmentService
 from .ai.schemas import StrategyProposalSchema
-from .backtesting.engine import BacktestConfig, BacktestEngine, BacktestSignal
+from .backtesting.engine import BacktestConfig, BacktestEngine
+from .backtesting.strategy_adapter import strategy_signal_fn
 from .backtesting.execution_model import ExecutionModel
 from .backtesting.walk_forward import make_windows, session_dates
 from .data.provider import MarketDataProvider, interval_delta
 from .data.quality import completed_intraday_bars, validate_bars
 from .market_session import MarketSession
-from .models import Instrument, OrderSide, TradeIntent
+from .models import Instrument
 from .persistence import Store
 from .persistence.repositories import to_json, ts
 from .sizing import SizingLimits
@@ -279,6 +280,34 @@ class StrategyLabService:
             "evaluation_policy_version": "session-holdout-v1",
         }))
 
+    def historical_bars(
+        self, instrument: Instrument, interval: str, start: datetime, end: datetime,
+    ) -> pd.DataFrame:
+        bars = self.market_data.get_ohlcv(instrument, interval, start, end)
+        quality = validate_bars(
+            bars, interval, timezone=instrument.timezone,
+            requested_start=start, requested_end=end)
+        if not quality.ok:
+            raise StrategyLabError("historical data validation failed: " + ", ".join(quality.issues))
+        bars = completed_intraday_bars(bars, interval, end)
+        if bars.empty or bars.index.min().to_pydatetime() < start \
+                or bars.index.max().to_pydatetime() > end:
+            raise StrategyLabError("historical data is empty or outside the requested range")
+        return bars
+
+    def backtest_engine(
+        self, instrument: Instrument, interval: str, *, allow_short: bool,
+        commission_rate: float = .001, slippage_bps: float = 5,
+    ) -> BacktestEngine:
+        self._validate_costs(commission_rate, slippage_bps)
+        return BacktestEngine(BacktestConfig(
+            starting_cash=100_000, sizing=self.sizing, base_currency=instrument.currency,
+            execution=ExecutionModel(commission_rate=commission_rate, slippage_bps=slippage_bps,
+                                     spread_bps=2, participation_rate=.01),
+            allow_short=allow_short,
+            session_flatten_before_close=timedelta(minutes=self.flatten_minutes),
+            bar_interval=interval_delta(interval)))
+
     def register_holdout(
         self, proposal_id: str, *, start: datetime, end: datetime,
         commission_rate: float = .001, slippage_bps: float = 5,
@@ -371,22 +400,11 @@ class StrategyLabService:
                         if e.get("evaluation_kind") == "POST_PROPOSAL_HOLDOUT"]
             if previous:
                 return previous[0]
-        elif holdout is not None and end >= datetime.fromisoformat(holdout["start"]):
+        elif any(start <= datetime.fromisoformat(reserved["end"])
+                 and end >= datetime.fromisoformat(reserved["start"])
+                 for reserved in self.store.strategy_lab.reserved_windows(instrument.instrument_id)):
             raise StrategyLabError("historical exploration cannot consume reserved holdout data")
-        execution = ExecutionModel(
-            commission_rate=commission_rate, slippage_bps=slippage_bps,
-            spread_bps=2, participation_rate=.01)
-        bars = self.market_data.get_ohlcv(
-            instrument, spec.timeframe, start, end)
-        quality = validate_bars(
-            bars, spec.timeframe, timezone=instrument.timezone,
-            requested_start=start, requested_end=end)
-        if not quality.ok:
-            raise StrategyLabError("historical data validation failed: " + ", ".join(quality.issues))
-        bars = completed_intraday_bars(bars, spec.timeframe, end)
-        if bars.empty or bars.index.min().to_pydatetime() < start \
-                or bars.index.max().to_pydatetime() > end:
-            raise StrategyLabError("historical data is empty or outside the requested range")
+        bars = self.historical_bars(instrument, spec.timeframe, start, end)
         dates = session_dates({instrument.instrument_id: bars},
                               {instrument.instrument_id: instrument})
         if any(not market.is_covered(day) for day in dates):
@@ -407,31 +425,11 @@ class StrategyLabService:
                 if not expected.isin(bars.index).all():
                     raise StrategyLabError(f"holdout session has missing bars: {day}")
         strategy = self._strategy(spec)
-        step = interval_delta(spec.timeframe)
+        signal_fn = strategy_signal_fn(strategy, instrument, session)
 
-        def signal_fn(iid: str, history: pd.DataFrame) -> BacktestSignal | None:
-            if iid != instrument.instrument_id:
-                raise StrategyLabError("historical signal instrument mismatch")
-            at = history.index[-1].to_pydatetime() + step
-            local_day = history.index[-1].tz_convert(instrument.timezone).date()
-            first = history.index.searchsorted(datetime.combine(
-                local_day, session.market_open, ZoneInfo(instrument.timezone)))
-            # Both trusted templates use today's session and, for ORB, a rolling volume window.
-            history = history.iloc[max(0, first - spec.parameters.volume_ma_window):]
-            signal = strategy.evaluate(instrument, history, session, as_of=at)
-            if signal.intent not in {TradeIntent.BUY, TradeIntent.SHORT_SELL}:
-                return None
-            if signal.stop_loss is None:
-                raise StrategyLabError("deterministic entry lacks a stop")
-            return BacktestSignal(
-                OrderSide.BUY if signal.intent is TradeIntent.BUY else OrderSide.SELL,
-                signal.stop_loss, signal.take_profit, "; ".join(signal.reasons))
-
-        engine = BacktestEngine(BacktestConfig(
-            starting_cash=100_000, sizing=self.sizing, base_currency=instrument.currency,
-            execution=execution, allow_short=spec.parameters.allow_short,
-            session_flatten_before_close=timedelta(minutes=self.flatten_minutes),
-            bar_interval=step))
+        engine = self.backtest_engine(
+            instrument, spec.timeframe, allow_short=spec.parameters.allow_short,
+            commission_rate=commission_rate, slippage_bps=slippage_bps)
         inputs = {instrument.instrument_id: instrument}
         data = {instrument.instrument_id: bars}
         windows = make_windows(dates, train=20, validate=10, test=10, step=10, embargo=1) \

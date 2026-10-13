@@ -11,6 +11,18 @@ See [Platform Architecture](docs/ARCHITECTURE.md) for system boundaries and
 [Platform Operations](docs/OPERATIONS.md) for API setup, secrets, deployment,
 backup, and recovery.
 
+## Evidence-based strategy intelligence
+
+Closed paper outcomes inform a deterministic, version/instrument/timeframe-matched
+advisory ranking with sample qualification, net costs, chronological stability,
+drawdown and catalog-multiplicity-adjusted uncertainty. Final holdouts remain
+independent review evidence and are excluded from research selection/tuning.
+Authenticated `/strategy-lab/comparisons` requests persist matched retrospective
+fixed-ORB versus ranking-only reports, together with reproducible data snapshots.
+Model-enhanced and regime-conditioned arms are explicitly unavailable without
+their required timestamped datasets. These reports do not establish predictive
+improvement or profitability. See [Evidence operations](docs/OPERATIONS.md#evidence-based-strategy-intelligence).
+
 ## Personal research and human decisions
 
 Use `PERSONAL_RESEARCH=true` for a recommendation-only application with no broker

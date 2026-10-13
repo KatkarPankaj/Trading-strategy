@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 from datetime import datetime
-from statistics import mean, stdev
+import hashlib
+import logging
 from typing import Any, Callable, Mapping, Sequence
 
 from .outcome_feedback import OutcomeFeedbackService
 from .persistence import Store
 from .persistence.repositories import ts
 from .strategies.base import strategy_parameters_hash
+from .backtesting.evidence import summarize_evidence
+from .persistence.repositories import to_json
+
+logger = logging.getLogger(__name__)
 
 
 class StrategyRankingService:
     def __init__(self, store: Store, feedback: OutcomeFeedbackService,
                  *, clock: Callable[[], datetime]) -> None:
         self.store, self.feedback, self.clock = store, feedback, clock
+        self.strategy_source: Callable[[], Mapping[str, Any]] | None = None
 
     def evidence(self, as_of: datetime, market: str, currency: str,
                  strategies: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -30,23 +36,22 @@ class StrategyRankingService:
                     or strategy_parameters_hash(strategy) != proposal["parameters_hash"]:
                 continue
             for report in self.store.strategy_lab.evaluations(proposal["proposal_id"]):
+                # Final holdouts are reserved for independent review, never future selection or tuning.
+                if report.get("evaluation_kind") != "HISTORICAL":
+                    continue
                 if datetime.fromisoformat(report["end"]) > as_of \
                         or datetime.fromisoformat(report["evaluated_at"]) > as_of:
                     continue
-                result = report.get("holdout_result")
-                returns = [t["net_pnl"] / (t["quantity"] * t["entry_price"])
-                           for t in result["trades"]] if result else []
                 evaluated.append({
                     "strategy_id": name, "strategy_version": proposal["strategy_version_id"],
                     "parameters_hash": proposal["parameters_hash"],
                     "timeframe": proposal["specification"]["timeframe"],
                     "instrument_id": proposal["instrument_id"], "market_regime": "UNKNOWN",
                     "evaluation_id": report["evaluation_id"], "source": report["evaluation_kind"],
-                    "status": report["status"], "metrics": result["metrics"] if result else None,
-                    "session_count": result["session_count"] if result else 0,
-                    "trade_count": len(returns),
-                    "conservative_net_return": mean(returns) - 1.96 * stdev(returns) / len(returns) ** .5
-                        if len(returns) >= 30 else None,
+                    "status": "EXPLORATORY_NOT_RANKING_EVIDENCE",
+                    "validation_windows": [
+                        {"window": fold["window"]["validate"], "metrics": fold["validate"]["metrics"]}
+                        for fold in report["folds"]],
                 })
         feedback["evaluations"] = evaluated[:4]
         feedback["omitted_evaluations"] = max(0, len(evaluated) - 4)
@@ -55,46 +60,70 @@ class StrategyRankingService:
     def rank(
         self, ai_order: Sequence[str], context: Any, *, assessment_id: str,
     ) -> Mapping[str, Any]:
-        feedback = context.outcome_feedback or {}
+        now = self.clock()
+        if context.as_of > now:
+            raise ValueError("strategy ranking cannot use a future decision timestamp")
+        if not ai_order or len(set(ai_order)) != len(ai_order):
+            raise ValueError("strategy ordering must be nonempty and unique")
+        if self.strategy_source is None:
+            raise ValueError("strategy ranking requires a trusted current catalog")
+        strategies = self.strategy_source()
+        if any(name not in strategies for name in ai_order):
+            raise ValueError("strategy ranking contains an unregistered strategy")
         evidence = []
         scores: dict[str, float] = {}
+        comparisons = len(strategies)
         for name in ai_order:
-            groups = [g for g in feedback.get("performance", [])
-                      if g["strategy_id"] == name
-                      and g["sample_status"] == "QUALIFIED_PAPER_SAMPLE"
-                      and g["market_regime"] == "UNKNOWN"
-                      and g.get("return_ci95_half_width") is not None]
-            holdouts = [g for g in feedback.get("evaluations", [])
-                        if g["strategy_id"] == name and g["instrument_id"] == context.instrument_id
-                        and g["source"] == "POST_PROPOSAL_HOLDOUT"
-                        and g["status"] == "HOLDOUT_REVIEW_REQUIRED"]
-            if len(groups) == 1:
-                group = groups[0]
-                score = group["mean_return_on_entry_notional"] - group["return_ci95_half_width"]
-                source, sample = "PAPER_OUTCOMES", group["trade_count"]
-                identity = group["evidence_hash"]
-            elif holdouts:
-                group = holdouts[0]
-                score = group["conservative_net_return"]
-                source, sample = "POST_PROPOSAL_HOLDOUT", group["trade_count"]
-                identity = group["evaluation_id"]
-            else:
-                score, source, sample, identity = 0.0, "AI_RESEARCH_ONLY", 0, None
-            scores[name] = score
-            evidence.append(dict(strategy=name, source=source, sample_size=sample,
+            observations = self.feedback.observations(
+                context.as_of, strategy_id=name, strategy=strategies[name],
+                instrument_id=context.instrument_id, market=context.market, currency=context.currency,
+                regime="UNKNOWN")
+            error = None
+            try:
+                summary = summarize_evidence(observations, as_of=context.as_of, comparisons=comparisons)
+            except ValueError as exc:
+                # Persist the rejection, not a plausible zero-performance replacement.
+                error = str(exc)
+                logger.warning("strategy ranking evidence rejected", extra={
+                    "strategy": name, "instrument_id": context.instrument_id, "reason": error})
+                summary = {"sample_status": "INVALID_EVIDENCE", "score": None,
+                           "trade_count": len(observations)}
+            score = summary["score"]
+            if score is not None:
+                scores[name] = score
+            source = "INVALID_OUTCOME_EVIDENCE" if error else \
+                "PAPER_OUTCOMES" if score is not None else "AI_RESEARCH_ONLY"
+            identity = hashlib.sha256(to_json(observations).encode()).hexdigest()
+            evidence.append(dict(strategy=name, source=source, sample_size=len(observations),
+                                 strategy_version=getattr(strategies[name], "version", None),
+                                 parameters_hash=strategy_parameters_hash(strategies[name]),
+                                 timeframe=getattr(getattr(strategies[name], "config", None), "interval", None),
+                                 outcome_ids=[o.identity for o in observations],
                                  conservative_net_return=score, evidence_id=identity,
-                                 reason="Cost-adjusted mean return minus approximate 95% uncertainty; "
-                                        "UNKNOWN regime is not claimed regime-specific evidence. "
-                                        "Insufficient samples do not change the AI preference."))
-        # Unknown evidence is neutral, not a fabricated profitable baseline.
-        ranked = sorted(ai_order, key=lambda name: -scores[name])
+                                 metrics=summary, rejection_reason=error,
+                                 market_regime="UNKNOWN", regime_status="NOT_CONDITIONED",
+                                 reason="Version/instrument/timeframe-matched net returns; "
+                                        "chronological stability, worst-window/drawdown penalties and "
+                                        "catalog-multiplicity-adjusted uncertainty. "
+                                        "Final holdouts excluded. Insufficient evidence is not poor performance."))
+        # Compare only like-qualified samples: never rank unknown performance as zero.
+        qualified = sorted(scores, key=lambda name: -scores[name])
+        queue = iter(qualified)
+        ranked = [next(queue) if name in scores else name for name in ai_order]
         record = dict(
             assessment_id=assessment_id, instrument_id=context.instrument_id,
             snapshot_id=context.snapshot_id, as_of=ts(context.as_of),
-            recorded_at=ts(self.clock()), ai_order=list(ai_order), ranked_order=ranked,
+            recorded_at=ts(now), ai_order=list(ai_order), ranked_order=ranked,
             changed=list(ai_order) != ranked, evidence=evidence,
+            recommendation="NO_TRADE" if len(scores) == len(ai_order)
+                and max(scores.values()) <= 0 else "RESEARCH_SELECTION",
+            abstention_reason="All compared sample-qualified strategies are below the NO_TRADE baseline."
+                if len(scores) == len(ai_order) and max(scores.values()) <= 0 else None,
+            catalog_size=comparisons, compared_strategies=list(ai_order),
+            coverage="Only AI-recommended alternatives are eligible for this advisory reordering.",
             baseline="AI ordering without the deterministic feedback adjustment; NO_TRADE return = 0",
-            policy="advisory-conservative-return-v1; no risk/sizing changes; not causal proof of improvement",
+            policy="advisory-evidence-v2; >=30 trades/10 observed days/3 chronological blocks; "
+                   "qualified slots only; final holdouts excluded; no risk/sizing changes",
         )
         self.store.strategy_lab.save_ranking(record, self.clock())
         return record

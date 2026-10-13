@@ -135,6 +135,36 @@ class AssessmentServiceTests(unittest.TestCase):
         self.assertEqual(len(provider.users), 1)
         self.assertEqual(self._order_count(), 0)
 
+    def test_qualified_negative_outcomes_override_positive_ai_selection_without_order(self):
+        from stockmarket.core.outcome_feedback import OutcomeFeedbackService
+        from stockmarket.core.strategy_ranking import StrategyRankingService
+        from stockmarket.core.strategies.base import strategy_parameters_hash
+        provider = AssessmentProvider([self._response(), strategy_response()])
+        service = self._service(provider)
+        strategy = service.strategies["orb_vwap"]
+        for i in range(30):
+            opened = AS_OF - timedelta(days=40 - i)
+            self.store.paper_outcomes.save({
+                "outcome_id": f"negative-{i}", "instrument_id": self.instrument.instrument_id,
+                "market": self.instrument.market, "currency": self.instrument.currency,
+                "opened_at": opened.isoformat(), "closed_at": (opened + timedelta(minutes=5)).isoformat(),
+                "fill_ids": [f"fixture-{i}"], "entry_notional": 1000,
+                "gross_pnl": -8, "fees": 2, "net_pnl": -10, "attribution_status": "COMPLETE",
+                "attribution": {"strategy_id": "orb_vwap", "strategy_version": strategy.version,
+                                "parameters_hash": strategy_parameters_hash(strategy),
+                                "timeframe": strategy.config.interval, "market_regime": "UNKNOWN"}},
+                opened + timedelta(minutes=10))
+        ranker = StrategyRankingService(self.store, OutcomeFeedbackService(self.store, clock=lambda: AS_OF),
+                                        clock=lambda: AS_OF + timedelta(seconds=2))
+        ranker.strategy_source = lambda: service.strategies
+        service.strategy_ranker = ranker.rank
+        opportunity = service.assess(self.snapshot.snapshot_id)
+        self.assertEqual(opportunity.state.value, "REJECTED")
+        self.assertEqual(opportunity.assessment.status.value, "NO_TRADE")
+        self.assertIsNone(opportunity.assessment.recommended_strategy)
+        self.assertIn("below the NO_TRADE", opportunity.assessment.error)
+        self.assertEqual(self._order_count(), 0)
+
     def test_insufficient_evidence_quality_is_safe_rejection(self):
         provider = AssessmentProvider([self._response(evidence_quality="INSUFFICIENT")])
 

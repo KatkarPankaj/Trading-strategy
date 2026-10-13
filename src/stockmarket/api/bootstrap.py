@@ -800,6 +800,7 @@ def build_context(
     ) if candidate_assessment is not None else None
     if strategy_lab is not None:
         strategy_ranking = StrategyRankingService(store, outcome_feedback, clock=now)
+        strategy_ranking.strategy_source = lambda: registered_research_strategies
         candidate_assessment.outcome_feedback = strategy_ranking.evidence
         candidate_assessment.strategy_ranker = strategy_ranking.rank
         base_catalog = dict(registered_research_strategies)

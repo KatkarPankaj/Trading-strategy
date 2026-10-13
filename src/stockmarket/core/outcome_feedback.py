@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from .persistence import Store
 from .persistence.repositories import ts
 from .strategies.base import strategy_parameters_hash
+from .backtesting.evidence import PerformanceObservation
 
 
 class OutcomeFeedbackService:
@@ -209,3 +210,25 @@ class OutcomeFeedbackService:
                             for group in compatible[:4]],
             "omitted_groups": max(0, len(compatible) - 4),
         }
+
+    def observations(
+        self, as_of: datetime, *, strategy_id: str, strategy: Any,
+        instrument_id: str, market: str, currency: str, regime: str,
+    ) -> list[PerformanceObservation]:
+        """Exact version, instrument, timeframe and entry regime; no cross-currency pooling."""
+        result = []
+        for outcome in self.store.paper_outcomes.available(as_of):
+            attribution = outcome["attribution"]
+            if outcome["instrument_id"] != instrument_id or outcome["market"] != market \
+                    or outcome["currency"] != currency or outcome["attribution_status"] != "COMPLETE" \
+                    or attribution["strategy_id"] != strategy_id \
+                    or attribution["strategy_version"] != getattr(strategy, "version", None) \
+                    or attribution["parameters_hash"] != strategy_parameters_hash(strategy) \
+                    or attribution["timeframe"] != getattr(getattr(strategy, "config", None), "interval", None) \
+                    or attribution["market_regime"] != regime:
+                continue
+            result.append(PerformanceObservation(
+                outcome["outcome_id"], datetime.fromisoformat(outcome["opened_at"]),
+                datetime.fromisoformat(outcome["closed_at"]), datetime.fromisoformat(outcome["known_at"]),
+                outcome["entry_notional"], outcome["gross_pnl"], outcome["fees"], outcome["net_pnl"]))
+        return result

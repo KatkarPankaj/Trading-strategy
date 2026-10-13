@@ -412,8 +412,100 @@ At least 20 full holdout sessions and 30 completed trades produce
 Neither status makes a proposal executable, establishes profitability, changes
 risk, or proves absence of multi-proposal selection bias. The Strategies tab
 shows persisted registrations, reports and policies through GET-only monitoring.
-Promotion/activation, validation against alternative baselines and independent
-review of sample uncertainty/regime stability remain the next implementation gate.
+An authorized lifecycle transition now supports explicit paper approval/activation.
+Independent prospective comparison and regime-specific validation remain required;
+positive backtests never auto-promote a proposal.
+
+### Evidence-based strategy intelligence
+
+The existing authenticated lifecycle mutation is
+`POST /strategy-lab/proposals/{proposal_id}/transition`, with `target`, `operator`,
+`reason`, unique `request_id` and `acknowledge_selection_bias` for approval.
+Legal progression is DRAFT -> EVALUATED -> HOLDOUT_REVIEW_REQUIRED ->
+APPROVED_FOR_PAPER -> ACTIVE_FOR_PAPER. Evaluations update evidence states;
+operators explicitly approve and activate. ACTIVE can PAUSE or RETIRE; PAUSED
+can reactivate after current eligibility checks; RETIRED is terminal. Pending
+entry orders block deactivation. Existing positions retain normal risk-checked
+exits. Active frozen versions use the existing trusted signal, RiskEngine,
+OrderManager and PaperBroker path; neither this lifecycle nor the comparison
+service enables live execution.
+
+Ranking policy `advisory-evidence-v2` reads persisted outcomes directly, not
+AI-provided feedback statistics. Each compared strategy must match the instrument,
+market, currency, version, parameter hash, timeframe and recorded entry regime.
+The current decision regime is explicitly UNKNOWN, not a fabricated categorical
+regime. CLOSED and KNOWN timestamps must both precede/equal the decision timestamp.
+Samples qualify at 30 trades on 10 observation dates, split into three chronological
+blocks. Score is net-return expectancy minus catalog-Bonferroni normal uncertainty,
+block-mean standard deviation, negative worst-block expectancy and closed-return
+drawdown divided by trade count. Profit factor, win rate, fees, net/gross PnL,
+observation IDs and configuration identity are recorded separately.
+
+This is advisory, not a calibrated predictive probability. Overlapping episodes
+are explicitly rejected by this estimator. Only qualified alternatives reorder
+qualified slots; insufficient evidence does not receive score zero or outrank a
+known loss. Only AI-recommended alternatives participate in this reordering; the
+record discloses compared names and full catalog size. If every compared alternative
+has a qualified nonpositive score, assessment becomes NO_TRADE before signal/order
+creation. Existing insufficient-sample research behavior otherwise remains intact.
+Past persisted ranking records retain their original policy and are not rewritten.
+
+Final POST_PROPOSAL_HOLDOUT metrics are visible for human review but never included
+in research/selection feedback. Historical feedback includes validation summaries,
+not final-holdout or TEST metrics. Historical exploration/comparison cannot consume
+any proposal's reserved final window for the same instrument.
+
+To explicitly run a retrospective comparison, submit an authenticated
+`POST /strategy-lab/comparisons` JSON body:
+
+```json
+{
+  "proposal_ids": ["<immutable-64-character-proposal-hash>"],
+  "start": "2026-10-01T09:30:00-04:00",
+  "end": "2026-12-18T16:00:00-05:00"
+}
+```
+
+Use actual complete covered exchange sessions; dates above are illustrative.
+One to eight frozen PROPOSAL versions must share instrument, market and timeframe.
+The historical span is at most 180 days. Missing sessions/bars, changed template
+identities, invalid inputs, future windows and reserved final holdouts fail explicitly.
+The service uses the same deterministic adapters, application sizing and backtester
+as the laboratory: commission 0.1%, slippage 5 bps, spread 2 bps, participation 1%,
+one-bar latency and configured session flattening. Spread/slippage are embedded
+in fills, not subtracted a second time.
+
+Every fold reserves 20 TRAIN sessions, ranks using 10 VALIDATE sessions, then tests
+on 10 sessions; one session embargo separates segments. TEST windows do not overlap.
+TRAIN is reserved for a future learner; no model is fitted now. Selection is frozen
+before TEST and can choose NO_TRADE. The fixed baseline is the default trusted ORB
+configuration at the same timeframe; ranking compares it with the requested versions.
+Both arms reset identical capital each TEST window. Mean-window returns, net expectancy,
+profit factor, commissions, entry turnover, per-window equity drawdown, stability and
+paired return differences are reported; returns are not presented as one continuous
+portfolio. Fewer than three TEST windows means insufficient paired uncertainty evidence.
+
+The returned `comparison_id` references an immutable report:
+`GET /strategy-lab/comparisons/{comparison_id}`. Its input OHLCV snapshot is available
+through `GET /strategy-lab/comparisons/{comparison_id}/data`, with canonical float64
+UTC data, named index, schema and SHA-256 checksum. Reports and inputs persist atomically
+in V22 tables. Repeating the same frozen-policy request returns the original report
+without fetching changed data. Monitoring GETs never invoke AI/providers, execute
+cycles, approve strategies or create orders.
+
+`learning_model_enhanced` and `regime_conditioned_selection` are UNAVAILABLE until a
+versioned point-in-time feature/label dataset and categorical regime series exist.
+Retrieved historical bars do not prove their original publication vintage or complete
+corporate-action coverage. Candidate design may already have used this history.
+Consequently reports remain RETROSPECTIVE_EXPLORATORY / NOT_ESTABLISHED even when
+one arm wins. Normal intervals and catalog multiplicity corrections do not account
+for all dependence or undisclosed historical experiments. Next evidence gate: a
+preregistered matched prospective experiment and versioned feature/label capture,
+then an advisory supervised baseline with out-of-sample checks, drift and rollback.
+
+Tests use isolated databases. Applying V22 to an existing user database requires
+the usual backup/migration operating procedure; development validation does not
+modify or restart that database or its running services.
 
 Entries need liquidity, slippage, correlation and sector inputs. The API now
 derives ADV, expected slippage and correlated exposure from completed daily

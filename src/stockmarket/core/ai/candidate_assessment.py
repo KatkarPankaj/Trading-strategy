@@ -442,6 +442,9 @@ class CandidateAssessmentService:
                 context, assessment_id=assessment_id)
             selected = strategy_ranking_evidence["ranked_order"][0]
             strategy = next(item for item in selection.ranked_strategies if item.strategy == selected)
+            if strategy_ranking_evidence.get("recommendation") == "NO_TRADE":
+                strategy = None
+                no_trade = True
         if strategy is None:
             if no_trade:
                 status = AssessmentStatus.NO_TRADE
@@ -461,7 +464,10 @@ class CandidateAssessmentService:
                 status = AssessmentStatus.NO_VALID_STRATEGY
             state = OpportunityState.REJECTED
             if no_trade:
-                error = "NO_TRADE: " + "; ".join(output.rejection_reasons)
+                error = "NO_TRADE: " + (
+                    str(strategy_ranking_evidence["abstention_reason"])
+                    if strategy_ranking_evidence and strategy_ranking_evidence.get("abstention_reason")
+                    else "; ".join(output.rejection_reasons))
             elif insufficient and selection_error is None:
                 error = "insufficient evidence for a candidate assessment"
             else:

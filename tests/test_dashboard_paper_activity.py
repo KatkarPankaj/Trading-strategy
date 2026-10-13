@@ -108,6 +108,7 @@ class PaperActivityDashboardTests(TestCase):
         client = Mock()
         client.get.side_effect = [
             {"outcomes": []}, {"performance": []}, {"proposals": []},
+            {"rankings": [], "improvement_status": "NOT_ESTABLISHED"},
             [], {"trades": {"count": 0}}]
         app._strategies(client, {"research": research()})
         frames = [call.args[0] for call in ui.dataframe.call_args_list]

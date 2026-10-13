@@ -47,6 +47,26 @@ class StrategyLabTransitionBody(BaseModel):
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     acknowledge_selection_bias: bool = Field(default=False, strict=True)
 
+class StrategyComparisonBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_ids: list[str] = Field(min_length=1, max_length=8)
+    start: datetime
+    end: datetime
+
+    @field_validator("start", "end")
+    @classmethod
+    def aware_dates(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("comparison dates must be timezone-aware")
+        return value
+
+    @field_validator("proposal_ids")
+    @classmethod
+    def version_ids(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values) or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in values):
+            raise ValueError("comparison requires unique immutable proposal hashes")
+        return values
+
 
 class PersonalResearchBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)

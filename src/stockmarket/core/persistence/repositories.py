@@ -1880,6 +1880,30 @@ class PaperOutcomeRepository(_Repository):
 
 
 class StrategyLabRepository(_Repository):
+    def save_comparison_data(self, payload: Mapping[str, Any], created_at: datetime) -> None:
+        self._insert_immutable("strategy_comparison_data", "data_hash",
+                               payload["data_hash"], payload, created_at)
+
+    def comparison_data(self, data_hash: str) -> dict[str, Any] | None:
+        rows = self._db.query("SELECT payload FROM strategy_comparison_data WHERE data_hash = ?", (data_hash,))
+        return json.loads(rows[0]["payload"]) if rows else None
+
+    def save_comparison(self, payload: Mapping[str, Any], created_at: datetime) -> None:
+        self._insert_immutable("strategy_comparisons", "comparison_id",
+                               payload["comparison_id"], payload, created_at)
+
+    def comparison(self, comparison_id: str) -> dict[str, Any] | None:
+        rows = self._db.query("SELECT payload FROM strategy_comparisons WHERE comparison_id = ?",
+                              (comparison_id,))
+        return json.loads(rows[0]["payload"]) if rows else None
+
+    def reserved_windows(self, instrument_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            """SELECT p.payload AS proposal, h.payload AS holdout FROM strategy_lab_holdouts h
+               JOIN strategy_lab_proposals p ON p.proposal_id = h.proposal_id""")
+        return [json.loads(row["holdout"]) for row in rows
+                if json.loads(row["proposal"])["instrument_id"] == instrument_id]
+
     def state(self, proposal_id: str) -> dict[str, Any]:
         rows = self._db.query(
             "SELECT state, revision, updated_at, payload FROM strategy_lab_states WHERE proposal_id = ?",

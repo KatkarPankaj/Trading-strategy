@@ -392,6 +392,13 @@ _V21 = [
         assessment_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
 ]
 
+_V22 = [
+    """CREATE TABLE strategy_comparisons (
+        comparison_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE strategy_comparison_data (
+        data_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -410,7 +417,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (18, "immutable_paper_outcome_feedback", _V18),
     (19, "versioned_strategy_laboratory", _V19),
     (20, "preregistered_strategy_holdouts", _V20),
-    (21, "paper_strategy_lifecycle_and_rankings", _V21)]
+    (21, "paper_strategy_lifecycle_and_rankings", _V21),
+    (22, "reproducible_strategy_comparisons", _V22)]
 
 
 def applied_versions(db: Database) -> set[int]:
