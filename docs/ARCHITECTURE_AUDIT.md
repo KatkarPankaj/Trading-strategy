@@ -816,6 +816,92 @@ experiment; capture timestamped versioned features/labels before fitting an advi
 supervised model with drift/retraining/rollback validation. Multi-worker certification,
 cross-currency historical FX and calendar/provider entitlements remain separate blockers.
 
+### Prospective ledger milestone audit (baseline af3d944)
+
+Baseline validation: the unchanged complete suite passes 556 tests. Reusable
+components include immutable outcome episodes with close/known timestamps, frozen
+strategy configurations and parameter hashes, timestamped research evidence,
+persisted AI assessments/opportunities/rankings, trusted generated signals, risk
+evaluations, durable order transition events/fills, restart recovery, reserved
+holdout policies and the V22 immutable comparison/data snapshot pattern.
+
+Missing: one atomic decision-time record freezing the complete strategy catalog,
+features and risk assumptions before execution; append-only later event/label
+attachments; explicit censored/rejected/unfilled observations; and prospective-only
+dataset manifests with chronological label-availability checks. Existing research
+as_of is not actual decision time: provider retrieval and AI completion can occur
+later. Existing comparison fixtures are retrospective and must never be relabeled
+as prospective training evidence.
+
+Smallest planned increment: V23 append-only decisions, attachments and immutable
+dataset manifests/membership; atomically record new assessment decisions only
+(including abstention/unavailable AI), preserve actual capture/decision time and
+original research horizon, freeze source observations/retrieval times plus trusted
+catalog/risk assumptions. Explicit authenticated reconciliation links existing
+generation/risk/order/fill/outcome records without altering decisions or execution.
+GET monitoring stays read-only. No historical backfill. Attachments distinguish
+unfilled/censored from actual net outcome labels; partial exits label only a closed
+episode and ambiguous ownership/version mismatch fails eligibility.
+
+Model readiness will inspect frozen feature/label versions, chronological splits,
+label-known boundaries, source integrity, real-versus-fixture provenance and sample/
+class coverage. Final holdouts and existing reserved windows cannot enter development
+partitions; assignments remain immutable. No model training, automatic promotion,
+new strategy/dashboard, risk changes or live broker. Inadequate verified point-in-time
+data is an explicit advisory-only blocker, not a fabricated training dataset.
+
+Implemented: the planned V23 ledger, transactional assessment capture, frozen
+catalog/features/risk/provenance, explicit authenticated append-only reconciliation,
+read-only monitoring and chronological immutable manifests. Entry versions/hashes/
+timeframes and event/execution timestamps fail closed on mismatch. Partial entry and
+exit fills remain censored until one fully attributed episode closes; exit-proposal
+links expose partial exits before closure. Checksummed reads surface corruption;
+feature-hash/schema and finite-label checks protect dataset boundaries. Dataset
+membership cannot be reassigned, including from final holdouts back into TRAIN.
+
+Deterministic real-pipeline example: one orb_vwap decision, BUY 100 at $102,
+cash $100,000 -> $89,800 -> $99,800, two fills, one net -$200 outcome, label
+-0.0196078431372549, unchanged decision and zero new attachments after restart.
+Disk close/reopen and 40+60 partial entry/exit fixtures verify persisted recovery
+and no premature labels. These are synthetic mechanics tests, not market evidence.
+Readiness reports NOT_READY / ADVISORY_ONLY, no training. Example missing fields
+are news/fundamental/sector, plus real-origin/vintage attestation, actual sample/
+class coverage, counterfactual/control-experiment evidence and a frozen dataset.
+
+Remaining boundaries: source origin/vintage is not independently attested;
+provider-name fixture detection cannot certify real data. Only executed selected
+episodes are labeled; no alternative/NO_TRADE counterfactuals. Final manifests
+are review-only and must not be fed into future tuning. Checksums/application
+insert-only enforcement are not DBA-proof immutability. Local-history scans
+retain the single-worker constraint; concurrent multi-process PostgreSQL and
+large-volume collection are not certified. No production data was migrated,
+services restarted, model trained/promoted, commit/push/deployment performed.
+See [operations](OPERATIONS.md#prospective-decision-evidence-and-model-readiness)
+for migration, API, feature/label definitions and dataset procedures.
+
+Validation on Python 3.11.6, with `PYTHONPATH=src;tests`:
+
+- Baseline `python -m unittest discover -s tests`: 556 passed before changes.
+- Final same complete command: 570 passed in 88.420s, including 14 new prospective
+  tests. Focused `python -m unittest test_prospective_evidence test_paper_end_to_end
+  test_outcome_feedback test_strategy_ranking test_strategy_lab test_ai_research_schema
+  test_candidate_research test_risk_engine`: 110 passed. Earlier focused selectors
+  referenced two nonexistent modules; those loader errors were corrected, not hidden.
+- Checked-file editor diagnostics and `git diff --check`: no errors. There is no
+  configured repository-wide formatter/static type gate. Existing AnyIO unclosed
+  memory-stream ResourceWarnings remain.
+- Installed the already-declared Bandit 1.8.3/pip-audit 2.9.0 tools after their
+  previously documented missing-module failures; dependency manifests unchanged.
+  `python -m pip_audit -r requirements.txt`: exit 0, no known vulnerabilities found.
+- `python -m bandit -r src/stockmarket -c bandit.yaml -ll`: exit 1, seven existing
+  MEDIUM-severity static findings: B310 in OpenAI-compatible/Finnhub URL-open code,
+  four B608 query-construction findings in existing repository helpers/holdout
+  queries, and B113 in the dashboard requests client. These are scanner candidates,
+  not newly demonstrated exploitable vulnerabilities. New prospective SQL uses
+  fixed parameterized statements and introduces no remaining Bandit findings.
+  The configured source-security gate is therefore **not clean**; previously missing
+  tools are now available, but existing findings still need separate disposition.
+
 ### Recommended next implementation phase (historical context)
 
 Next, connect persisted completed paper outcomes to sample-qualified,

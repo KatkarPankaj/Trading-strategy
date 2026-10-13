@@ -399,6 +399,24 @@ _V22 = [
         data_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)""",
 ]
 
+_V23 = [
+    """CREATE TABLE prospective_decisions (
+        decision_id TEXT PRIMARY KEY, opportunity_id TEXT UNIQUE NOT NULL,
+        decision_at TEXT NOT NULL, payload_hash TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE prospective_attachments (
+        attachment_id TEXT PRIMARY KEY, decision_id TEXT NOT NULL,
+        recorded_at TEXT NOT NULL, payload_hash TEXT NOT NULL, payload TEXT NOT NULL,
+        FOREIGN KEY(decision_id) REFERENCES prospective_decisions(decision_id))""",
+    """CREATE TABLE prospective_datasets (
+        manifest_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+        payload_hash TEXT NOT NULL, payload TEXT NOT NULL)""",
+    """CREATE TABLE prospective_membership (
+        decision_id TEXT PRIMARY KEY, manifest_id TEXT NOT NULL, partition_name TEXT NOT NULL,
+        FOREIGN KEY(decision_id) REFERENCES prospective_decisions(decision_id),
+        FOREIGN KEY(manifest_id) REFERENCES prospective_datasets(manifest_id))""",
+    """CREATE INDEX prospective_attachments_decision ON prospective_attachments(decision_id)""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -418,7 +436,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (19, "versioned_strategy_laboratory", _V19),
     (20, "preregistered_strategy_holdouts", _V20),
     (21, "paper_strategy_lifecycle_and_rankings", _V21),
-    (22, "reproducible_strategy_comparisons", _V22)]
+    (22, "reproducible_strategy_comparisons", _V22),
+    (23, "immutable_prospective_evidence", _V23)]
 
 
 def applied_versions(db: Database) -> set[int]:

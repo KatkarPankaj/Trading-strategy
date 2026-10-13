@@ -55,8 +55,9 @@ from ..core.security import Secret
 from ..core.strategy_lab import StrategyLabService, StrategyLabError
 from ..core.strategy_ranking import StrategyRankingService
 from ..core.strategy_comparison import StrategyComparisonService
+from ..core.prospective_evidence import ProspectiveEvidenceService
 from ..core.outcome_feedback import OutcomeFeedbackService
-from ..core.data.provider import DataProviderError
+from ..core.data.provider import DataProviderError, DataQualityError
 from ..core.settings import AppSettings
 from ..core.strategy_pipeline import StrategyResearchPipeline
 from ..core.trading_service import (
@@ -68,6 +69,7 @@ from .schemas import (
     StrategyLabEvaluationBody,
     StrategyLabTransitionBody,
     StrategyComparisonBody,
+    ProspectiveDatasetBody,
     PersonalResearchBody,
     CandidateResearchRunBody,
     AutonomousPaperCycleBody,
@@ -121,6 +123,7 @@ class ApiContext:
     outcome_feedback: OutcomeFeedbackService | None = None
     strategy_lab: StrategyLabService | None = None
     strategy_ranking: StrategyRankingService | None = None
+    prospective: ProspectiveEvidenceService | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -648,6 +651,36 @@ def create_app(ctx: ApiContext) -> FastAPI:
         return {"trading_mode": TradingMode.PAPER.value,
                 "fills": _plain(ctx.store.fills.recent(limit))}
 
+    @app.post("/paper/data-check/{instrument_id}", dependencies=[Depends(auth)])
+    def paper_data_check(instrument_id: str) -> dict[str, Any]:
+        if ctx.mode != "PAPER" or ctx.personal_research_mode:
+            raise HTTPException(403, "execution-data diagnostics require PAPER execution mode")
+        if ctx.market_data is None:
+            raise HTTPException(503, "market data provider is not configured")
+        instrument = ctx.instruments.get(instrument_id)
+        if instrument is None:
+            raise HTTPException(404, "unknown instrument")
+        try:
+            quote = ctx.market_data.get_quote(instrument)
+        except DataProviderError as exc:
+            raise HTTPException(503, {
+                "code": exc.code,
+                "issues": list(exc.issues) if isinstance(exc, DataQualityError) else [],
+                "execution": "NOT_SUBMITTED",
+            }) from exc
+        return {
+            "trading_mode": "PAPER", "execution": "NOT_SUBMITTED",
+            "risk_status": "NOT_EVALUATED", "status": "VALIDATED_QUOTE",
+            "instrument_id": instrument_id, "market": instrument.market,
+            "quote": _plain(quote),
+            "research_only_provider": bool(ctx.market_data.research_only),
+            "health": ctx.health.report(),
+            "limitations": [
+                "One validated quote is not strategy or portfolio-wide readiness.",
+                "Every order still requires an independently fresh quote and normal risk checks.",
+            ],
+        }
+
     @app.get("/paper/outcomes", dependencies=[Depends(auth)])
     def paper_outcomes(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
         return {"trading_mode": TradingMode.PAPER.value,
@@ -752,6 +785,64 @@ def create_app(ctx: ApiContext) -> FastAPI:
         if data is None:
             raise HTTPException(503, "comparison data snapshot unavailable")
         return {"trading_mode": "PAPER", "monitoring_only": True, **data}
+
+    @app.get("/intelligence/prospective/decisions", dependencies=[Depends(auth)])
+    def prospective_decisions(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
+        try:
+            return {"trading_mode": "PAPER", "monitoring_only": True,
+                    "decisions": ctx.store.prospective.decisions()[-limit:]}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/intelligence/prospective/decisions/{decision_id}", dependencies=[Depends(auth)])
+    def prospective_decision(decision_id: str) -> dict[str, Any]:
+        if ctx.prospective is None:
+            raise HTTPException(503, "prospective evidence is not configured")
+        try:
+            return {"trading_mode": "PAPER", "monitoring_only": True,
+                    **ctx.prospective.observation(decision_id)}
+        except KeyError as exc:
+            raise HTTPException(404, "unknown prospective decision") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/intelligence/prospective/reconcile", dependencies=[Depends(auth)])
+    def reconcile_prospective() -> dict[str, Any]:
+        if ctx.prospective is None or ctx.mode != "PAPER":
+            raise HTTPException(503, "prospective PAPER evidence is not configured")
+        try:
+            return ctx.prospective.reconcile()
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/intelligence/prospective/readiness", dependencies=[Depends(auth)])
+    def prospective_readiness() -> dict[str, Any]:
+        if ctx.prospective is None:
+            raise HTTPException(503, "prospective evidence is not configured")
+        try:
+            return {"monitoring_only": True, **ctx.prospective.readiness()}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/intelligence/prospective/datasets", dependencies=[Depends(auth)])
+    def prospective_dataset(body: ProspectiveDatasetBody) -> dict[str, Any]:
+        if ctx.prospective is None or ctx.mode != "PAPER":
+            raise HTTPException(503, "prospective PAPER evidence is not configured")
+        try:
+            return ctx.prospective.create_dataset(**body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/intelligence/prospective/datasets/{manifest_id}", dependencies=[Depends(auth)])
+    def prospective_manifest(manifest_id: str) -> dict[str, Any]:
+        try:
+            result = ctx.store.prospective.manifest(manifest_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if result is None:
+            raise HTTPException(404, "unknown prospective dataset")
+        return {"monitoring_only": True, **result}
+
     @app.get("/paper/strategy-rankings", dependencies=[Depends(auth)])
     def strategy_rankings() -> dict[str, Any]:
         if ctx.strategy_ranking is None:

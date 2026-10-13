@@ -23,6 +23,16 @@ Model-enhanced and regime-conditioned arms are explicitly unavailable without
 their required timestamped datasets. These reports do not establish predictive
 improvement or profitability. See [Evidence operations](docs/OPERATIONS.md#evidence-based-strategy-intelligence).
 
+New candidate assessments also capture an immutable prospective decision ledger:
+actual decision time, frozen strategy parameters, point-in-time research features,
+ranking evidence, risk assumptions and source provenance. Authenticated reconciliation
+attaches subsequent paper events and completed outcomes without changing the decision.
+Chronological dataset manifests enforce embargoes, label availability and locked
+membership; final holdouts cannot become training data. Supervised readiness remains
+NOT_READY / ADVISORY_ONLY until real, verified point-in-time evidence and a prospective
+control experiment exist. No model is trained or automatically promoted.
+See [Prospective evidence operations](docs/OPERATIONS.md#prospective-decision-evidence-and-model-readiness).
+
 ## Personal research and human decisions
 
 Use `PERSONAL_RESEARCH=true` for a recommendation-only application with no broker

@@ -828,7 +828,7 @@ class CandidateResearchRepository(_Repository):
             row["payload"] = json.loads(row["payload"])
         return rows
 
-    def save_opportunity(self, opportunity: Any) -> None:
+    def save_opportunity(self, opportunity: Any, *, decision: Mapping[str, Any] | None = None) -> None:
         assessment = opportunity.assessment
         with self._db.transaction():
             self._db.execute(
@@ -857,6 +857,8 @@ class CandidateResearchRepository(_Repository):
                  to_json(opportunity.lifecycle), ts(opportunity.created_at),
                  to_json(opportunity)),
             )
+            if decision is not None:
+                 ProspectiveRepository(self._db).save_decision(decision)
 
     def get_assessment(self, assessment_id: str) -> dict[str, Any] | None:
         rows = self._db.query(
@@ -2019,6 +2021,101 @@ class StrategyLabRepository(_Repository):
         return result
 
 
+class ProspectiveRepository(_Repository):
+    """Application append-only records, verified on every read; no historical migration backfill."""
+
+    @staticmethod
+    def digest(payload: Mapping[str, Any]) -> str:
+        import hashlib
+        return hashlib.sha256(to_json(payload).encode()).hexdigest()
+
+    def _save(self, table: str, identity: str, payload: Mapping[str, Any],
+              extra: Mapping[str, str]) -> None:
+        body = to_json(payload)
+        insert, select = {
+            "prospective_decisions": (
+                """INSERT INTO prospective_decisions
+                   (decision_id, payload_hash, payload, opportunity_id, decision_at)
+                   VALUES (?, ?, ?, ?, ?) ON CONFLICT(decision_id) DO NOTHING""",
+                "SELECT payload FROM prospective_decisions WHERE decision_id = ?"),
+            "prospective_attachments": (
+                """INSERT INTO prospective_attachments
+                   (attachment_id, payload_hash, payload, decision_id, recorded_at)
+                   VALUES (?, ?, ?, ?, ?) ON CONFLICT(attachment_id) DO NOTHING""",
+                "SELECT payload FROM prospective_attachments WHERE attachment_id = ?"),
+            "prospective_datasets": (
+                """INSERT INTO prospective_datasets
+                   (manifest_id, payload_hash, payload, created_at)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(manifest_id) DO NOTHING""",
+                "SELECT payload FROM prospective_datasets WHERE manifest_id = ?"),
+        }[table]
+        with self._db.transaction():
+            self._db.execute(insert, (identity, self.digest(payload), body, *extra.values()))
+            rows = self._db.query(select, (identity,))
+            if rows[0]["payload"] != body:
+                raise ValueError("immutable prospective evidence identity conflict")
+
+    def _read(self, query: str, args: tuple = ()) -> list[dict[str, Any]]:
+        rows = self._db.query(query, args)
+        result = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if self.digest(payload) != row["payload_hash"]:
+                raise ValueError("prospective evidence integrity check failed")
+            if "recorded_at" in row:
+                payload = {**payload, "recorded_at": row["recorded_at"]}
+            result.append(payload)
+        return result
+
+    def save_decision(self, payload: Mapping[str, Any]) -> None:
+        self._save("prospective_decisions", payload["decision_id"], payload,
+                   {"opportunity_id": payload["opportunity_id"], "decision_at": payload["decision_at"]})
+
+    def decisions(self) -> list[dict[str, Any]]:
+        return self._read("SELECT payload_hash, payload FROM prospective_decisions ORDER BY decision_at, decision_id")
+
+    def decision(self, identity: str) -> dict[str, Any] | None:
+        rows = self._read("SELECT payload_hash, payload FROM prospective_decisions WHERE decision_id = ?", (identity,))
+        return rows[0] if rows else None
+
+    def save_attachment(self, payload: Mapping[str, Any], now: datetime) -> bool:
+        identity = self.digest(payload)
+        exists = self._read("SELECT payload_hash, payload FROM prospective_attachments WHERE attachment_id = ?", (identity,))
+        self._save("prospective_attachments", identity, payload,
+                   {"decision_id": payload["decision_id"], "recorded_at": ts(now)})
+        return not exists
+
+    def attachments(self, identity: str) -> list[dict[str, Any]]:
+        return self._read(
+            """SELECT payload_hash, payload, recorded_at FROM prospective_attachments
+               WHERE decision_id = ? ORDER BY recorded_at, attachment_id""",
+            (identity,))
+
+    def manifest(self, identity: str) -> dict[str, Any] | None:
+        rows = self._read("SELECT payload_hash, payload FROM prospective_datasets WHERE manifest_id = ?", (identity,))
+        return rows[0] if rows else None
+
+    def assigned(self) -> set[str]:
+        return {r["decision_id"] for r in self._db.query("SELECT decision_id FROM prospective_membership")}
+
+    def save_manifest(self, payload: Mapping[str, Any], now: datetime) -> None:
+        with self._db.transaction():
+            self._save("prospective_datasets", payload["manifest_id"], payload,
+                       {"created_at": ts(now)})
+            for partition, rows in payload["partitions"].items():
+                for row in rows:
+                    existing = self._db.query(
+                        "SELECT manifest_id, partition_name FROM prospective_membership WHERE decision_id = ?",
+                        (row["decision_id"],))
+                    if existing and existing[0] != {"manifest_id": payload["manifest_id"],
+                                                   "partition_name": partition}:
+                        raise ValueError("prospective observation already assigned to another frozen dataset")
+                    self._db.execute(
+                        """INSERT INTO prospective_membership VALUES (?, ?, ?)
+                           ON CONFLICT(decision_id) DO NOTHING""",
+                        (row["decision_id"], payload["manifest_id"], partition))
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -2054,3 +2151,4 @@ class Store:
         self.execution_reservations = ExecutionReservationRepository(db)
         self.paper_outcomes = PaperOutcomeRepository(db)
         self.strategy_lab = StrategyLabRepository(db)
+        self.prospective = ProspectiveRepository(db)

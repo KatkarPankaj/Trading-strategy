@@ -79,7 +79,7 @@ def main() -> None:
         lambda: _portfolio(client), lambda: _orders(client),
         lambda: _pnl(client), lambda: _strategies(client, activity),
         lambda: _news(client, activity), lambda: _risk(client),
-        lambda: _health(health, activity), lambda: _audit(client),
+        lambda: _health(health, activity, client=client), lambda: _audit(client),
     ]
     for tab, render in zip(tabs, renderers):
         with tab:
@@ -678,7 +678,7 @@ def _risk(client: ApiClient) -> None:
     _table(views.frame(risk["recent_decisions"]))
 
 
-def _health(health: Any, activity: dict[str, Any] | None = None) -> None:
+def _health(health: Any, activity: dict[str, Any] | None = None, *, client: ApiClient | None = None) -> None:
     st.subheader("System health")
     loop = (activity or {}).get("loop")
     if loop is not None:
@@ -703,6 +703,29 @@ def _health(health: Any, activity: dict[str, Any] | None = None) -> None:
         "last_research_data_timestamp": health.get("last_research_data_timestamp"),
         "last_research_data_received_at": health.get("last_research_data_received_at"),
     })
+    if client is None or health.get("trading_mode") != "PAPER" \
+            or health.get("application_mode") == "PERSONAL_RESEARCH":
+        return
+    st.subheader("Paper execution-data check")
+    st.caption(
+        "Explicitly fetch one quote and validate its timestamp, instrument, price and provider. "
+        "This consumes provider quota, never places an order and never approves a strategy. "
+        "Closed sessions or delayed-data plans may return stale data; those failures remain blocking.")
+    instruments = _safe(client, "/instruments")
+    if not instruments:
+        st.info("No configured instruments available for an execution-data check.")
+        return
+    instrument_id = st.selectbox(
+        "Instrument to check", [item["instrument_id"] for item in instruments],
+        key="paper_data_check_instrument")
+    if st.button("Check paper execution data"):
+        try:
+            with st.spinner("Fetching and validating a provider quote..."):
+                result = client.post(f"/paper/data-check/{instrument_id}", {}, timeout=120)
+            st.success("Quote validated. This is not a risk approval or permission to trade.")
+            st.json(result)
+        except ApiError as exc:
+            st.error(str(exc))
 
 
 def _audit(client: ApiClient) -> None:

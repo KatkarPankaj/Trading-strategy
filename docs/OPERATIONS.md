@@ -507,6 +507,114 @@ Tests use isolated databases. Applying V22 to an existing user database requires
 the usual backup/migration operating procedure; development validation does not
 modify or restart that database or its running services.
 
+### Prospective decision evidence and model readiness
+
+V23 adds four tables: `prospective_decisions`, `prospective_attachments`,
+`prospective_datasets` and `prospective_membership`. Back up an existing database
+and apply the explicit migration procedure above before starting this version.
+There is **no historical decision backfill**; older assessments and comparisons
+are not relabeled as prospective evidence. This development validation uses
+isolated databases and does not migrate the operator's database or restart services.
+
+When candidate assessment is configured, newly persisted assessments/opportunities
+and their decision records share one transaction. This includes selected strategies,
+NO_TRADE and unavailable AI. A capture failure prevents a persisted usable opportunity.
+Actual `decision_at` is the post-assessment capture clock, not the earlier research
+`as_of`. Records preserve both, all source observations/retrieval timestamps,
+assessment/context, the frozen trusted catalog and parameter hashes, ranking policy/
+scores and configured PAPER risk/sizing assumptions. Catalog changes during assessment
+reject capture. Research is never a risk approval.
+
+Feature schema `decision-research-features-v1` contains `scanner_score`,
+`evidence_completeness`, `data_quality`, `volume`, `momentum`, `regime`, `news`,
+`fundamental` and `sector`. Scores require matching VALID timestamped source evidence;
+missing values remain null with reasons, not invented observations. Feature availability
+is no earlier than snapshot creation and relevant source retrieval. Future observations,
+future retrievals and future assessments cannot enter earlier decisions. This freezes
+available research inputs, not independently certified vendor vintages or a new raw
+OHLCV archive. Source responses may still have undisclosed revision history.
+
+All routes below require the existing bearer token:
+
+| Route | Behavior |
+|---|---|
+| `GET /intelligence/prospective/decisions?limit=100` | Frozen decisions, latest bounded response |
+| `GET /intelligence/prospective/decisions/{decision_id}` | Decision, collected attachments, labels/censoring |
+| `POST /intelligence/prospective/reconcile` | Explicit idempotent PAPER source replay; never submits orders |
+| `GET /intelligence/prospective/readiness` | Read-only current-pool readiness and exact missing feature counts |
+| `POST /intelligence/prospective/datasets` | Explicit PAPER reconciliation and immutable dataset creation |
+| `GET /intelligence/prospective/datasets/{manifest_id}` | Frozen manifest, hashes, exclusions and readiness |
+
+GETs never fetch providers, reconcile, execute research or change orders. Collection
+is explicit: invoke reconciliation after paper activity or recovery before inspecting
+updated follow-up evidence. Each attachment exposes its collection timestamp.
+Generation/risk records link through the opportunity; entry executions must match
+the frozen strategy version, hash and timeframe. Persisted exit proposals expose
+partial exits before full closure. Immutable execution/events/fills/outcomes cannot
+change unnoticed after capture; mutable order states append new snapshots.
+Duplicates/restart replay do not multiply attachments or labels.
+
+Label schema `selected-paper-episode-net-return-v1` is fully closed episode
+`net_pnl / entry_notional`, with `profitable = net_pnl > 0`. Fees are already in net
+PnL; spread/slippage embedded in fills are not subtracted twice. Complete consistent
+attribution, ownership, finite accounting and ordered open/close/known timestamps
+are required. Mixed/shared/predecision/version-mismatched episodes are excluded.
+NO_TRADE, missing execution, risk rejection, unfilled/rejected orders and fills
+awaiting closure are censored, **not zero-return labels**. Unsubmitted alternatives
+have no counterfactual label.
+
+Dataset JSON request (dates are illustrative; use completed real collection windows):
+
+```json
+{
+  "as_of": "2027-06-01T00:00:00Z",
+  "train_end": "2027-02-01T00:00:00Z",
+  "validation_end": "2027-03-01T00:00:00Z",
+  "test_end": "2027-04-01T00:00:00Z",
+  "final_end": "2027-05-01T00:00:00Z",
+  "embargo_hours": 24
+}
+```
+
+Boundaries must be timezone-aware, strictly chronological, completed and no later
+than the service clock. Embargo is 1-720 hours. Decisions divide into TRAIN,
+VALIDATION, TEST and FINAL_HOLDOUT with embargo gaps; the episode must close and
+its label must be known by its partition's end. Complete finite features, exact
+feature/label schemas and matching feature hashes are required. Synthetic/fixture
+provider captures are excluded. Existing same-instrument reserved holdout windows
+cannot enter development partitions.
+
+The observation pool remains separate from manifests. Assignment is exclusive:
+once a decision belongs to any frozen manifest it cannot be reassigned to a later
+training/validation/test set. Final membership is locked review-only, never tuning/
+training data. Treat final contents as restricted review evidence, not development
+input. A repeated identical policy returns the original manifest unchanged, even if
+more outcomes arrive later. Manifests contain actual creation time, policy, frozen rows,
+decision/feature/row/dataset hashes and explicit exclusions. No model is trained.
+
+Readiness remains NOT_READY / ADVISORY_ONLY in v1. Necessary sample checks are
+100 TRAIN, 30 VALIDATION and 30 TEST labeled decisions with both label classes,
+not sufficient evidence of predictive benefit. Additional blockers include source
+publication/vintage and real-origin attestation, missing timestamped features,
+selected-executed-only selection bias and absent preregistered prospective controls.
+Fixture provider names are a rejection safeguard, **not proof that other provider
+names represent real data**; all captures remain independently unattested.
+
+Reproducible deterministic tests run the real HTTP/risk/paper path: BUY 100 at $102,
+cash $100,000 -> $89,800, exit at $100, cash $99,800, one net -$200 outcome and
+net-return label -0.0196078431372549. Decision bytes remain unchanged; restart replay
+adds zero attachments. A separate bounded-liquidity fixture verifies 40+60 entry
+and exit fills, no premature label and exactly one complete episode. These fixtures
+prove mechanics only. In this example readiness specifically lacks `news`,
+`fundamental` and `sector`; it also rejects fixture origin and insufficient real samples.
+
+Immutability is application-enforced insert-only storage with checksummed reads,
+not a tamper-proof database or protection against a DBA rewriting rows and hashes.
+Retain the single-worker operating model. Reconciliation/readiness scan local history
+and are not certified for large datasets or concurrent multi-process PostgreSQL use.
+No live capability, strategy auto-promotion, new dashboard or change to RiskEngine,
+OrderManager, PaperBroker, kill switch or recovery authority is introduced.
+
 Entries need liquidity, slippage, correlation and sector inputs. The API now
 derives ADV, expected slippage and correlated exposure from completed daily
 bars (`core/market_stats.py`) and sector from the instrument master; if any

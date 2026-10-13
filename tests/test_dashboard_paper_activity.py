@@ -37,6 +37,49 @@ def research():
 
 
 class PaperActivityDashboardTests(TestCase):
+    @staticmethod
+    def health():
+        return {
+            "status": "DEGRADED", "trading_mode": "PAPER", "application_mode": "PAPER",
+            "checks": {"market_data": {"healthy": False, "detail": "no market data received"}},
+            "last_market_data_timestamp": None, "market_data_age_seconds": None,
+            "last_successful_order": None, "error_counts": {},
+        }
+
+    @patch.object(app, "st")
+    def test_health_data_check_requires_explicit_click(self, ui):
+        ui.button.return_value = False
+        client = Mock()
+        client.get.return_value = [{"instrument_id": "XNAS:AAPL"}]
+        app._health(self.health(), client=client)
+        client.post.assert_not_called()
+        ui.selectbox.assert_called_once()
+
+    @patch.object(app, "st")
+    def test_health_data_check_posts_one_instrument_and_displays_provider_failure(self, ui):
+        ui.button.return_value = True
+        ui.selectbox.return_value = "XNAS:AAPL"
+        ui.spinner.return_value = nullcontext()
+        client = Mock()
+        client.get.return_value = [{"instrument_id": "XNAS:AAPL"}]
+        client.post.side_effect = ApiError("STALE_DATA: STALE_QUOTE", 503)
+        app._health(self.health(), client=client)
+        client.post.assert_called_once_with("/paper/data-check/XNAS:AAPL", {}, timeout=120)
+        ui.error.assert_called_once_with("STALE_DATA: STALE_QUOTE")
+        ui.success.assert_not_called()
+
+    @patch.object(app, "st")
+    def test_health_data_check_success_is_not_risk_approval(self, ui):
+        ui.button.return_value = True
+        ui.selectbox.return_value = "XNAS:AAPL"
+        ui.spinner.return_value = nullcontext()
+        client = Mock()
+        client.get.return_value = [{"instrument_id": "XNAS:AAPL"}]
+        client.post.return_value = {"status": "VALIDATED_QUOTE", "risk_status": "NOT_EVALUATED"}
+        app._health(self.health(), client=client)
+        self.assertIn("not a risk approval", ui.success.call_args.args[0])
+        ui.json.assert_any_call(client.post.return_value)
+
     @patch.object(app, "st")
     def test_loads_selected_persisted_cycle_and_research_without_submission(self, ui):
         ui.sidebar.selectbox.return_value = "cycle-1"

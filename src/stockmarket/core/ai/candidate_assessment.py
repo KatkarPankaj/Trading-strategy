@@ -17,7 +17,7 @@ from .analyst import AIAnalyst, AIResult
 from .schemas import CandidateAssessmentSchema
 from ..markets import MarketRegistry
 from ..models import Instrument
-from ..strategies.base import Strategy
+from ..strategies.base import Strategy, strategy_parameters_hash
 
 PROMPT_VERSION = "candidate-assessment-v4"
 SCHEMA_VERSION = "candidate-assessment-v2"
@@ -269,6 +269,7 @@ class CandidateAssessmentService:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.outcome_feedback = outcome_feedback
         self.strategy_ranker: Callable[..., Mapping[str, Any]] | None = None
+        self.decision_snapshot: Callable[[AIResearchOpportunity], Mapping[str, Any]] | None = None
 
     @property
     def configuration_fingerprint(self) -> str:
@@ -277,6 +278,7 @@ class CandidateAssessmentService:
                 "name": name,
                 "implementation": type(strategy).__name__,
                 "version": str(getattr(strategy, "version", "unspecified"))[:128],
+                "parameters_hash": strategy_parameters_hash(strategy) or "UNVERSIONED",
             }
             for name, strategy in self.strategies.items()
         ]
@@ -783,6 +785,7 @@ class CandidateAssessmentService:
                     "name": name,
                     "implementation": type(strategy).__name__,
                     "version": str(getattr(strategy, "version", "unspecified"))[:128],
+                    "parameters_hash": strategy_parameters_hash(strategy) or "UNVERSIONED",
                 }
                 for name, strategy in strategies.items()
             ),
@@ -857,7 +860,10 @@ class CandidateAssessmentService:
         )
 
     def _persist(self, opportunity: AIResearchOpportunity) -> AIResearchOpportunity:
-        self.repository.save_opportunity(opportunity)
+        if self.decision_snapshot is None:
+            self.repository.save_opportunity(opportunity)
+        else:
+            self.repository.save_opportunity(opportunity, decision=self.decision_snapshot(opportunity))
         return opportunity
 
     def _now(self) -> datetime:

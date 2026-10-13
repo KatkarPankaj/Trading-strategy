@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Mapping
 
@@ -78,6 +78,7 @@ from ..core.paper_loop import PaperLoopSettings, PaperTradingLoop
 from ..core.outcome_feedback import OutcomeFeedbackService
 from ..core.strategy_lab import StrategyLabService
 from ..core.strategy_ranking import StrategyRankingService
+from ..core.prospective_evidence import ProspectiveEvidenceService
 from .app import ApiContext, create_app
 
 
@@ -799,6 +800,15 @@ def build_context(
         flatten_minutes=paper_loop.settings.eod_flatten_minutes if paper_loop is not None else 10,
     ) if candidate_assessment is not None else None
     if strategy_lab is not None:
+        prospective = ProspectiveEvidenceService(
+            store, clock=now, strategies=lambda: registered_research_strategies,
+            risk_assumptions={"limits": {
+                key: value.total_seconds() if isinstance(value, timedelta) else value
+                for key, value in asdict(limits).items()}, "limits_duration_unit": "seconds",
+                              "sizing": sizing_limits,
+                              "execution_mode": "PAPER", "research_is_risk_approval": False},
+            provider=market_data.name)
+        candidate_assessment.decision_snapshot = prospective.snapshot
         strategy_ranking = StrategyRankingService(store, outcome_feedback, clock=now)
         strategy_ranking.strategy_source = lambda: registered_research_strategies
         candidate_assessment.outcome_feedback = strategy_ranking.evidence
@@ -830,6 +840,7 @@ def build_context(
         refresh_paper_strategies()
     return ApiContext(settings=settings, paper=paper, live=None, store=store, health=health,
                       api_token=token, gate=gate, recovery=recovery, markets=registry, readiness=checker,
+                      prospective=prospective if strategy_lab is not None else None,
                       kill_switch=kill_switch, monitor=monitor, market_data=market_data,
                       instruments=instruments, research_pipeline=research_pipeline,
                       research_sessions=research_sessions or {},

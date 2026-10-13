@@ -68,6 +68,23 @@ class StrategyComparisonBody(BaseModel):
         return values
 
 
+class ProspectiveDatasetBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    as_of: datetime
+    train_end: datetime
+    validation_end: datetime
+    test_end: datetime
+    final_end: datetime
+    embargo_hours: int = Field(default=24, ge=1, le=720, strict=True)
+
+    @field_validator("as_of", "train_end", "validation_end", "test_end", "final_end")
+    @classmethod
+    def aware_boundaries(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("dataset boundaries must be timezone-aware")
+        return value
+
+
 class PersonalResearchBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
