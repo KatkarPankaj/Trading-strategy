@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from threading import RLock
 from typing import Any, Iterator, Sequence
 from urllib.parse import urlparse
+from ..paper_worker import PaperWorkerLease
 
 
 class DatabaseError(Exception):
@@ -49,12 +50,23 @@ class Database(ABC):
 class SQLiteDatabase(Database):
     dialect = "sqlite"
 
+    @property
+    def path(self) -> str:
+        return self._path
+
+    def claim_paper_worker(self) -> PaperWorkerLease:
+        with self._access("paper worker ownership"):
+            lease = PaperWorkerLease(self._path)
+            self._paper_worker_lease = lease
+            return lease
+
     def __init__(self, path: str = ":memory:", *, lock_timeout: float = 1.0,
                  busy_timeout: float = 1.0, statement_timeout: float = 1.0) -> None:
         for value in (lock_timeout, busy_timeout, statement_timeout):
             if isinstance(value, bool) or not math.isfinite(value) or not 0 < value <= 300:
                 raise ValueError("database timeouts must be finite and in (0, 300]")
         self._path = path
+        self._paper_worker_lease: PaperWorkerLease | None = None
         self._conn = sqlite3.connect(
             path, isolation_level=None, check_same_thread=False, timeout=busy_timeout)
         self._conn.row_factory = sqlite3.Row
@@ -138,6 +150,8 @@ class SQLiteDatabase(Database):
     def close(self) -> None:
         with self._access("close"):
             self._conn.close()
+            if self._paper_worker_lease is not None:
+                self._paper_worker_lease.close()
 
 
 class PostgresDatabase(Database):

@@ -37,7 +37,7 @@ from ..core.paper_lifecycle import (
 )
 from ..core.autonomous_paper_trading import AutonomousPaperTradingService
 from ..core.ai.openai_compatible import OpenAICompatibleProvider
-from ..core.persistence import SchemaOutOfDate, Store, open_store
+from ..core.persistence import SchemaOutOfDate, SQLiteDatabase, Store, open_store
 from ..core.persistence.repositories import to_json
 from ..core.recovery import RecoveryManager, rebuild_portfolio, reconcile_positions
 from ..core.risk import RiskEngine, RiskLimits
@@ -78,6 +78,8 @@ from ..core.settings import AppSettings, ConfigurationError, Environment, load_s
 from ..core.trading_service import OrderTicket, TradingService
 from ..core.market_stats import MarketStatsProvider, MarketStatsSettings
 from ..core.paper_loop import PaperLoopSettings, PaperTradingLoop
+from ..core.paper_worker import PaperWorkerLease
+from ..core.india_readiness import IndiaPaperReadiness
 from ..core.protective_monitor import ProtectiveMonitor, ProtectiveMonitorSettings
 from ..core.outcome_feedback import OutcomeFeedbackService
 from ..core.strategy_lab import StrategyLabService
@@ -277,6 +279,46 @@ def build_context(
     clock: Callable[[], datetime] | None = None,
     market_data_provider: MarketDataProvider | None = None,
 ) -> ApiContext:
+    leases: list[PaperWorkerLease] = []
+    complete = False
+    try:
+        context = _build_context(
+            settings, env, store=store, market_stats=market_stats, sector_of=sector_of,
+            research_analyst=research_analyst, research_strategies=research_strategies,
+            research_sessions=research_sessions, clock=clock,
+            market_data_provider=market_data_provider, worker_leases=leases)
+        context.worker_lease = leases[0] if leases else None
+        if not context.personal_research_mode and context.store.audit.latest(("PAPER_WORKER_BOUND",)) is None:
+            source = os.environ if env is None else env
+            context.store.audit.append(
+                "system:startup", "PAPER_WORKER_BOUND", "paper-worker",
+                context.india_readiness.execution_market,
+                {"market": context.india_readiness.execution_market,
+                 "base_currency": settings.base_currency,
+                 "starting_cash": float(source.get("PAPER_STARTING_CASH") or 100000)},
+                timestamp=clock() if clock else datetime.now(timezone.utc))
+        complete = True
+        return context
+    finally:
+        if not complete:
+            for lease in leases:
+                lease.close()
+
+
+def _build_context(
+    settings: AppSettings,
+    env: Mapping[str, str] | None = None,
+    *,
+    store: Store | None = None,
+    market_stats: Callable[[str], Mapping[str, Any]] | None = None,
+    sector_of: Callable[[str], str | None] | None = None,
+    research_analyst: AIAnalyst | None = None,
+    research_strategies: Mapping[str, Strategy] | None = None,
+    research_sessions: Mapping[str, MarketSession] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    market_data_provider: MarketDataProvider | None = None,
+    worker_leases: list[PaperWorkerLease],
+) -> ApiContext:
     """`market_stats` supplies liquidity, slippage and correlation per instrument; without it, entries are rejected (fail closed).
 
     `clock` and `market_data_provider` exist for deterministic integration tests; production
@@ -300,6 +342,17 @@ def build_context(
     research_markets = registry.codes() if personal_research_mode else settings.markets
     errors += [f"MARKETS lists unknown market {m!r}; known: {list(registry.codes())}"
                for m in settings.markets if m not in registry.codes()]
+    execution_market = (env.get("PAPER_EXECUTION_MARKET") or env.get("PAPER_AUTO_LOOP_MARKET")
+                        or settings.markets[0]).strip().upper()
+    if execution_market not in settings.markets:
+        errors.append("PAPER_EXECUTION_MARKET must be one of MARKETS")
+    if env.get("PAPER_AUTO_LOOP_MARKET") and env["PAPER_AUTO_LOOP_MARKET"].strip().upper() != execution_market:
+        errors.append("PAPER_AUTO_LOOP_MARKET conflicts with PAPER_EXECUTION_MARKET")
+    if execution_market == "IN" and not personal_research_mode:
+        if settings.base_currency != "INR" or not (env.get("PAPER_STARTING_CASH") or "").strip():
+            errors.append("India worker requires BASE_CURRENCY=INR and explicit PAPER_STARTING_CASH")
+        if (env.get("FX_RATES") or "").strip():
+            errors.append("India cross-currency funding is unsupported; FX_RATES must be empty")
     env_analyst, env_sessions, research_errors = _research_from_env(
         env, registry, research_markets,
         default_sessions=default_research_sessions(registry) if personal_research_mode else None)
@@ -453,9 +506,27 @@ def build_context(
             settings.database_url.reveal(), migrate_schema=auto_migrate)
     except SchemaOutOfDate as exc:
         raise ConfigurationError([str(exc)]) from exc
+    if not isinstance(store.db, SQLiteDatabase):
+        raise ConfigurationError(["paper worker ownership/recovery is only validated for local SQLite"])
+    worker_leases.append(store.db.claim_paper_worker())
     discovery = bootstrap_instruments(store, registry, research_markets, env)
     instruments = {r["instrument_id"]: instrument_from_row(
         r) for r in store.instruments.list()}
+    if not personal_research_mode:
+        binding = {"market": execution_market, "base_currency": settings.base_currency,
+                   "starting_cash": float(env.get("PAPER_STARTING_CASH") or 100000)}
+        previous = store.audit.latest(("PAPER_WORKER_BOUND",))
+        if previous is not None and json.loads(previous["payload"]) != binding:
+            raise ConfigurationError(["persisted paper worker market/currency/funding conflicts with startup configuration"])
+        foreign = store.db.query(
+            "SELECT COUNT(*) AS n FROM orders o JOIN instruments i ON i.instrument_id=o.instrument_id "
+            "WHERE i.market != ?", (execution_market,))[0]["n"]
+        if foreign:
+            raise ConfigurationError(["paper history belongs to another market; use an isolated database"])
+        if previous is None:
+            if execution_market != "US" or settings.base_currency != "USD":
+                if store.db.query("SELECT COUNT(*) AS n FROM fills")[0]["n"]:
+                    raise ConfigurationError(["legacy non-USD funding identity is unverified; explicit account migration required"])
     if not personal_research_mode and any(
             (instrument.name or "").startswith("DEVELOPMENT") for instrument in instruments.values()):
         raise ConfigurationError([
@@ -671,6 +742,10 @@ def build_context(
             getattr(getattr(strategy, "config", None), "interval", None))
 
     def paper_strategy_gate(ticket: OrderTicket) -> str | None:
+        if not personal_research_mode:
+            problem = india_readiness.blocker(ticket.instrument_id)
+            if problem:
+                return problem
         if not ticket.strategy.startswith("lab_"):
             return None
         proposal_id = ticket.strategy[4:]
@@ -776,6 +851,13 @@ def build_context(
                                broker=broker, gate=gate, clock=now)
     # connects the broker, restores orders, and halts entries on any discrepancy
     recovery.recover()
+    india_readiness = IndiaPaperReadiness(
+        execution_market=execution_market, instruments=instruments, markets=registry,
+        portfolio=portfolio, provider=market_data, recovery=recovery,
+        starting_cash_explicit=bool((env.get("PAPER_STARTING_CASH") or "").strip()), clock=now)
+    logger.info("paper worker scope configured", execution_market=execution_market,
+                base_currency=settings.base_currency, scheduling_scope="SINGLE_MARKET",
+                paper_auto_loop=env.get("PAPER_AUTO_LOOP", "false"))
     if personal_research_mode:
         gate.halt("PERSONAL_RESEARCH", "recommendations only; execution is disabled")
     personal_research = PersonalResearchService(
@@ -799,6 +881,11 @@ def build_context(
         cycles=autonomous_paper_trading, positions=paper_position_manager,
         gate=gate, markets=registry, settings=settings, clock=now)
     if paper_loop is not None:
+        definition, members = universe_provider.get_universe(paper_loop.settings.universe_id)
+        if definition.markets != (execution_market,) or any(
+                instrument.market != execution_market for instrument in members):
+            raise ConfigurationError(["paper loop universe must contain only the execution market"])
+    if paper_loop is not None:
         previous_control = store.audit.latest(("PAPER_LOOP_ENTRIES_PAUSED", "PAPER_LOOP_ENTRIES_RESUMED"))
         paper_loop.set_entries_enabled(
             previous_control is None or previous_control["action"] == "PAPER_LOOP_ENTRIES_RESUMED",
@@ -821,13 +908,13 @@ def build_context(
         kill_switch, portfolio=portfolio, health=health,
         policy=AutoTriggerPolicy(
             settings.risk.max_daily_loss_pct, settings.risk.max_drawdown_pct),
-        data_expected=lambda: paper_loop is None and any(registry.is_regular_session(
-            m, now()) for m in settings.markets),
+        data_expected=lambda: paper_loop is None and registry.is_regular_session(execution_market, now()),
         unexpected_positions=lambda: [
             d.subject for d in reconcile_positions(portfolio, broker)],
         cancel_open_orders=(env.get("KILL_SWITCH_CANCEL_ORDERS") or "").lower() == "true")
-    if not personal_research_mode and (env.get("KILL_SWITCH_AUTO") or "").lower() == "true":
-        monitor.start(float(env.get("KILL_SWITCH_INTERVAL_SECONDS") or 5))
+    auto_monitor_interval = (
+        float(env.get("KILL_SWITCH_INTERVAL_SECONDS") or 5)
+        if not personal_research_mode and (env.get("KILL_SWITCH_AUTO") or "").lower() == "true" else None)
     checker = LiveReadinessChecker(
         settings=settings, broker=broker, store=store, health=health, recovery=recovery, gate=gate,
         risk_engine=risk_engine, risk_limits=limits, registry=strategies, live_strategies=live_strategies,
@@ -924,6 +1011,8 @@ def build_context(
                       personal_research_mode=personal_research_mode,
                       instrument_discovery=discovery,
                       paper_loop=paper_loop,
+                      india_readiness=india_readiness,
+                      auto_monitor_interval=auto_monitor_interval,
                       outcome_feedback=outcome_feedback,
                       strategy_ranking=strategy_ranking if strategy_lab is not None else None,
                       strategy_lab=strategy_lab)
@@ -962,7 +1051,8 @@ def _paper_loop_from_env(
         errors.append("PAPER_AUTO_LOOP cannot run with PERSONAL_RESEARCH=true")
     if cycles is None:
         errors.append("PAPER_AUTO_LOOP requires autonomous paper cycles (configure an AI research provider)")
-    market = (env.get("PAPER_AUTO_LOOP_MARKET") or (settings.markets[0] if settings.markets else "")).strip().upper()
+    market = (env.get("PAPER_EXECUTION_MARKET") or env.get("PAPER_AUTO_LOOP_MARKET")
+              or (settings.markets[0] if settings.markets else "")).strip().upper()
     if market not in settings.markets:
         errors.append(f"PAPER_AUTO_LOOP_MARKET {market!r} must be one of MARKETS")
     if errors:

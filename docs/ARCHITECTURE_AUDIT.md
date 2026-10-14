@@ -8,6 +8,98 @@ Scope: Non-destructive audit of the legacy implementation (baseline). Revised af
 
 ## 1) Executive Summary
 
+### India readiness and isolated-worker increment (2026-10-14)
+
+Audited baseline `14a5c49e5e397f9904ebcc5607ed9743b332744c`: Market Watch already
+isolates observation pools and canonical identities, but display freshness is
+not feed approval. India calendars accepted bare year lists without review;
+there were no explicit exceptional sessions. Bootstrap could reconstruct the
+same history using a different scalar currency/seed. Execution reservations
+serialize transitions, not lifetime ownership. Health considered any enabled
+market's open session. All existing providers are research-only.
+
+Implemented: separately reviewed venue calendar contracts with archived-byte and
+schedule checksums, per-date publication locators, coverage/review boundaries,
+and explicit special-session intervals; unreviewed India files fail closed.
+One explicit market per worker, conflicting loop/universe startup rejection,
+persisted market/currency/seed binding, foreign-order-history rejection and
+local file-backed SQLite process lease. India requires explicit INR base cash,
+no configured static FX funding, clean completed recovery and final entry-gate
+revalidation. Read-only API/health/dashboard expose granular blockers without
+changing Market Watch selection into execution control.
+
+Ownership/lock order: bootstrap claims the OS sidecar lease outside SQL
+transactions and before instrument bootstrap, replay or order work. The lease
+does not hold a SQLite transaction. Existing execution RLock -> account
+reservation -> short repository transactions remains unchanged; readiness does
+no provider I/O/SQL under that RLock. Recovery readiness is in-memory replay plus
+clean-reconciliation state, not a new partial-replay shortcut. ASGI shutdown stops
+the loop and kill-switch monitor before closing providers/releasing ownership;
+failed joins retain the lease. Database close also releases it for explicit
+restart clients. Build failures release acquired leases; no background monitor
+starts during composition. Immutable snapshots/order mutation still belong to
+the existing TradingService/OrderManager/PortfolioManager boundaries.
+
+No actual India date is certified: official NSE endpoints timed out and BSE
+holiday/notices retrieval supplied no verifiable publication contents. Reviewed
+artifact validation checks integrity and reviewer assertions, not official truth.
+No production calendar, execution-authorized India feed, independently attested
+mapping/entitlement, timestamped FX funding or transaction-cost approval was
+invented. Provider/mapping readiness stays false; India entries remain blocked.
+Local lease exclusion is not distributed account isolation or proof of safe
+simultaneous US/India workers. PostgreSQL and network-filesystem ownership remain
+unsupported. Existing US paper gates, risk, entry-pause, kill-switch, recovery,
+protective exits and opt-in scheduling remain in force. Real-feed qualification,
+completed point-in-time outcomes and OOS sample criteria precede model training;
+no training, promotion, live support or profitability claim is part of this work.
+
+Validation of this increment (configured Python 3.11.6; synthetic providers,
+injected clocks and disposable SQLite files only):
+
+```text
+PYTHONPATH=src;tests
+python -m unittest test_india_readiness test_market_watch test_paper_end_to_end test_trading_calendar test_paper_loop test_protective_monitor test_paper_execution_safety test_strategy_comparison test_strategy_lab test_strategy_lifecycle -q
+```
+
+137 passed in 127.681 seconds. After the final policy-compatibility adjustment,
+`python -m unittest test_india_readiness -q` passed all 28 tests in 1.917 seconds.
+The 28 new India/ownership/lifecycle tests include
+publication/report tampering, missing/unreviewed/expired calendars, independent
+venues, weekend special-session intervals, INR/FX rejection, persisted restart
+identity, mixed universe rejection, final gate revalidation, interrupted replay,
+local process exclusion and OS lease release after process termination.
+Additional policy assertions preserve the unchanged US calendar fingerprint
+shape and serialize actual venue review/special-session evidence without
+discarding it or using the missing country calendar.
+
+```text
+PYTHONPATH=src
+python -m unittest discover -s tests -v
+python -m bandit -r src\stockmarket -c bandit.yaml -ll -f json -o <session-report>
+python -m pip_audit -r requirements.txt
+git diff --check
+```
+
+Final full suite: 699 discovered, **694 passed, five PostgreSQL integration
+skips**, 147.613 seconds, zero failures/errors. Earlier full-suite review caught
+15 calendar `asdict` serialization errors after introducing mapping proxies;
+removed that representation, retained defensive copies and added an `asdict`
+regression assertion before the successful final run. Existing AnyIO
+ResourceWarnings remain; this is not a leak-free certification.
+
+Bandit exits nonzero with the same seven pre-existing MEDIUM findings, compared
+with the preceding milestone report: B310 in OpenAI-compatible/Finnhub HTTP
+adapters, B608 at four repository SQL-construction sites, B113 in the dashboard
+client. No additional findings in the final report. Dependency audit found no
+known vulnerabilities; whitespace check passed. Editor diagnostics reported no
+errors in touched Python files. No configured repository-wide type gate exists;
+the signature helper reported six fixture call incompatibilities for the
+unchanged public bootstrap signature, although those runtime calls passed.
+The editor test runner did not discover the new module; unittest was executed
+directly instead. No services were restarted, no operator database or credentials
+were modified, and no migrations, commits, pushes or deployments were performed.
+The revised dashboard was validated through mocks/API tests, not a restarted UI.
+
 ### US/India Market Watch vertical slice (2026-10-14)
 
 Audit: `ApiContext.instruments` is the shared canonical master loaded from
@@ -29,8 +121,8 @@ invalid/missing prices are null and synthetic providers are labeled. Vendor
 alias maps are separate from the canonical master. Scoped Twelve Data credentials
 and pacing are shared configuration logic, not exposed API state.
 
-Calendar override directory supports independent venue files with country
-fallback. Exchange phase is exact; country execution is conservative on
+Calendar override directory supports independent venue files with US country
+fallback (India now requires venue review as described above). Exchange phase is exact; country execution is conservative on
 disagreement, and flattening uses earliest venue close. Uncovered dates remain
 closed. US DST and India fixed-offset tests use deterministic clocks.
 No official India calendar could be fetched, so none was fabricated or bundled.

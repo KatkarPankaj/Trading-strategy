@@ -264,7 +264,10 @@ class MarketWatchTests(TestCase):
         ui.text_input.return_value = "abc"
         ui.button.return_value = False
         client = Mock()
-        client.get.side_effect = [self.watch.profiles(), {"items": [], "next_cursor": None}, []]
+        client.get.side_effect = [
+            self.watch.profiles(),
+            {"execution_market": "US", "india_status": "BLOCKED", "india": []},
+            {"items": [], "next_cursor": None}, []]
         dashboard._market_watch(client)
         self.assertEqual(client.get.call_args_list[-1].kwargs, {"market": "IN"})
         client.post.assert_not_called()
@@ -315,7 +318,7 @@ class MultiMarketCalendarTests(TestCase):
                     "years": [2026], "holidays": holidays, "early_closes": {}}), encoding="utf-8")
             india = default_markets(path).get("IN")
             self.assertEqual(india.phase(NOW, "XNSE"), SessionPhase.CLOSED)
-            self.assertEqual(india.phase(NOW, "XBOM"), SessionPhase.REGULAR)
+            self.assertEqual(india.phase(NOW, "XBOM"), SessionPhase.CLOSED)
             self.assertEqual(india.phase(NOW), SessionPhase.CLOSED)
             self.assertFalse(india.is_covered(date(2027, 1, 1)))
         self.assertEqual(default_markets().get("IN").phase(NOW), SessionPhase.CLOSED)

@@ -19,9 +19,29 @@ class TradingCalendar:
     trading_pauses: tuple[tuple[time, time], ...] = ()
     # None means "trust the holiday list"; a set means only those years are known, others fail closed.
     covered_years: frozenset[int] | None = None
+    special_sessions: Mapping[date, tuple[tuple[time, time], ...]] = field(default_factory=dict)
+    coverage_start: date | None = None
+    coverage_end: date | None = None
+    review_required: bool = False
+    review_expires: date | None = None
+    provenance: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         ZoneInfo(self.timezone)
+        if (self.coverage_start is None) != (self.coverage_end is None) or (
+                self.coverage_start is not None and self.coverage_start > self.coverage_end):
+            raise ValueError("calendar coverage boundaries must be paired and ordered")
+        for day, sessions in self.special_sessions.items():
+            if not isinstance(day, date) or not sessions:
+                raise ValueError("special sessions require a date and explicit time intervals")
+            previous = time.min
+            for start, end in sessions:
+                if any(not isinstance(t, time) or t.tzinfo is not None for t in (start, end)) \
+                        or not previous <= start < end:
+                    raise ValueError("special sessions must be ordered non-overlapping local intervals")
+                previous = end
+        if self.special_sessions.keys() & self.early_closes.keys():
+            raise ValueError("a special-session date cannot also have a regular-session early close")
         if (
             not isinstance(self.open_time, time)
             or not isinstance(self.close_time, time)
@@ -69,13 +89,31 @@ class TradingCalendar:
                 raise ValueError(
                     "trading pauses must be ordered, non-overlapping, and within regular hours")
             previous_end = end
+        object.__setattr__(self, "special_sessions", {
+            day: tuple(tuple(interval) for interval in sessions)
+            for day, sessions in self.special_sessions.items()})
+        object.__setattr__(self, "provenance", dict(self.provenance))
 
     def is_trading_day(self, day: date) -> bool:
-        if self.covered_years is not None and day.year not in self.covered_years:
+        if not self.is_covered(day):
             return False
+        if day in self.special_sessions:
+            return True
         return day.weekday() not in self.closed_weekdays and day not in self.holidays
 
+    def is_covered(self, day: date) -> bool:
+        if self.covered_years is not None and day.year not in self.covered_years:
+            return False
+        if self.coverage_start is not None and not self.coverage_start <= day <= self.coverage_end:
+            return False
+        if self.review_required and (not self.provenance or self.review_expires is None
+                                     or day > self.review_expires):
+            return False
+        return True
+
     def close_time_on(self, day: date) -> time:
+        if day in self.special_sessions:
+            return self.special_sessions[day][-1][1]
         return self.early_closes.get(day, self.close_time)
 
     def is_open(self, at: datetime) -> bool:
@@ -88,6 +126,8 @@ class TradingCalendar:
         local_time = local.time().replace(tzinfo=None)
         if not self.is_trading_day(local.date()):
             return False
+        if local.date() in self.special_sessions:
+            return any(start <= local_time < end for start, end in self.special_sessions[local.date()])
         if not self.open_time <= local_time < self.close_time_on(local.date()):
             return False
         return not any(start <= local_time < end for start, end in self.trading_pauses)

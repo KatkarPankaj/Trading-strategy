@@ -265,11 +265,17 @@ class RecoveryManager:
         self._retry, self._sleep = retry, sleep
         self._clock = clock or _now
         self._replay_complete = False
+        self._clean_reconciliation = False
+
+    @property
+    def execution_ready(self) -> bool:
+        return self._replay_complete and self._clean_reconciliation
 
     def recover(self) -> ReconciliationReport:
         """Startup sequence: load state, connect, reconcile, and halt new entries unless clean."""
         self._gate.halt(GATE_CODE, "recovery in progress; no new entries until reconciliation completes")
         self._replay_complete = False
+        self._clean_reconciliation = False
         blocked = self._active_execution_report(0)
         if blocked is not None:
             self._conclude(blocked, "STARTUP_RECONCILIATION")
@@ -295,7 +301,10 @@ class RecoveryManager:
         return report
 
     def reconcile(self) -> ReconciliationReport:
-        return self._reconcile(0)
+        self._clean_reconciliation = False
+        report = self._reconcile(0)
+        self._clean_reconciliation = report.clean
+        return report
 
     def resume(self, operator: str, note: str, acknowledged: Iterable[str] = ()) -> ReconciliationReport:
         """Explicit recovery: re-check, and clear the halt only if every remaining discrepancy is acknowledged."""
@@ -304,7 +313,7 @@ class RecoveryManager:
                 "operator and note are required to resume trading")
         if not self._replay_complete:
             raise RecoveryError("history replay incomplete; complete recovery before resuming")
-        report = self._reconcile(0)
+        report = self.reconcile()
         acknowledged = set(acknowledged)
         outstanding = [
             d.id for d in report.discrepancies if d.id not in acknowledged]
@@ -405,6 +414,7 @@ class RecoveryManager:
         return actions
 
     def _conclude(self, report: ReconciliationReport, action: str) -> None:
+        self._clean_reconciliation = report.clean
         ids = [d.id for d in report.discrepancies]
         if report.clean:
             self._gate.clear(GATE_CODE)

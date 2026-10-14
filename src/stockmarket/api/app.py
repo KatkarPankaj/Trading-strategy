@@ -128,6 +128,9 @@ class ApiContext:
     strategy_ranking: StrategyRankingService | None = None
     prospective: ProspectiveEvidenceService | None = None
     market_watch: MarketWatch | None = None
+    india_readiness: Any = None
+    worker_lease: Any = None
+    auto_monitor_interval: float | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -150,12 +153,18 @@ def create_app(ctx: ApiContext) -> FastAPI:
     def shutdown_paper_services() -> None:
         if ctx.paper_loop is not None:
             ctx.paper_loop.stop()
+        if ctx.monitor is not None:
+            ctx.monitor.stop()
         if ctx.market_data is not None:
             ctx.market_data.close()
         if ctx.market_watch is not None:
             ctx.market_watch.close()
+        if ctx.worker_lease is not None:
+            ctx.worker_lease.close()
 
     app.add_event_handler("shutdown", shutdown_paper_services)
+    if ctx.auto_monitor_interval is not None:
+        app.add_event_handler("startup", lambda: ctx.monitor.start(ctx.auto_monitor_interval))
     if ctx.paper_loop is not None:
         if ctx.mode != TradingMode.PAPER.value or ctx.live is not None:
             raise RuntimeError("the paper loop may only run with PAPER execution")
@@ -261,9 +270,19 @@ def create_app(ctx: ApiContext) -> FastAPI:
             market: ctx.markets.phase(market, at).value
             for market in ctx.settings.markets
         } if ctx.markets is not None else {}
+        worker = ctx.india_readiness.status() if ctx.india_readiness is not None else None
+        report["paper_worker"] = worker
         blockers = []
-        if not any(phase == "REGULAR" for phase in sessions.values()):
+        execution_market = worker["execution_market"] if worker else (
+            ctx.paper_loop.settings.market if ctx.paper_loop is not None else ctx.settings.markets[0])
+        if worker and execution_market == "IN" and worker["india_status"] == "BLOCKED":
+            report["execution_enabled"] = False
+        if sessions.get(execution_market) != "REGULAR":
             blockers.append("NO_REGULAR_MARKET_SESSION")
+        if worker and execution_market == "IN":
+            blockers.extend(sorted({reason for row in worker["india"] for reason in row["blockers"]}))
+            if not worker["india"]:
+                blockers.append("NO_REGISTERED_INDIA_INSTRUMENTS")
         if not report["checks"]["market_data"]["healthy"]:
             blockers.append("MISSING_OR_STALE_EXECUTION_DATA")
         blockers.extend(f"{name.upper()}_UNHEALTHY" for name, check in report["checks"].items()
@@ -277,12 +296,19 @@ def create_app(ctx: ApiContext) -> FastAPI:
         report["paper_readiness"] = {
             "status": "BLOCKED" if blockers else "PER_ORDER_VALIDATION_REQUIRED",
             "sessions": sessions, "blockers": blockers,
+            "execution_market": execution_market,
             "risk_approval": False,
             "detail": "Read-only status, not order authorization. Closed-session or stale prices "
                       "are never refreshed by changing timestamps. Each order needs its own fresh "
                       "validated quote, sizing and final RiskEngine approval.",
         }
         return JSONResponse(report, status_code=200 if report["status"] != "DOWN" else 503)
+
+    @app.get("/paper/market-readiness", dependencies=[Depends(auth)])
+    def market_readiness() -> Any:
+        if ctx.india_readiness is None:
+            raise HTTPException(503, "paper market readiness is not configured")
+        return _plain(ctx.india_readiness.status())
 
     def watch_service() -> MarketWatch:
         if ctx.market_watch is None:

@@ -102,6 +102,14 @@ def _market_watch(client: ApiClient) -> None:
     market = st.selectbox("Watch market", [row["market"] for row in profiles],
                           key="watch_market")
     profile = next(row for row in profiles if row["market"] == market)
+    readiness = _safe(client, "/paper/market-readiness")
+    if readiness is not None:
+        st.caption(f"Execution worker: {readiness['execution_market']} | PAPER | SINGLE_MARKET. "
+                   "Watch selection does not switch execution.")
+        if market == "IN":
+            st.warning(f"India paper execution: {readiness['india_status']}. "
+                       "Fresh observation quotes are not execution authorization.")
+            st.json(readiness["india"])
     st.caption(
         f"{market} | {profile['currency']} | {profile['timezone']} | "
         f"Session: {profile['phase']} | Provider: {profile['provider']} | "

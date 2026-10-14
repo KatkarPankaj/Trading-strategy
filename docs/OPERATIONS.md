@@ -9,6 +9,115 @@ terminator and network policy.
 
 ## Local API
 
+### India readiness and single-market worker boundary
+
+`PAPER_EXECUTION_MARKET` binds one process to one market; absent that setting,
+the explicit `PAPER_AUTO_LOOP_MARKET` or existing first-market default is used.
+Both explicit settings must agree and be enabled by `MARKETS`. An automatic
+loop's universe definition **and all members** must belong only to that market.
+Market Watch selection changes observation only. `/health` evaluates the worker's
+session, not whether any observed market happens to be open. Startup structured
+logs, `/health`, and authenticated `GET /paper/market-readiness` expose the scope.
+Paper automation remains opt-in; live execution and model training are unchanged.
+
+The startup audit event `PAPER_WORKER_BOUND` persists market, base currency and
+initial cash seed. Restart refuses changes to that identity or foreign-market
+order history. Existing US/USD histories retain their existing default seed;
+unbound non-USD histories with fills need a separately reviewed account migration.
+No history is deleted or cash reinterpreted. New India workers require
+`BASE_CURRENCY=INR` and explicit `PAPER_STARTING_CASH`. Positive available INR cash
+is also rechecked on entry. `FX_RATES` is rejected for India workers: static,
+untimestamped rates and display conversions are not a supported funding policy.
+No funding route or cross-currency conversion was added.
+
+Each API bootstrap (including personal research, which performs recovery) holds
+an OS-owned sidecar lease next to its local SQLite file. A second bootstrap on
+that file fails; normal application shutdown, database close, startup failure,
+or process termination releases ownership. Never delete/replace the sidecar
+while a worker is active. Use the normal ASGI shutdown path: monitoring must stop
+before providers/ownership are released. A stuck trading/kill-switch monitor
+causes shutdown to fail and retain ownership. Timeout does not cancel work.
+Direct `build_context` callers must close providers and release `worker_lease`,
+or close the database, after stopping work. In-memory databases are test-local
+and do not provide cross-process ownership. This is not distributed locking:
+hard-linked aliases, network filesystems, copied databases, raw repository
+writers and separate databases targeting the same external account are outside
+the contract. PostgreSQL guarded recovery/worker ownership is not supported.
+Simultaneous US/India execution is **not integration-certified**; separate files,
+paper accounts, currency seeds, calendars and provider budgets are prerequisites,
+not proof of simultaneous readiness.
+
+India readiness separately reports observation, reviewed calendar, instrument
+metadata, independently verified provider mapping, provider validation, explicit
+INR funding, completed replay/clean reconciliation, worker scope and session.
+The ordinary entry submission gate checks these again under the execution lock;
+protective exits retain their existing risk/quote/idempotency checks and are not
+disabled by an entry-readiness failure. Health/status GETs never query providers,
+resume recovery, or approve risk. Missing/invalid quotes still use existing
+source/identity/timestamp, tick/lot, sizing and final RiskEngine checks.
+
+**Current blockers:** no independently verified India execution feed, mapping
+attestation, entitlement/delay/rate-limit approval, or transaction-cost policy is
+implemented. Yahoo, Twelve Data and mock remain research-only. There is no
+environment boolean that promotes them. Accordingly `provider_validated` and
+`instrument_mapping_verified` remain false and **India entries remain blocked**,
+even with INR cash and fresh observations.
+
+#### Reviewed India calendar artifact contract
+
+India has no bundled verified calendar. Separate `XNSE.json` and `XBOM.json`
+are required; neither an `IN.json` fallback nor an empty holiday list establishes
+reviewed coverage. Official candidate source indexes reviewed on 2026-10-14:
+
+- NSE: <https://www.nseindia.com/resources/exchange-communication-holidays>
+  and <https://www.nseindia.com/api/holiday-master?type=trading>.
+  Requests timed out; no publication contents were verified.
+- BSE: <https://www.bseindia.com/static/markets/marketinfo/listholi.aspx>
+  failed transport; <https://www.bseindia.com/markets/MarketInfo/DispNewNoticesCirculars.aspx>
+  returned only a notice-table heading, not a verifiable schedule/circular.
+
+These are discovery indexes, **not verified publications for any enabled date**.
+Obtain the exact official cash-equity holiday and special-session circulars.
+Archive the original bytes locally; a human reviewer must compare **every**
+holiday, early close and special-session interval with publication/page evidence.
+Do not infer Muhurat timings, holidays, or an entire year's coverage.
+
+Venue JSON retains `years`, `holidays`, `early_closes`; `special_sessions` maps an
+ISO date to ordered, non-overlapping local `[open, close]` time pairs. Explicit
+special sessions can open an otherwise closed weekend/holiday; gaps and exact
+close boundaries remain closed. No timing is supplied implicitly.
+
+The `review` object requires `exchange` (`XNSE`/`XBOM`), `segment=CASH_EQUITY`,
+aware `retrieved_at` and `reviewed_at` (ordered and not future),
+`coverage_start`, `coverage_end`, `expires_on`, `sources` and `validation_report`.
+Each source has official exchange HTTPS `url`, relative local `artifact` and
+`sha256`. The report contains:
+
+- `status=REVIEWED`, named `reviewer`;
+- `schedule_sha256`: SHA256 of UTF-8
+  `json.dumps(schedule, sort_keys=True, separators=(",", ":"))`, where `schedule`
+  contains exactly `years`, `holidays`, `early_closes`, `special_sessions`
+  (missing optional maps default to `{}`, holidays to `[]`);
+- `verified_dates`: sorted unique union of all event dates;
+- `date_evidence`: exactly those dates, each with `source_sha256` matching an
+  archived publication and a nonempty publication/page/paragraph `locator`.
+
+Reproduce integrity validation offline with the configured interpreter:
+
+```text
+python -c "from pathlib import Path; from stockmarket.core.markets import load_calendar_file; load_calendar_file(Path('reviewed-calendars/XNSE.json'), reviewed_exchange='XNSE'); load_calendar_file(Path('reviewed-calendars/XBOM.json'), reviewed_exchange='XBOM')"
+```
+
+Set `PYTHONPATH=src` and use only the reviewed artifact directory.
+This verifies artifact/schedule integrity and review completeness, **not the
+truth of a publication or reviewer assertion**. No automatic PDF interpretation,
+exchange authenticity signature, or calendar-update subscription exists.
+Runtime rejects absent/unreviewed/expired/out-of-bound coverage. Schedule or
+artifact changes require a new report/review and controlled restart; no hot
+reload or update is performed. Synthetic tests prove gating, not official dates.
+Acceptance for real India scheduling remains incomplete until actual official
+publications and independently validated execution inputs are available.
+
 ### Market Watch: US and India observation slice
 
 The dashboard sidebar now offers **Market Watch** separately from Trading Monitor.
@@ -84,10 +193,11 @@ existing execution path.
 #### Independent calendar configuration and remaining execution limitation
 
 `MARKET_CALENDAR_DIRECTORY` replaces the bundled directory. Supply reviewed
-`US.json` and `IN.json`, or separate `XNSE.json` and `XBOM.json`; optional US MIC
+`US.json` and separate reviewed `XNSE.json` and `XBOM.json`; optional US MIC
 files `XNYS.json`, `XNAS.json`, `ARCX.json` override `US.json`. JSON uses the existing
-`years`, `holidays`, `early_closes` format. Missing venue files fall back to their
-country file, and missing/uncovered country data fails closed. Do not mark a year
+`years`, `holidays`, `early_closes` format, with the India review contract above.
+Missing US venue files fall back to the US country file; India requires separate
+reviewed venue files. Missing/uncovered data fails closed. Do not mark a year
 covered using a fictitious empty holiday list. Retain source/verification metadata
 with the reviewed files. US daylight-saving conversion uses America/New_York;
 India uses Asia/Kolkata. Normal hours remain explicit market definitions.

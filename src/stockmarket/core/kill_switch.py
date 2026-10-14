@@ -241,3 +241,7 @@ class AutoTriggerMonitor:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                raise RuntimeError("kill-switch monitor is still processing; worker ownership must remain held")

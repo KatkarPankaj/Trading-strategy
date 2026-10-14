@@ -266,9 +266,20 @@ class StrategyLabService:
         instrument = self.instruments[proposal["instrument_id"]]
         market = self.assessment.markets.get(instrument.market)
         session = self.sessions.get(instrument.market)
-        calendar = asdict(market.calendar)
+        venue_calendar = market.exchange_calendars.get(instrument.exchange, market.calendar)
+        calendar = asdict(venue_calendar)
         calendar["early_closes"] = {day.isoformat(): close.isoformat()
-                                    for day, close in market.calendar.early_closes.items()}
+                                    for day, close in venue_calendar.early_closes.items()}
+        for key, default in (
+            ("special_sessions", {}), ("coverage_start", None), ("coverage_end", None),
+            ("review_required", False), ("review_expires", None), ("provenance", {}),
+        ):
+            if calendar[key] == default:
+                del calendar[key]
+        if venue_calendar.special_sessions:
+            calendar["special_sessions"] = {
+                day.isoformat(): [(start.isoformat(), end.isoformat()) for start, end in sessions]
+                for day, sessions in venue_calendar.special_sessions.items()}
         return json.loads(to_json({
             "proposal_id": proposal["proposal_id"], "start": ts(start), "end": ts(end),
             "parameters_hash": proposal["parameters_hash"],
