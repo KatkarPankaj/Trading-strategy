@@ -105,7 +105,7 @@ class PaperTradingLoop:
         market = self.markets.get(self.settings.market)
         zone = ZoneInfo(market.timezone)
         day = now.astimezone(zone).date()
-        return datetime.combine(day, market.calendar.close_time_on(day), tzinfo=zone)
+        return datetime.combine(day, market.close_time_on(day), tzinfo=zone)
 
     def recover_unfinished(self) -> list[str]:
         """Resume runs interrupted by a restart; a failing recovery is reported, not hidden."""
@@ -304,6 +304,7 @@ class PaperTradingLoop:
             "trading_mode": TradingMode.PAPER.value,
             "universe_id": self.settings.universe_id,
             "market": self.settings.market,
+            "scheduling_scope": "SINGLE_MARKET",
             "interval_minutes": self.settings.interval_minutes,
             "top_n": self.settings.top_n,
             "eod_flatten_minutes": self.settings.eod_flatten_minutes,

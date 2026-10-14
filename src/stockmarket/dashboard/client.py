@@ -112,7 +112,7 @@ class ApiClient:
                 "regenerate and review the proposal.", 409)
         if not response.ok:
             if path.startswith(("/research/personal/", "/strategy-lab/", "/paper/loop/",
-                                "/intelligence/prospective/")):
+                                "/intelligence/prospective/", "/watchlist", "/market-watch/")):
                 try:
                     detail = response.json().get("detail", "Request rejected")
                 except requests.exceptions.JSONDecodeError:

@@ -59,6 +59,10 @@ def main() -> None:
         "Arbitrary orders cannot be entered.")
     if st.sidebar.button("Refresh"):
         st.rerun()
+    page = st.sidebar.radio("Workspace", ["Trading Monitor", "Market Watch"])
+    if page == "Market Watch":
+        _market_watch(client)
+        return
 
     activity = _paper_activity(client) if health and health.get("trading_mode") == "PAPER" and not personal else None
     if activity is not None:
@@ -84,6 +88,68 @@ def main() -> None:
     for tab, render in zip(tabs, renderers):
         with tab:
             render()
+
+
+def _market_watch(client: ApiClient) -> None:
+    st.header("Market Watch")
+    st.caption(
+        "Shared canonical registry and watchlist. Quotes are observations, not orders or risk approvals. "
+        "Refresh is explicit; missing prices are never zero. No live execution.")
+    profiles = _safe(client, "/market-watch/markets")
+    if not profiles:
+        st.warning("No enabled markets are available.")
+        return
+    market = st.selectbox("Watch market", [row["market"] for row in profiles],
+                          key="watch_market")
+    profile = next(row for row in profiles if row["market"] == market)
+    st.caption(
+        f"{market} | {profile['currency']} | {profile['timezone']} | "
+        f"Session: {profile['phase']} | Provider: {profile['provider']} | "
+        f"Freshness limit: {profile['max_quote_age_seconds']} seconds")
+    if not profile["calendar_covered"]:
+        st.warning("Calendar coverage is unavailable. Trading sessions fail closed.")
+    if profile["data_origin"] == "SYNTHETIC":
+        st.warning("Synthetic mock provider: these prices are not real market observations.")
+    else:
+        st.caption("Provider provenance is displayed; real-origin and vendor vintages are not independently attested.")
+    query = st.text_input("Search symbol, exchange identity or name", key="watch_query")
+    result = _safe(client, "/market-watch/instruments", market=market, q=query, limit=50)
+    if result and result["items"]:
+        choices = {row["instrument_id"]: row for row in result["items"]}
+        identity = st.selectbox("Canonical instrument", list(choices), key=f"watch_add_{market}")
+        st.json(choices[identity])
+        if result["next_cursor"]:
+            st.caption("Showing the first 50 matches. Narrow the search to find another instrument.")
+        if st.button("Add to shared watchlist", key="watch_add"):
+            try:
+                client.post("/watchlist", {"instrument_id": identity})
+                st.success("Instrument added. No order submitted.")
+            except ApiError as exc:
+                st.error(str(exc))
+    elif result is not None:
+        st.info("No matching registered instruments. Import verified master metadata; quotes do not create instruments.")
+    rows = _safe(client, "/watchlist", market=market)
+    if rows:
+        _table(rows)
+        identity = st.selectbox("Watched instrument to remove",
+                                [row["instrument_id"] for row in rows], key=f"watch_remove_{market}")
+        if st.button("Remove from shared watchlist", key="watch_remove"):
+            try:
+                client.post("/watchlist/remove", {"instrument_id": identity})
+                st.rerun()
+            except ApiError as exc:
+                st.error(str(exc))
+        if st.button("Refresh market quotes", key="watch_refresh"):
+            try:
+                refresh = client.post(
+                    f"/market-watch/refresh?market={quote(market, safe='')}", {}, timeout=30)
+                _table(refresh["items"])
+                if refresh["incomplete"]:
+                    st.warning("Refresh was incomplete; unchecked observations retain their original timestamps.")
+            except ApiError as exc:
+                st.error(str(exc))
+    elif rows is not None:
+        st.info("No instruments watched in this market.")
 
 
 def _paper_activity(client: ApiClient) -> dict[str, Any]:

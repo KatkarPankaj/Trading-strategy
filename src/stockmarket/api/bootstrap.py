@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import asdict, replace
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from fastapi import FastAPI
@@ -54,6 +55,8 @@ from ..core.kill_switch import AutoTriggerMonitor, AutoTriggerPolicy, KillSwitch
 from ..core.observability import AlertManager, StructuredLogger
 from ..core.live_readiness import LiveReadinessChecker
 from ..core.markets import MarketRegistry, default_markets
+from ..core.market_watch import MarketWatch
+from ..core.data.factory import market_provider_env
 from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
 from ..core.data.provider import MarketDataProvider
 from ..core.scanner import (
@@ -292,7 +295,8 @@ def build_context(
     needed = {n: (env.get(n) or "").strip() for n in
               ("ENTRY_WINDOW_START", "ENTRY_WINDOW_END", "MAX_POSITION_QUANTITY", "MAX_ORDER_NOTIONAL")}
     errors += [f"{n} is required" for n, v in needed.items() if not v]
-    registry = default_markets()
+    calendar_directory = (env.get("MARKET_CALENDAR_DIRECTORY") or "").strip()
+    registry = default_markets(Path(calendar_directory) if calendar_directory else None)
     research_markets = registry.codes() if personal_research_mode else settings.markets
     errors += [f"MARKETS lists unknown market {m!r}; known: {list(registry.codes())}"
                for m in settings.markets if m not in registry.codes()]
@@ -875,7 +879,32 @@ def build_context(
         if autonomous_research is not None:
             autonomous_research.strategy_refresh = refresh_paper_strategies
         refresh_paper_strategies()
+    watch_providers: dict[str, Any] = {}
+    watch_ages: dict[str, timedelta] = {}
+    from ..core.resilience import RetryPolicy
+    try:
+        for code in settings.markets:
+            scoped = market_provider_env(env, code)
+            provider_name = dict(settings.data_provider_routes).get(code, settings.data_provider)
+            raw = market_data_provider or create_market_data_provider(
+                provider_name, instruments, markets=registry, env=scoped)
+            watch_ages[code] = timedelta(seconds=int(
+                env.get(f"MARKET_WATCH_MAX_AGE_SECONDS_{code}")
+                or settings.max_market_data_age_seconds))
+            if not 0 < watch_ages[code].total_seconds() <= settings.max_market_data_age_seconds:
+                raise ValueError("watch freshness must be positive and no looser than execution freshness")
+            watch_providers[code] = ResilientProvider(
+                raw, policy=DataPolicy(
+                    timeout_seconds=2, max_quote_age=timedelta(days=36500),
+                    max_rate_limit_wait=0, retry=RetryPolicy(max_attempts=1)), clock=now)
+    except (TypeError, ValueError):
+        for provider in watch_providers.values():
+            provider.close()
+        raise
+    market_watch = MarketWatch(instruments, registry, store.watchlist, watch_providers,
+                               max_age=watch_ages, clock=now)
     return ApiContext(settings=settings, paper=paper, live=None, store=store, health=health,
+                      market_watch=market_watch,
                       api_token=token, gate=gate, recovery=recovery, markets=registry, readiness=checker,
                       prospective=prospective if strategy_lab is not None else None,
                       kill_switch=kill_switch, monitor=monitor, market_data=market_data,

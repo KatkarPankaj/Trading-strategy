@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
+from dataclasses import replace
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -393,7 +394,8 @@ class ProtectiveMonitorTests(TestCase):
         self.monitor.settings = ProtectiveMonitorSettings(max_items=1)
         real = self.ctx.paper.portfolio.positions
         positions = real()
-        positions["unknown:instrument"] = SimpleNamespace(instrument_id="unknown:instrument")
+        positions["unknown:instrument"] = replace(
+            next(iter(positions.values())), instrument_id="unknown:instrument")
         with patch.object(self.ctx.paper.portfolio, "positions", return_value=positions):
             self.monitor.enable()
             result = self.monitor.run_once()

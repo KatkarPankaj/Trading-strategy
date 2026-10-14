@@ -18,6 +18,11 @@ from ..core.risk import OrderIntent
 _ID = r"^[A-Za-z0-9:._\-^=&]+$"
 
 
+class WatchInstrumentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instrument_id: str = Field(min_length=1, max_length=128, pattern=_ID)
+
+
 class StrategyLabProposalBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     snapshot_id: str = Field(min_length=1, max_length=128, pattern=_ID)

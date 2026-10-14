@@ -42,6 +42,9 @@ class Database(ABC):
         except Exception:
             return False
 
+    def history_revision(self) -> tuple[int, int]:
+        raise DatabaseError("validated history replay requires a supported snapshot revision")
+
 
 class SQLiteDatabase(Database):
     dialect = "sqlite"
@@ -84,6 +87,11 @@ class SQLiteDatabase(Database):
         with self._access("execute"):
             with self._statement():
                 self._conn.execute(sql, tuple(params))
+
+    def history_revision(self) -> tuple[int, int]:
+        with self._access("history_revision"):
+            return (self._conn.execute("PRAGMA data_version").fetchone()[0],
+                    self._conn.total_changes)
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         with self._access("query"):

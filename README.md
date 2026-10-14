@@ -1,5 +1,13 @@
 # Global Market Research and Paper-Trading Platform
 
+The API-backed dashboard includes a dedicated **Market Watch** workspace for
+US/India canonical-instrument search, a persisted shared watchlist and explicit,
+timestamped quote refresh. Enable both observation markets with `MARKETS=US,IN`;
+this does not enable simultaneous paper loops or fund INR positions. India
+session authorization requires separately reviewed calendar files; no verified
+India holiday calendar is bundled. See the [Market Watch operations guide](docs/OPERATIONS.md#market-watch-us-and-india-observation-slice)
+for V25 migration, provider mappings, freshness policies and limitations.
+
 The current development path is the October platform layer: provider-aware market
 research, deterministic strategy evaluation, risk-gated paper execution, and an
 API-backed monitor with explicit paper-proposal acceptance. It remains paper-only
@@ -45,6 +53,13 @@ The latency budget is not a hard guarantee: shared execution/database locks and
 non-cancellable provider calls remain limitations.
 Entry quotes/statistics are prepared outside the execution lock and checked again
 for freshness and changed portfolio/order state before final RiskEngine validation.
+Protective monitoring and end-of-day flattening also prepare quotes outside that
+lock, then revalidate the snapshot before atomic updates and final exit risk checks.
+New entries stay blocked during preparation and after incomplete checks.
+History replay validates page ordering, counts and SQLite change revisions; oversized
+histories fail closed rather than pretending an incomplete checkpoint is usable.
+PostgreSQL remains unvalidated and lacks the snapshot-revision contract needed
+by this guarded startup replay.
 Provider lanes admit at most four outstanding reads each, including timed-out reads.
 SQLite admission/statement waits and historical reads now have explicit fail-closed
 bounds; see [execution isolation](docs/OPERATIONS.md#execution-preparation-and-bounded-storage).

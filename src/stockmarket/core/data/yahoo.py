@@ -70,11 +70,13 @@ class YahooProvider(MarketDataProvider):
         markets: MarketRegistry | None = None,
         downloader: Downloader = _default_downloader,
         clock: Callable[[], datetime] | None = None,
+        symbol_map: Mapping[str, str] | None = None,
     ) -> None:
         self._instruments = dict(instruments)
         self._markets = markets or default_markets()
         self._download = downloader
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._symbol_map = dict(symbol_map or {})
 
     def get_instrument(self, symbol: str, market: str | None = None) -> Instrument:
         for inst in self._instruments.values():
@@ -103,8 +105,8 @@ class YahooProvider(MarketDataProvider):
     # ---- internals ----
     def _fetch(self, instrument: Instrument, interval: str, *, start: datetime | None,
                end: datetime | None, period: str | None) -> pd.DataFrame:
-        kwargs: dict[str, Any] = {"tickers": yahoo_symbol(
-            instrument), "interval": interval}
+        kwargs: dict[str, Any] = {"tickers": self._symbol_map.get(
+            instrument.instrument_id) or yahoo_symbol(instrument), "interval": interval}
         if period:
             kwargs["period"] = period
         else:

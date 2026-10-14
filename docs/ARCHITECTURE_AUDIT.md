@@ -8,6 +8,73 @@ Scope: Non-destructive audit of the legacy implementation (baseline). Revised af
 
 ## 1) Executive Summary
 
+### US/India Market Watch vertical slice (2026-10-14)
+
+Audit: `ApiContext.instruments` is the shared canonical master loaded from
+repositories; vendor providers do not create instruments. MarketRegistry already
+defines US/IN/DE, Yahoo maps MIC suffixes and Twelve Data sends venue identity.
+Portfolio accounting has per-currency cash and explicit FX, not automatic cash
+conversion. Risk uses explicit instrument-local entry limits. Bootstrap constructs
+one PaperTradingLoop/ProtectiveMonitor with one selected market and universe.
+The dashboard previously had only a monitoring markets table. India has no
+bundled verified holiday coverage. Existing unrelated protective/recovery changes
+were preserved.
+
+Implemented slice: shared core MarketWatch; V25 repository-backed canonical-ID
+watchlist; authenticated search/watch/explicit-refresh API; dedicated sidebar
+Market Watch page. GET never calls vendors. Worker pools, circuits, quote caches
+and single-flight admission are per market and separate from execution. Quotes
+never feed an order from this page. Source timestamps and freshness are explicit;
+invalid/missing prices are null and synthetic providers are labeled. Vendor
+alias maps are separate from the canonical master. Scoped Twelve Data credentials
+and pacing are shared configuration logic, not exposed API state.
+
+Calendar override directory supports independent venue files with country
+fallback. Exchange phase is exact; country execution is conservative on
+disagreement, and flattening uses earliest venue close. Uncovered dates remain
+closed. US DST and India fixed-offset tests use deterministic clocks.
+No official India calendar could be fetched, so none was fabricated or bundled.
+The loop explicitly reports SINGLE_MARKET; simultaneous automation is not
+implemented/certified by a multi-market watch page. USD cash is not INR funding.
+
+Limits: 100 shared watchlist members, 10 refreshed per market, five-second
+admission budget plus bounded read wait, no distributed vendor-wide quota,
+single-worker SQLite operating model. Late timed-out reads cannot publish;
+underlying vendor calls are not cancelled. Special weekend/Muhurat sessions and
+verified India holiday coverage remain unsupported. No operator migrations,
+credential edits, running-service restart, deployment, commit or training.
+See [operations](OPERATIONS.md#market-watch-us-and-india-observation-slice).
+
+Validation (configured Python 3.11.6; `PYTHONPATH=src;tests` for named modules):
+
+- Editor test runner could not discover this unittest module; terminal unittest
+  was used. First focused new run exposed eight implementation errors (repository
+  query API and static normalizer alias use); fixed before successful runs.
+- `python -m unittest test_market_watch -v`: 19 passed, 0.430s at that checkpoint.
+  Two later regression tests cover disabled-market membership and visible API
+  errors; all 21 new tests are included in the final focused/full results below.
+- `python -m unittest test_market_watch test_trading_calendar test_market_data_providers test_twelvedata_provider test_paper_loop test_protective_monitor test_personal_research test_dashboard_client test_paper_execution_safety`:
+  130 passed, 10.934s.
+- `PYTHONPATH=src python -m unittest discover -s tests -v`: final 671 discovered,
+  **666 passed, five optional PostgreSQL skips, zero failures**, 147.862s.
+  This includes earlier uncommitted protective-exit/recovery changes. AnyIO
+  stream ResourceWarnings persist; successful tests do not establish leak-free
+  operation.
+- `python -m bandit -r src\stockmarket -c bandit.yaml -ll -f json -o <session-report>`:
+  exit 1, seven existing MEDIUM findings (B310 provider HTTP transport sites;
+  B608 existing repository SQL identifiers; B113 existing computed client timeout),
+  no new scanner findings. Existing suppression-comment warnings remain.
+- `python -m pip_audit -r requirements.txt`: exit 0, no known vulnerabilities.
+  No packages were added or installed.
+- Pylance/editor checks: no errors in changed watch/provider/API/UI files;
+  MarketWatch has no syntax errors or diagnostics. Signature compatibility
+  verified 21 MarketDefinition.phase callers and one Twelve Data normalizer
+  caller. There is no configured repository-wide lint/format/type-check gate.
+- `git diff --check`: clean. Existing user/uncommitted work preserved. No browser
+  test of the revised deployed UI is claimed: services were not restarted and
+  the real operator database was not migrated. New-page behavior is covered by
+  deterministic UI-handler/API tests, not a live-feed certification.
+
 Current personal-research update: the empty instrument selector was traced to
 API startup reading an unpopulated instrument repository; registry universes and
 price providers do not discover a master. Explicit development/configured JSON
@@ -1104,6 +1171,180 @@ database or corrupted execution state.
 Next milestone: move entry/provider/history work outside short authoritative
 execution critical sections, bound history/provenance access and validate
 provider/process isolation before claiming bounded protective-exit latency.
+
+### Protective-exit isolation and recovery audit (baseline 8782588)
+
+Started from clean main at `8782588374690fc77bbfc48a948bae43555827dd`.
+Unchanged baseline: 628 tests passed in 140.152s. No operator database, running
+service, credentials or external account was used. No migration/dependency/backend,
+live execution, strategy, training or promotion capability was added.
+
+**Blocking-path audit and ownership:** the baseline lifecycle held TradingService's
+execution RLock and persistent account claim through pending-order quotes, position
+quotes, broker price/fill updates, provenance reads and nested exit submission.
+Nested exit submission fetched a second quote, and reservation calculations could
+fetch other instruments. Existing quote lanes and per-read timeouts did not remove
+those waits from the lock. The authoritative owners remain OrderManager, portfolio,
+paper broker and durable repositories; final risk is never delegated to preparation.
+
+The implemented path is lifecycle nonblocking single-flight -> execution RLock/
+account claim for planning and state snapshot -> release both -> bounded provider
+preparation -> new execution RLock/account claim -> full state comparison, fresh
+quote validation, current risk and atomic updates. Database locks are taken only
+inside existing repository boundaries, never carried across quote preparation.
+The lifecycle flight lock is not another execution path and does not wait while
+owning execution state. Duplicate lifecycle calls return incomplete/busy. Existing
+supervisor watchdog/recovery/admission behavior is reused.
+
+Prepared immutable quote records carry instrument identity, provider/fetch
+timestamps and adapter-callable source; map presence and order-audit metadata
+express completeness. Per-instrument exceptions are retained and reported.
+Final state comparison includes portfolio revision, position opening identity,
+quantity/direction and pending-order state. Internal mutations during the atomic
+pass are serialized. Each use checks current freshness; final RiskEngine checks
+current position/reservation quantities and controls. Lifecycle exits pass the
+prepared quote map into final risk/reservation calculations with no provider
+fallback. Missing, stale, changed or partial passes cannot admit new entries.
+New entries are also blocked during preparation. A rejected concurrent entry
+itself persists a new order and conservatively invalidates that pass.
+
+**Recovery findings and changes:** keyset replay alone could treat an empty missing
+page as completion and missed external same-count updates. Replay now checks
+strict key advance, expected counts, contiguous known ordinals and SQLite
+`data_version` plus `total_changes`. Large histories are refused before replay,
+not silently truncated. Full economic-field projections and legacy-fill multiplicity
+replace identity-only final checks, detecting same-record edits before execution.
+Order state/events roll back locally when persistence hooks fail; conflicting
+already-restored orders refuse recovery rather than retaining stale records.
+
+A new failing regression also demonstrated `resume` could clear the recovery gate
+after an interrupted replay. Recovery now closes admission at its start, marks
+replay complete only after validated exhaustion, and refuses resume/reconciliation
+while incomplete regardless of operator acknowledgement. Repeated complete recovery
+is tested. Exceptions during database admission keep this recovery gate closed.
+
+**Checkpoint decision:** no durable checkpoint was fabricated. Existing rollback
+checkpoints are in-memory and PnL snapshots omit complete accounting/FX/risk-baseline
+state, immutable history integrity and an atomic cursor. A checkpoint alone would
+also not remove the 10,000-record final verification ceiling. A real disposable
+100,001-fill test verifies replay refusal and that neither a partial portfolio nor
+a new order is published. The remaining large-history checkpoint/delta design is
+a blocker, not completed work. Legacy records are never discarded.
+
+**PostgreSQL:** an optional SQL adapter exists, but uses one connection/RLock and has
+no pool/admission budgets or validated history-revision contract. Guarded replay
+explicitly refuses unsupported backends. Five opt-in disposable integration tests
+cover single-connection saturation, explicit session statement/lock timeouts,
+rollback and explicit unsupported-replay refusal. All five were skipped: no
+explicit disposable DSN, psycopg driver or PostgreSQL command/server tooling was
+available. No PostgreSQL isolation, pool behavior or successful financial recovery
+is certified. Tests require an explicitly approved `stockmarket_test_*` database,
+use only session-local fixture data/advisory locking and apply no migrations.
+
+**Measured same-workload comparison:** current
+`python -m unittest execution_isolation_stress` ran unchanged against isolated
+archived baseline source and revised source. The protective workload has 20
+Event-held quote calls, a main-thread 10ms execution-lock admission attempt during
+each call, one actual protective exit, and 20 small-history rebuilds. Values below
+are milliseconds, p50 / p95 / worst:
+
+| Measurement | Baseline 8782588 | Revised |
+| --- | --- | --- |
+| Protective monitoring (20 each) | 14.840 / 18.899 / 24.696 | 1.649 / 2.170 / 5.358 |
+| Controlled quote retrieval (20 each) | 13.768 / 14.796 / 22.029 | 0.207 / 0.280 / 0.298 |
+| Contender lock wait (20 each) | 13.486 / 13.875 / 21.609 | 0.0066 / 0.0091 / 0.0126 |
+| All execution-lock waits | 0.0059 / 13.744 / 21.604 (61) | 0.0014 / 0.0057 / 0.0107 (101) |
+| Outer critical sections | 14.758 / 18.810 / 24.572 (20) | 0.581 / 0.892 / 4.465 (60) |
+| Small-history recovery (20 each) | 0.170 / 0.202 / 0.409 | 0.170 / 0.228 / 0.238 |
+
+Both workloads: zero failed checks, deadline misses and duplicate exits; exactly
+two fills/one exit proposal. Baseline blocked all 20 lock contenders; revised
+blocked zero. Quote release follows the contender attempt, so the baseline's
+higher quote duration includes deliberately induced lock contention; this is not
+a claim that providers became faster. The recovery samples contain one/two fills,
+not large-history performance evidence. The existing historical-preparation
+workload also passed on both: 20 rejected entries, zero failed monitor checks/
+duplicates/deadline misses. Revised DB admission timeout was 11.474ms for one
+10ms-budget sample; OS scheduling can overshoot. All values are finite shared-host
+fixture measurements, not hard maxima, vendor SLAs or profitability evidence.
+
+**Validation commands/results:** configured executable:
+`C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe` (3.11.6).
+`PYTHONPATH=src` for discovery and `src;tests` for named modules. Baseline harness
+uses isolated archived baseline `src` plus current `tests`; generated archive/source
+are removed after measurement.
+
+- Baseline: `python -m unittest discover -s tests -v`: 628 passed, 140.152s.
+- Final standalone new modules: `python -m unittest test_protective_exit_isolation
+  test_postgres_isolation_integration`: 22 discovered, 17 passed, five explicit
+  PostgreSQL skips, 2.892s.
+- Focused matrix: `python -m unittest test_protective_exit_isolation
+  test_postgres_isolation_integration test_execution_isolation test_paper_lifecycle
+  test_protective_monitor test_paper_execution_safety execution_isolation_stress`:
+  80 discovered, 75 passed, five PostgreSQL skips, 8.392s, before the final
+  resume-bypass regression.
+- Reproduction: `python -m unittest
+  test_protective_exit_isolation.ProtectiveExitIsolationTests.test_resume_cannot_bypass_interrupted_history_replay`:
+  initially failed (resume raised no error), fixed and covered in final regression.
+- Final regression: `python -m unittest test_protective_exit_isolation
+  test_execution_isolation test_protective_monitor test_paper_loop test_paper_lifecycle
+  test_paper_end_to_end test_paper_mvp_reliability test_prospective_evidence
+  test_dashboard_paper_activity test_paper_execution_safety test_risk_engine
+  test_market_data_providers test_market_stats test_trade_intent
+  test_paper_order_management test_autonomous_paper_trading test_portfolio_manager
+  test_outcome_feedback test_postgres_isolation_integration`: 253 discovered,
+  248 passed, five PostgreSQL skips, 19.098s.
+- `python -m unittest execution_isolation_stress`: two passed against baseline
+  (0.990s) and revised (0.768s); measurements above.
+- Final `python -m unittest discover -s tests -v`: **650 discovered, 645 passed,
+  five PostgreSQL skips, zero failures, 141.641s**. The earlier complete run
+  before the added resume regression had 649 discovered, 644 passed,
+  five PostgreSQL skips, 171.259s.
+- `python -m bandit -r src\stockmarket -c bandit.yaml -ll -f json -o <session-report>`:
+  exit 1, seven pre-existing MEDIUM findings, no newly introduced scanner findings.
+  B310: OpenAI-compatible:107/Finnhub:93 (high confidence, redirect hardening
+  remains actionable despite existing URL validation). B608:
+  repositories:117 (medium confidence), :467/:676/:2136 (low): trusted identifiers/
+  parameterized data; scanner candidates, not demonstrated user-input injection.
+  B113: dashboard client:63 (low), explicit computed timeout flagged.
+  Existing malformed suppression-comment warnings remain. This is not exploit
+  certification or a passing security gate.
+- `python -m pip_audit -r requirements.txt`: exit 0, no known vulnerabilities.
+- Editor Problems: no errors; lifecycle Pylance diagnostics empty. TradingService
+  shows existing severity-4 contextmanager/unused hints, not type errors.
+  No repository-wide formatter/linter/type gate is configured.
+- `git diff --check`: clean. HEAD remains the requested baseline; changes are
+  uncommitted. Generated baseline source/archive were removed, preserving logs
+  and all operator/user state.
+
+Initial diagnostic runs included stale fixture contracts and one nonexistent
+`test_persistence` selector; these were corrected, not counted as successful tests.
+The quote race tests intentionally use a smaller approved entry to preserve the
+configured maximum-position limit rather than weakening it.
+
+Changed files: lifecycle/trading service, order manager, recovery, database/
+repositories; new protective-exit/replay and opt-in PostgreSQL test modules;
+existing lifecycle/supervisor fixtures and stress harness; SQLite-default example
+configuration comments; README, architecture,
+operations and this audit. No API/dashboard route or schema migration was needed.
+Existing status exposes incomplete/failed checks and entry readiness.
+
+**Unverified/remaining blockers:** no durable large-history checkpoint/delta
+publication; no PostgreSQL certification; no universal transaction deadline;
+no arbitrary external-writer immutable snapshot. Revisions conservatively reject
+concurrent writes but cannot reconstruct deleted legacy evidence predating all
+available records. Durable provenance, financial writes, vendor internals/GIL,
+shared connections and custom caller-owned outer locks remain bottlenecks.
+Provider timeouts do not kill running calls. Process-interruption coverage uses
+injected exceptions, exhausted generators and existing restart fixtures, not OS
+power-loss/fsync certification. Protective critical sections are provider-free for
+the standard lifecycle call path, not certified for arbitrary custom callbacks.
+
+Next milestone: versioned complete financial checkpoints committed atomically
+with their fill cursor/digest, validated delta verification/publication and legacy
+coverage, followed by actually executed PostgreSQL pool/timeout/snapshot/restart
+integration. AI readiness remains advisory; none of this telemetry is training
+or strategy-profitability evidence.
 
 ### Execution isolation audit (baseline 1320073)
 

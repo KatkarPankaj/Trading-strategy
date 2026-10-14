@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
+from threading import Lock
 from math import isfinite
 from time import monotonic as system_monotonic
 from typing import Any, Callable, Mapping
@@ -24,7 +26,7 @@ from .models import (
 from .risk import OrderIntent
 from .order_management import InvalidOrderTransition, UnknownOrder
 from .trade_proposals import TradeProposalService
-from .trading_service import AutomaticSizingRejected, OrderTicket, TradingService
+from .trading_service import AutomaticSizingRejected, OrderTicket, PreparedQuote, TradingService
 
 QuoteSource = Callable[[str], tuple[float, datetime] | None]
 PriceUpdate = Callable[[str, float, datetime], None]
@@ -48,6 +50,7 @@ class _MonitoringBudget:
         if deadline is not None and not isfinite(deadline):
             raise ValueError("monitoring deadline must be finite")
         self.remaining = max_items
+        self.max_quotes = max_items
         self.deadline = deadline
         self.monotonic = monotonic or system_monotonic
         self.incomplete = False
@@ -411,6 +414,88 @@ class PaperPositionManager:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.evaluation_repository = evaluation_repository
         self._monitor_cursor = 0
+        self._flight = Lock()
+
+    def _monitoring_outcome(self, result: dict[str, Any]) -> dict[str, Any]:
+        failed = result.get("incomplete") or any(
+            row.get("status") in {"MONITOR_FAILED", "RECONCILE_FAILED", "FLATTEN_FAILED",
+                                  "REJECTED", "FAILED", "ENTRY_ORDER_PENDING"}
+            for row in (*result.get("orders", []), *result.get("positions", [])))
+        self.trading.monitoring_result("PROTECTIVE_RECONCILIATION_INCOMPLETE" if failed else None)
+        if failed:
+            self.store.audit.append(
+                "system:paper-position-manager", "PAPER_MONITORING_INCOMPLETE", "system",
+                "paper", {"at": self._now(), "error": result.get("error")})
+        return result
+
+    def _prepare_monitoring(
+        self, budget: _MonitoringBudget, boundary: Any, market: str | None = None,
+    ) -> tuple[tuple[Any, ...], Mapping[str, PreparedQuote | Exception]]:
+        with boundary():
+            self.trading.monitoring_result("PROTECTIVE_RECONCILIATION_IN_PROGRESS")
+            self._plan_monitoring(budget, market)
+            state = self.trading.monitoring_state()
+            ids = {
+                o.instrument_id for o in self.trading.order_manager.open_orders()
+                if budget.select("order", o.client_order_id)
+            }
+            for p in self.trading.portfolio.positions().values():
+                if not budget.select("position", p.instrument_id):
+                    continue
+                instrument = self.instruments.get(p.instrument_id)
+                if instrument is None or not self.markets.is_regular_session(instrument.market, self._now()):
+                    continue
+                try:
+                    entry = self._entry_proposal(p)
+                except (PaperLifecycleError, InvalidOrderTransition, BrokerError):
+                    # Authoritative evaluation records this failure without skipping other positions.
+                    ids.add(p.instrument_id)
+                    continue
+                if entry["order"].get("status") in {
+                    OrderStatus.FILLED.value, OrderStatus.CANCELLED.value,
+                    OrderStatus.REJECTED.value, OrderStatus.FAILED.value,
+                }:
+                    ids.add(p.instrument_id)
+            # Final risk also needs reservation prices for non-selected pending orders.
+            reservation_ids = {o.instrument_id for o in self.trading.order_manager.open_orders()
+                               if o.limit_price is None}
+            quote_ids = sorted(ids) + sorted(reservation_ids - ids)
+        prepared: dict[str, PreparedQuote | Exception] = {}
+        for index, iid in enumerate(quote_ids):
+            if budget.max_quotes is not None and index >= budget.max_quotes:
+                budget.incomplete = True
+                break
+            instrument = self.instruments.get(iid)
+            if instrument is None or market is not None and instrument.market != market \
+                    or not self.markets.is_regular_session(instrument.market, self._now()):
+                continue
+            if budget.deadline is not None and budget.monotonic() >= budget.deadline:
+                budget.incomplete = True
+                break
+            try:
+                quote = self.quotes(iid)
+                if quote is None:
+                    raise PaperLifecycleError(f"fresh market quote is unavailable for {iid}")
+                price, timestamp = quote
+                at = self._now()
+                timestamp = _validate_quote(instrument, price, timestamp, at, self.max_age)
+                prepared[iid] = PreparedQuote(iid, price, timestamp, at, type(self.quotes).__name__)
+            except Exception as exc:
+                # Preserve per-instrument failure for the authoritative pass; no synthetic price.
+                prepared[iid] = PaperLifecycleError(f"{type(exc).__name__}: {exc}") \
+                    if not isinstance(exc, PaperLifecycleError) else exc
+        return state, MappingProxyType(prepared)
+
+    def _quote(self, iid: str, prepared: Mapping[str, PreparedQuote | Exception]) -> tuple[float, datetime]:
+        value = prepared.get(iid)
+        if isinstance(value, Exception):
+            raise value
+        if value is None or value.instrument_id != iid:
+            raise PaperLifecycleError(f"prepared quote is unavailable for {iid}")
+        _validate_quote(self.instruments[iid], value.price, value.timestamp, self._now(), self.max_age)
+        if value.fetched_at > self._now():
+            raise PaperLifecycleError("prepared quote is from the future")
+        return value.price, value.timestamp
 
     def _plan_monitoring(self, budget: _MonitoringBudget, market: str | None = None) -> None:
         if budget.remaining is None:
@@ -439,12 +524,28 @@ class PaperPositionManager:
         self, *, max_items: int | None = None, deadline: float | None = None,
         monotonic: Callable[[], float] | None = None, lock_timeout: float | None = None,
     ) -> dict[str, Any]:
+        if not self._flight.acquire(blocking=False):
+            return {"incomplete": True, "orders": [], "positions": [], "error": "MONITORING_BUSY"}
+        try:
+            return self._manage(max_items=max_items, deadline=deadline, monotonic=monotonic,
+                                lock_timeout=lock_timeout)
+        finally:
+            self._flight.release()
+
+    def _manage(
+        self, *, max_items: int | None, deadline: float | None,
+        monotonic: Callable[[], float] | None, lock_timeout: float | None,
+    ) -> dict[str, Any]:
         budget = _MonitoringBudget(max_items, deadline, monotonic)
-        boundary = (self.trading.paper_strategy_change() if lock_timeout is None
-                    else self.trading.paper_monitoring(lock_timeout))
-        with boundary:
-            self._plan_monitoring(budget)
-            orders = self._pending_orders(budget=budget)
+        boundary = (self.trading.paper_strategy_change if lock_timeout is None
+                    else lambda: self.trading.paper_monitoring(lock_timeout))
+        state, prepared = self._prepare_monitoring(budget, boundary)
+        with boundary():
+            if state != self.trading.monitoring_state():
+                return self._monitoring_outcome({
+                    "trading_mode": TradingMode.PAPER.value, "orders": [], "positions": [],
+                    "incomplete": True, "error": "MONITORING_STATE_CHANGED"})
+            orders = self._pending_orders(budget=budget, prepared=prepared)
             evaluated = []
             for position in list(self.trading.portfolio.positions().values()):
                 if not budget.select("position", position.instrument_id):
@@ -452,19 +553,21 @@ class PaperPositionManager:
                 if not budget.admit():
                     break
                 try:
-                    evaluated.extend(self._manage_position(position)["positions"])
+                    evaluated.extend(self._manage_position(position, prepared)["positions"])
                 except (PaperLifecycleError, InvalidOrderTransition, BrokerError) as exc:
                     self.store.audit.append(
                         "system:paper-position-manager", "PAPER_POSITION_MONITOR_FAILED",
                         "instrument", position.instrument_id, {"error": str(exc), "at": self._now()})
                     evaluated.append({"instrument_id": position.instrument_id,
                                       "status": "MONITOR_FAILED", "error": str(exc)})
-            return {"trading_mode": TradingMode.PAPER.value, "orders": orders, "positions": evaluated,
-                    "incomplete": budget.incomplete}
+            return self._monitoring_outcome({
+                "trading_mode": TradingMode.PAPER.value, "orders": orders, "positions": evaluated,
+                "incomplete": budget.incomplete})
 
     def _pending_orders(self, *, cancel_entries: bool = False,
                         market: str | None = None,
-                        budget: _MonitoringBudget | None = None) -> list[dict[str, Any]]:
+                        budget: _MonitoringBudget | None = None,
+                        prepared: Mapping[str, PreparedQuote | Exception]) -> list[dict[str, Any]]:
         results = []
         now = self._now()
         for order in self.trading.order_manager.open_orders():
@@ -482,10 +585,7 @@ class PaperPositionManager:
                     current = self.trading.cancel(
                         order.client_order_id, actor="system:paper-position-manager")
                 elif self.markets.is_regular_session(instrument.market, now):
-                    quote = self.quotes(instrument.instrument_id)
-                    if quote is None:
-                        raise PaperLifecycleError("fresh pending-order quote is unavailable")
-                    price, timestamp = quote
+                    price, timestamp = self._quote(instrument.instrument_id, prepared)
                     _validate_quote(instrument, price, timestamp, now, self.max_age)
                     self.update_price(instrument.instrument_id, price, timestamp)
                     current = self.trading.order_manager.sync(order.client_order_id)
@@ -502,7 +602,8 @@ class PaperPositionManager:
                                 "status": "RECONCILE_FAILED", "error": str(exc)})
         return results
 
-    def _manage_position(self, monitored_position: Any) -> dict[str, Any]:
+    def _manage_position(self, monitored_position: Any,
+                         prepared: Mapping[str, PreparedQuote | Exception]) -> dict[str, Any]:
         now = self._now()
         position = monitored_position
         instrument = self.instruments.get(position.instrument_id)
@@ -528,10 +629,7 @@ class PaperPositionManager:
         if stop is None:
             raise PaperLifecycleError(
                 f"position {instrument.instrument_id} has no persisted protective stop")
-        quote = self.quotes(instrument.instrument_id)
-        if quote is None:
-            raise PaperLifecycleError(f"fresh market quote is unavailable for {instrument.instrument_id}")
-        price, timestamp = quote
+        price, timestamp = self._quote(instrument.instrument_id, prepared)
         timestamp = _validate_quote(instrument, price, timestamp, now, self.max_age)
         if timestamp < position.opened_at:
             raise PaperLifecycleError(f"quote predates the open position for {instrument.instrument_id}")
@@ -561,7 +659,7 @@ class PaperPositionManager:
                                    "quote_price": price, "quote_timestamp": timestamp}]}
         outcome = self._submit_exit(
             position=position, instrument=instrument, entry=entry,
-            price=price, timestamp=timestamp, reason=reason)
+            price=price, timestamp=timestamp, reason=reason, prepared=prepared)
         self._record_evaluation(
             position, entry, timestamp, str(outcome["status"]), reason,
             price=price, stop=stop, target=target,
@@ -573,19 +671,36 @@ class PaperPositionManager:
         max_items: int | None = None, deadline: float | None = None,
         monotonic: Callable[[], float] | None = None, lock_timeout: float | None = None,
     ) -> dict[str, Any]:
+        if not self._flight.acquire(blocking=False):
+            return {"incomplete": True, "orders": [], "positions": [], "error": "MONITORING_BUSY"}
+        try:
+            return self._flatten_cycle(reason=reason, market=market, max_items=max_items,
+                                       deadline=deadline, monotonic=monotonic, lock_timeout=lock_timeout)
+        finally:
+            self._flight.release()
+
+    def _flatten_cycle(
+        self, *, reason: str, market: str | None, max_items: int | None,
+        deadline: float | None, monotonic: Callable[[], float] | None, lock_timeout: float | None,
+    ) -> dict[str, Any]:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("flatten reason is required")
         budget = _MonitoringBudget(max_items, deadline, monotonic)
-        boundary = (self.trading.paper_strategy_change() if lock_timeout is None
-                    else self.trading.paper_monitoring(lock_timeout))
-        with boundary:
-            self._plan_monitoring(budget, market)
-            orders = self._pending_orders(cancel_entries=True, market=market, budget=budget)
-            result = self._flatten(reason=reason, market=market, budget=budget)
-            return {**result, "orders": orders, "incomplete": budget.incomplete}
+        boundary = (self.trading.paper_strategy_change if lock_timeout is None
+                    else lambda: self.trading.paper_monitoring(lock_timeout))
+        state, prepared = self._prepare_monitoring(budget, boundary, market)
+        with boundary():
+            if state != self.trading.monitoring_state():
+                return self._monitoring_outcome({
+                    "trading_mode": TradingMode.PAPER.value, "orders": [], "positions": [],
+                    "incomplete": True, "error": "MONITORING_STATE_CHANGED"})
+            orders = self._pending_orders(cancel_entries=True, market=market, budget=budget, prepared=prepared)
+            result = self._flatten(reason=reason, market=market, budget=budget, prepared=prepared)
+            return self._monitoring_outcome({**result, "orders": orders, "incomplete": budget.incomplete})
 
     def _flatten(
         self, *, reason: str, market: str | None, budget: _MonitoringBudget,
+        prepared: Mapping[str, PreparedQuote | Exception],
     ) -> dict[str, Any]:
         """Close every open paper position (optionally one market) with a fresh in-session quote.
 
@@ -623,11 +738,7 @@ class PaperPositionManager:
                                     "status": "ENTRY_ORDER_PENDING",
                                     "client_order_id": entry["client_order_id"]})
                     continue
-                quote = self.quotes(instrument.instrument_id)
-                if quote is None:
-                    raise PaperLifecycleError(
-                        f"fresh market quote is unavailable for {instrument.instrument_id}")
-                price, timestamp = quote
+                price, timestamp = self._quote(instrument.instrument_id, prepared)
                 timestamp = _validate_quote(instrument, price, timestamp, now, self.max_age)
                 self.update_price(instrument.instrument_id, price, timestamp)
                 current = self.trading.portfolio.positions().get(instrument.instrument_id)
@@ -637,7 +748,7 @@ class PaperPositionManager:
                     continue
                 outcome = self._submit_exit(
                     position=current, instrument=instrument, entry=entry,
-                    price=price, timestamp=timestamp, reason=reason)
+                    price=price, timestamp=timestamp, reason=reason, prepared=prepared)
                 proposal = entry["proposal"]
                 self._record_evaluation(
                     current, entry, timestamp, str(outcome["status"]), reason,
@@ -704,6 +815,7 @@ class PaperPositionManager:
         price: float,
         timestamp: datetime,
         reason: str,
+        prepared: Mapping[str, PreparedQuote | Exception],
     ) -> dict[str, Any]:
         entry_client_id = str(entry["client_order_id"])
         for previous in self.store.position_exit_proposals.for_entry(entry_client_id):
@@ -793,7 +905,9 @@ class PaperPositionManager:
             ),
             signal=signal,
         )
-        result = self.trading.submit(ticket, actor="system:paper-position-manager")
+        result = self.trading.submit(
+            ticket, actor="system:paper-position-manager",
+            exit_quotes={iid: q for iid, q in prepared.items() if isinstance(q, PreparedQuote)})
         self.store.position_exit_proposals.finish(
             proposal_id,
             status=result.order.status.value,

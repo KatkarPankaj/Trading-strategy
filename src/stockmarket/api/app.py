@@ -28,6 +28,7 @@ from ..core.autonomous_research import (
 from ..core.executors import LIVE_CONFIRMATION_PHRASE, LiveTradingRefused, TradingMode
 from ..core.kill_switch import KillSwitchError
 from ..core.markets import UnknownMarket
+from ..core.market_watch import MarketWatch
 from ..core.observability import HealthMonitor
 from ..core.order_management import IdempotencyConflict, InvalidOrderTransition, OrderManagerError, UnknownOrder
 from ..core.paper_lifecycle import (
@@ -65,6 +66,7 @@ from ..core.trading_service import (
     summarize_trades,
 )
 from .schemas import (
+    WatchInstrumentBody,
     StrategyLabProposalBody,
     StrategyLabEvaluationBody,
     StrategyLabTransitionBody,
@@ -125,6 +127,7 @@ class ApiContext:
     strategy_lab: StrategyLabService | None = None
     strategy_ranking: StrategyRankingService | None = None
     prospective: ProspectiveEvidenceService | None = None
+    market_watch: MarketWatch | None = None
 
     @property
     def primary(self) -> TradingService:
@@ -149,6 +152,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
             ctx.paper_loop.stop()
         if ctx.market_data is not None:
             ctx.market_data.close()
+        if ctx.market_watch is not None:
+            ctx.market_watch.close()
 
     app.add_event_handler("shutdown", shutdown_paper_services)
     if ctx.paper_loop is not None:
@@ -278,6 +283,55 @@ def create_app(ctx: ApiContext) -> FastAPI:
                       "validated quote, sizing and final RiskEngine approval.",
         }
         return JSONResponse(report, status_code=200 if report["status"] != "DOWN" else 503)
+
+    def watch_service() -> MarketWatch:
+        if ctx.market_watch is None:
+            raise HTTPException(503, "market watch is not configured")
+        return ctx.market_watch
+
+    @app.get("/market-watch/markets", dependencies=[Depends(auth)])
+    def watch_markets() -> Any:
+        return _plain(watch_service().profiles())
+
+    @app.get("/market-watch/instruments", dependencies=[Depends(auth)])
+    def watch_search(market: str = Query(min_length=1, max_length=16),
+                     q: str = Query(default="", max_length=128),
+                     after: str = Query(default="", max_length=128),
+                     limit: int = Query(default=50, ge=1, le=100)) -> Any:
+        try:
+            return _plain(watch_service().search(market.upper(), q, after=after, limit=limit))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/watchlist", dependencies=[Depends(auth)])
+    def watchlist(market: str = Query(min_length=1, max_length=16)) -> Any:
+        try:
+            return _plain(watch_service().rows(market.upper()))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/watchlist", dependencies=[Depends(auth)])
+    def watch_add(body: WatchInstrumentBody) -> Any:
+        try:
+            watch_service().add(body.instrument_id)
+            return {"instrument_id": body.instrument_id, "execution": "NOT_SUBMITTED"}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/watchlist/remove", dependencies=[Depends(auth)])
+    def watch_remove(body: WatchInstrumentBody) -> Any:
+        try:
+            watch_service().remove(body.instrument_id)
+            return {"instrument_id": body.instrument_id, "execution": "NOT_SUBMITTED"}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/market-watch/refresh", dependencies=[Depends(auth)])
+    def watch_refresh(market: str = Query(min_length=1, max_length=16)) -> Any:
+        try:
+            return _plain(watch_service().refresh(market.upper()))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/markets", dependencies=[Depends(auth)])
     def markets() -> dict[str, Any]:

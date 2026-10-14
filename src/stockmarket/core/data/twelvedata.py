@@ -92,6 +92,7 @@ class TwelveDataProvider(MarketDataProvider):
         requests_per_minute: int = 8,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        symbol_map: Mapping[str, str] | None = None,
     ) -> None:
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("Twelve Data API key must be a non-empty string")
@@ -111,6 +112,7 @@ class TwelveDataProvider(MarketDataProvider):
         self._monotonic = monotonic
         self._sent: deque[float] = deque()
         self._lock = threading.Lock()
+        self._symbol_map = dict(symbol_map or {})
 
     def __repr__(self) -> str:
         return f"TwelveDataProvider(instruments={len(self._instruments)}, api_key=***)"
@@ -177,7 +179,7 @@ class TwelveDataProvider(MarketDataProvider):
                  if instrument.exchange in _EXCHANGE_PARAM
                  else {"mic_code": instrument.exchange})
         params = {
-            "symbol": instrument.symbol, **venue,
+            "symbol": self._symbol_map.get(instrument.instrument_id, instrument.symbol), **venue,
             "timezone": "UTC", "order": "asc", "format": "JSON", **extra,
             "apikey": self._api_key,
         }
@@ -200,7 +202,8 @@ class TwelveDataProvider(MarketDataProvider):
             message = payload.get("message")
             self._raise_for_code(code if isinstance(code, int) else 0,
                                  message if isinstance(message, str) else "")
-        return self._normalize(payload, instrument)
+        return self._normalize(payload, instrument, expected_symbol=self._symbol_map.get(
+            instrument.instrument_id, instrument.symbol))
 
     @staticmethod
     def _raise_for_code(code: int, message: str = "") -> None:
@@ -225,13 +228,15 @@ class TwelveDataProvider(MarketDataProvider):
         raise DataUnavailable(f"Twelve Data request failed with code {code}")
 
     @staticmethod
-    def _normalize(payload: Mapping[str, Any], instrument: Instrument) -> pd.DataFrame:
+    def _normalize(payload: Mapping[str, Any], instrument: Instrument, *,
+                   expected_symbol: str | None = None) -> pd.DataFrame:
         meta = payload.get("meta")
         if isinstance(meta, dict):
             symbol, mic = meta.get("symbol"), meta.get("mic_code")
             accepted = _RESPONSE_MIC_ALIASES.get(
                 instrument.exchange, frozenset({instrument.exchange}))
-            if (symbol is not None and str(symbol).upper() != instrument.symbol.upper()) or (
+            expected_symbol = expected_symbol or instrument.symbol
+            if (symbol is not None and str(symbol).upper() != expected_symbol.upper()) or (
                     mic is not None and str(mic).upper() not in accepted):
                 raise DataUnavailable("Twelve Data returned a different instrument")
         values = payload.get("values")

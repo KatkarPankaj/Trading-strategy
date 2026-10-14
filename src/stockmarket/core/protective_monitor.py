@@ -154,7 +154,7 @@ class ProtectiveMonitor:
                     market = self.markets.get(self.market)
                     day = now.astimezone(ZoneInfo(market.timezone)).date()
                     close = datetime.combine(
-                        day, market.calendar.close_time_on(day), tzinfo=ZoneInfo(market.timezone))
+                        day, market.close_time_on(day), tzinfo=ZoneInfo(market.timezone))
                     if now >= close - timedelta(minutes=self.flatten_minutes):
                         result = self.positions.flatten(market=self.market, **options)
                     else:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from threading import RLock
@@ -46,6 +47,15 @@ class PreparedEntry:
     statistics: Mapping[str, Any]
     quotes: Mapping[str, tuple[float, datetime] | None]
     state: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedQuote:
+    instrument_id: str
+    price: float
+    timestamp: datetime
+    fetched_at: datetime
+    source: str
 
 
 class UnknownInstrument(ValueError):
@@ -154,6 +164,7 @@ class TradingService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._submit_lock = RLock()
         self._reservation_depth = 0
+        self._monitoring_problem: str | None = None
         self.execution_timings: list[dict[str, float]] = []
         if store is not None:  # write-ahead: each transition is stored before the next step runs
             order_manager.on_change = self._persist_transition
@@ -165,6 +176,7 @@ class TradingService:
         actor: str = "system",
         strategy_decision: AggregatedDecision | None = None,
         prepared: PreparedEntry | None = None,
+        exit_quotes: Mapping[str, PreparedQuote] | None = None,
     ) -> TicketResult:
         ticket = self._validated_ticket(ticket, strategy_decision=strategy_decision)
         if ticket.intent is OrderIntent.ENTRY and prepared is None:
@@ -178,7 +190,8 @@ class TradingService:
             try:
                 with self._execution_reservation():
                     return self._submit_locked(
-                        ticket, actor=actor, strategy_decision=strategy_decision, prepared=prepared)
+                        ticket, actor=actor, strategy_decision=strategy_decision, prepared=prepared,
+                        exit_quotes=exit_quotes)
             finally:
                 self.execution_timings.append({
                     "lock_wait_seconds": acquired - started,
@@ -195,12 +208,20 @@ class TradingService:
                 self.instruments[o.instrument_id].currency))
                 for o in self.order_manager.open_orders()
                 if o.instrument_id in self.instruments)),
-            tuple(sorted((iid, p.side.value, p.quantity, p.last_price, p.average_entry_price,
+            tuple(sorted((iid, p.side.value, p.quantity, p.last_price, p.average_entry_price, p.opened_at,
                           self.portfolio.rate_to_base(p.currency))
                          for iid, p in self.portfolio.positions().items())),
             tuple((o.client_order_id, o.status.value, o.filled_quantity, o.quantity,
                    o.limit_price, o.stop_price) for o in self.order_manager.orders()),
         )
+
+    def monitoring_state(self) -> tuple[Any, ...]:
+        """Called within the execution boundary; includes positions, pending orders and revision."""
+        return self._preparation_state()
+
+    def monitoring_result(self, problem: str | None) -> None:
+        """Execution-lock owned, process-local admission barrier; restart still requires recovery."""
+        self._monitoring_problem = problem
 
     def prepare_entry(self, instrument_id: str) -> PreparedEntry:
         if instrument_id not in self.instruments:
@@ -250,17 +271,26 @@ class TradingService:
         repository.acquire("PAPER", owner, self._clock())
         self._reservation_depth += 1
         try:
-            durable_fills = {
-                (row["client_order_id"], row["fill_sequence"])
+            durable_fills = Counter(
+                (row["client_order_id"], row["fill_sequence"], row["instrument_id"], row["side"],
+                 row["quantity"], row["price"], row["fee"], row["slippage"], row["currency"],
+                 row["realized_pnl"], datetime.fromisoformat(row["timestamp"]))
                 for row in self._store.fills.execution_state()
-            }
-            local_fills = {(fill.client_order_id, fill.fill_sequence) for fill in self.portfolio.fills}
+            )
+            local_fills = Counter(
+                (f.client_order_id, f.fill_sequence, f.instrument_id, f.side.value, f.quantity,
+                 f.price, f.fee, f.slippage, f.currency, f.realized_pnl, f.timestamp)
+                for f in self.portfolio.fills)
             durable_orders = {
-                (row["client_order_id"], row["status"], row["filled_quantity"])
+                (row["client_order_id"], row["status"], row["filled_quantity"], row["quantity"],
+                 row["instrument_id"], row["side"], row["order_type"], row["limit_price"],
+                 row["stop_price"], row["average_fill_price"])
                 for row in self._store.orders.execution_state()
             }
             local_orders = {
-                (order.client_order_id, order.status.value, order.filled_quantity)
+                (order.client_order_id, order.status.value, order.filled_quantity, order.quantity,
+                 order.instrument_id, order.side.value, order.order_type.value, order.limit_price,
+                 order.stop_price, order.average_fill_price)
                 for order in self.order_manager.orders()
             }
             if durable_fills != local_fills or durable_orders != local_orders:
@@ -324,6 +354,7 @@ class TradingService:
         actor: str = "system",
         strategy_decision: AggregatedDecision | None = None,
         prepared: PreparedEntry | None = None,
+        exit_quotes: Mapping[str, PreparedQuote] | None = None,
     ) -> TicketResult:
         instrument = self.instruments[ticket.instrument_id]
         trade_intent = ticket_trade_intent(ticket)
@@ -338,12 +369,22 @@ class TradingService:
                                         signal_id=ticket.signal_id)
         market_data = None
         if decision is None:
-            market_data = (prepared.quotes.get(ticket.instrument_id)
+            if ticket.intent is OrderIntent.EXIT and exit_quotes is not None:
+                q = exit_quotes.get(ticket.instrument_id)
+                if q is None or q.instrument_id != ticket.instrument_id or q.fetched_at > now:
+                    decision = RiskDecision(RiskDecisionStatus.REJECTED, now, "EXIT_QUOTE_UNAVAILABLE",
+                                            signal_id=ticket.signal_id)
+                else:
+                    market_data = (q.price, q.timestamp)
+            else:
+                market_data = (prepared.quotes.get(ticket.instrument_id)
                            if ticket.intent is OrderIntent.ENTRY and prepared is not None
                            else self._quotes(ticket.instrument_id))
+        if decision is None:
             decision = self._risk.evaluate_proposal(
                 instrument, side=ticket.side, quantity=ticket.quantity, order_type=ticket.order_type,
-                created_at=now, context=self._context(ticket, instrument, now, market_data, prepared),
+                created_at=now, context=self._context(
+                    ticket, instrument, now, market_data, prepared, exit_quotes),
                 limit_price=ticket.limit_price, stop_price=ticket.stop_price,
                 strategy=ticket.strategy, signal_id=ticket.signal_id,
                 intent=trade_intent)
@@ -355,7 +396,7 @@ class TradingService:
             trade_intent=trade_intent)
         self._record_provenance(client_order_id, ticket, now, market_data)
         self._record_audit(
-            client_order_id, ticket, now, decision, market_data, strategy_decision, prepared)
+            client_order_id, ticket, now, decision, market_data, strategy_decision, prepared, exit_quotes)
         result = self.order_manager.submit(request, decision)
         if not result.duplicate and not result.order.is_terminal:
             result = SubmissionResult(self.order_manager.sync(client_order_id))
@@ -555,6 +596,9 @@ class TradingService:
             raise problem
 
     def _halt_decision(self, ticket: OrderTicket, now: datetime) -> RiskDecision | None:
+        if ticket.intent is not OrderIntent.EXIT and self._monitoring_problem is not None:
+            return RiskDecision(RiskDecisionStatus.REJECTED, now, self._monitoring_problem,
+                                signal_id=ticket.signal_id)
         if ticket.intent is not OrderIntent.EXIT and self.entry_admission is not None:
             reason = self.entry_admission()
             if reason is not None:
@@ -615,7 +659,8 @@ class TradingService:
     def _record_audit(self, client_order_id: str, ticket: OrderTicket, now: datetime,
                       decision: RiskDecision, market_data: tuple[float, datetime] | None,
                       strategy_decision: AggregatedDecision | None,
-                      prepared: PreparedEntry | None = None) -> None:
+                      prepared: PreparedEntry | None = None,
+                      exit_quotes: Mapping[str, PreparedQuote] | None = None) -> None:
         """Decision inputs are stored before the order is sent; the broker response is added afterwards."""
         if self._store is None:
             return
@@ -637,6 +682,8 @@ class TradingService:
                          "reason": decision.reason, "assessed_at": now, "stop_loss": ticket.stop_loss,
                          "take_profit": ticket.take_profit, "intent": ticket.intent,
                          "trade_intent": ticket.trade_intent,
+                         "exit_quote_preparation": None if exit_quotes is None else {
+                             "quotes": dict(exit_quotes), "complete": ticket.instrument_id in exit_quotes},
                          "preparation": None if prepared is None else {
                              "started_at": prepared.started_at, "completed_at": prepared.completed_at,
                              "source": prepared.source, "quotes_complete": prepared.complete,
@@ -677,6 +724,7 @@ class TradingService:
         self, t: OrderTicket, inst: Instrument, now: datetime,
         quote: tuple[float, datetime] | None,
         prepared: PreparedEntry | None = None,
+        exit_quotes: Mapping[str, PreparedQuote] | None = None,
     ) -> RiskContext:
         position = self.portfolio.positions().get(inst.instrument_id)
         orders = self.order_manager.orders()
@@ -735,7 +783,9 @@ class TradingService:
             reference_quote=quote,
             now=now,
             exclude_client_order_id=excluded,
-            prepared_quotes=prepared.quotes if prepared is not None else None,
+            prepared_quotes=(prepared.quotes if prepared is not None else
+                             {iid: (q.price, q.timestamp) for iid, q in exit_quotes.items()}
+                             if exit_quotes is not None else None),
         )
         if reservations is None:
             portfolio_state = replace(

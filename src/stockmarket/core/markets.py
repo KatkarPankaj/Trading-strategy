@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from .models import AssetClass, Instrument, TradingStatus
@@ -37,6 +38,7 @@ class MarketDefinition:
     pre_market_open: time | None = None
     post_market_close: time | None = None
     default_lot_size: int = 1
+    exchange_calendars: Mapping[str, TradingCalendar] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.code.strip() or not self.mics or len(self.currency) != 3:
@@ -46,6 +48,18 @@ class MarketDefinition:
             raise ValueError("pre_market_open must precede the regular open")
         if self.post_market_close is not None and self.post_market_close <= self.calendar.close_time:
             raise ValueError("post_market_close must follow the regular close")
+        if self.exchange_calendars and set(self.exchange_calendars) != set(self.mics):
+            raise ValueError("exchange calendars must cover every registered MIC")
+        if any(cal.timezone != self.calendar.timezone or
+               (cal.open_time, cal.close_time) != (self.calendar.open_time, self.calendar.close_time)
+               for cal in self.exchange_calendars.values()):
+            raise ValueError("exchange overrides must retain market timezone and regular hours")
+        object.__setattr__(self, "exchange_calendars", MappingProxyType(dict(self.exchange_calendars)))
+
+    def close_time_on(self, day: date) -> time:
+        """Country-wide schedulers flatten conservatively at the earliest venue close."""
+        return min(cal.close_time_on(day) for cal in (
+            tuple(self.exchange_calendars.values()) or (self.calendar,)))
 
     @property
     def timezone(self) -> str:
@@ -53,17 +67,25 @@ class MarketDefinition:
 
     def is_covered(self, day: date) -> bool:
         """False when no holiday data exists for the day's year; such days are treated as closed."""
+        if self.exchange_calendars:
+            return all(cal.covered_years is None or day.year in cal.covered_years
+                       for cal in self.exchange_calendars.values())
         years = self.calendar.covered_years
         return years is None or day.year in years
 
-    def phase(self, at: datetime) -> SessionPhase:
+    def phase(self, at: datetime, mic: str | None = None) -> SessionPhase:
         if not isinstance(at, datetime):
             raise TypeError("market phase decisions require a datetime")
         if at.tzinfo is None or at.utcoffset() is None:
             raise ValueError("timestamp must be timezone-aware")
-        local = at.astimezone(ZoneInfo(self.timezone))
+        if mic is not None and mic not in self.mics:
+            raise ValueError("exchange does not belong to market")
+        if self.exchange_calendars and mic is None:
+            phases = {self.phase(at, exchange) for exchange in self.mics}
+            return phases.pop() if len(phases) == 1 else SessionPhase.CLOSED
+        cal = self.exchange_calendars.get(mic, self.calendar)
+        local = at.astimezone(ZoneInfo(cal.timezone))
         day, t = local.date(), local.time().replace(tzinfo=None)
-        cal = self.calendar
         if not cal.is_trading_day(day):
             return SessionPhase.CLOSED
         if cal.is_open(at):
@@ -154,11 +176,21 @@ def default_markets(calendar_dir: Path | None = None) -> MarketRegistry:
         "US", "United States equities and ETFs", (
             "XNYS", "XNAS", "ARCX"), "USD",
         _calendar("US", "America/New_York", time(9, 30), time(16, 0), d),
-        pre_market_open=time(4, 0), post_market_close=time(20, 0)))
+        pre_market_open=time(4, 0), post_market_close=time(20, 0),
+        exchange_calendars={
+            mic: _calendar(mic if (d / f"{mic}.json").is_file() else "US",
+                           "America/New_York", time(9, 30), time(16, 0), d)
+            for mic in ("XNYS", "XNAS", "ARCX")
+        }))
     registry.register(MarketDefinition(
         "IN", "India (NSE/BSE) equities", ("XNSE", "XBOM"), "INR",
         _calendar("IN", "Asia/Kolkata", time(9, 15), time(15, 30), d),
-        pre_market_open=time(9, 0)))
+        pre_market_open=time(9, 0),
+        exchange_calendars={
+            mic: _calendar(mic if (d / f"{mic}.json").is_file() else "IN",
+                           "Asia/Kolkata", time(9, 15), time(15, 30), d)
+            for mic in ("XNSE", "XBOM")
+        }))
     registry.register(MarketDefinition(
         "DE", "Germany (Xetra) equities", ("XETR",), "EUR",
         _calendar("DE", "Europe/Berlin", time(9, 0), time(17, 30), d),

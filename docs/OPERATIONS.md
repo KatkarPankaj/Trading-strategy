@@ -9,12 +9,117 @@ terminator and network policy.
 
 ## Local API
 
+### Market Watch: US and India observation slice
+
+The dashboard sidebar now offers **Market Watch** separately from Trading Monitor.
+Set `MARKETS=US,IN` to expose both configured markets. The page uses the same
+canonical `Instrument` objects, market registry and imported master as research
+and execution; it does not discover or invent listings. Import a reviewed
+`INSTRUMENT_MASTER_FILE` through the existing bootstrap workflow. The development
+master remains recommendation-only and is not eligible for paper execution.
+Existing stored metadata is preserved. No configuration is changed automatically.
+
+V25 adds `market_watchlist`, referencing canonical instrument IDs. It is one
+shared authenticated-operator watchlist, not a multi-user authorization model.
+Back up and review the existing explicit migration procedure before installing
+this version; this implementation only exercised migrations in disposable test
+databases. Never point development tests at the operator database.
+
+| Authenticated route | Behavior |
+|---|---|
+| `GET /market-watch/markets` | Configured markets, calendar coverage, sessions, provider and freshness policy |
+| `GET /market-watch/instruments?market=IN&q=RELIANCE&limit=50&after=...` | Canonical symbol/name search, bounded to 100, deterministic exclusive ID cursor |
+| `GET /watchlist?market=IN` | Persisted membership and cached quote observations; no provider reads |
+| `POST /watchlist` | Add `{"instrument_id":"XNSE:RELIANCE"}` idempotently |
+| `POST /watchlist/remove` | Remove the same canonical identity idempotently |
+| `POST /market-watch/refresh?market=IN` | Explicit provider reads; never submits an order |
+
+The global watchlist limit is 100; explicit refresh supports at most 10 members
+per market and one in-flight refresh per market. A five-second soft work budget
+stops admitting additional reads, and a read can take up to its two-second worker
+wait beyond that budget. Incomplete results are explicit. There is no background
+price-fetch loop. GET recomputes freshness from the original source timestamp;
+reloading a browser never makes an old quote fresh.
+
+Prices are null when unavailable/invalid, never zero defaults. A structurally
+valid cached observation may be displayed as STALE with its original price and
+timestamp, but is never an execution input. Failed refresh clears the cached
+usable price and reports an error code. Quotes include source time, retrieval
+time, age, currency, exchange identity, tick/lot sizes, type and session.
+Mock observations are explicitly SYNTHETIC; other source names are UNATTESTED,
+not independently verified real-feed provenance. Watchlist membership and a
+FRESH display are not strategy signals or RiskEngine approvals.
+
+Each market has a separate bounded watch worker pool and circuit breaker,
+separate from execution/research pools. Timeout does not cancel a running vendor
+call; its capacity stays charged until actual completion. Late results cannot
+publish into the observation cache after a timeout. Vendor global locks, Python
+native work and shared account quotas can still couple markets. Watch and
+execution clients do not coordinate a distributed vendor-wide quota; allocate
+separate credentials/budgets or conservatively budget their combined requests.
+Watch work has no trading lock, but watchlist persistence shares SQLite admission.
+
+Provider selection reuses `DATA_PROVIDER_US` / `DATA_PROVIDER_IN` routing.
+`YAHOO_SYMBOL_MAP` and `TWELVEDATA_SYMBOL_MAP` map existing canonical IDs to
+vendor aliases without rewriting instruments. NSE defaults to Yahoo `.NS`;
+BSE `.BO` often requires an explicit verified vendor code, for example a numeric
+listing code rather than an NSE symbol. Twelve Data includes venue identity and
+validates response metadata. These sources remain research-only; plan entitlement,
+exchange coverage, quote delay and listing validity require independent checks.
+Optional `TWELVEDATA_API_KEY[_FILE]_IN` / `_US` and
+`TWELVEDATA_REQUESTS_PER_MINUTE_IN` / `_US` scope credentials and local pacing.
+Scoped key files do not inherit a global inline key. No credentials are returned.
+The default provider must still have its required credentials; scoped values
+override a configured route rather than inventing an unconfigured default.
+
+`MARKET_WATCH_MAX_AGE_SECONDS_IN` and `_US` set watch freshness, must be positive,
+and cannot exceed the existing execution maximum. These display policies do not
+change or relax execution risk/freshness rules. Multi-currency paper accounting
+already requires explicit FX and currency cash: USD cash is not silently converted
+into INR, and a USD-funded account is not an India-funded account. No funding or
+FX mutation route was added. Instrument eligibility, local entry windows,
+deterministic sizing, session/freshness and final risk/order checks stay on the
+existing execution path.
+
+#### Independent calendar configuration and remaining execution limitation
+
+`MARKET_CALENDAR_DIRECTORY` replaces the bundled directory. Supply reviewed
+`US.json` and `IN.json`, or separate `XNSE.json` and `XBOM.json`; optional US MIC
+files `XNYS.json`, `XNAS.json`, `ARCX.json` override `US.json`. JSON uses the existing
+`years`, `holidays`, `early_closes` format. Missing venue files fall back to their
+country file, and missing/uncovered country data fails closed. Do not mark a year
+covered using a fictitious empty holiday list. Retain source/verification metadata
+with the reviewed files. US daylight-saving conversion uses America/New_York;
+India uses Asia/Kolkata. Normal hours remain explicit market definitions.
+
+Venue-specific Market Watch phase respects each calendar. Country-wide execution
+checks conservatively require venues to agree and use the earliest venue close
+for scheduled flattening. This can intentionally withhold entries on differing
+venue days. Special weekend sessions, Muhurat trading and exceptional sessions
+are not modeled by this calendar format and are not claimed supported.
+
+India's official holiday endpoints could not be retrieved during this change.
+No purported verified Indian holiday calendar was bundled. Without reviewed IN/
+venue files, India can be searched/watched but session-authorized execution stays
+closed. US bundled coverage remains unchanged.
+
+The automatic paper loop still schedules **one** explicitly selected
+`PAPER_AUTO_LOOP_MARKET` / universe per process and reports
+`scheduling_scope=SINGLE_MARKET`. Watch selection does not change it. Do not start
+two API processes against one paper account to simulate multi-market scheduling.
+Simultaneous multi-market automation, account-funded INR admission and independent
+execution-feed failure budgets need a later coordinated execution milestone.
+Existing global entry/risk limits remain in force; no new order path, live
+execution, automatic FX conversion or AI training/promotion was added.
+
 1. Install the dependencies listed in `requirements.txt` in a Python 3.10+
    environment.
 2. Set the required risk-window and order-limit environment variables described
-   in `.env.example`. Set `DATABASE_URL` to a local SQLite file or a PostgreSQL
-   URL; credentials belong in environment variables or secret files, never in
-   committed configuration.
+   in `.env.example`. Use a local SQLite file for the validated paper startup
+   path. A PostgreSQL SQL adapter exists, but guarded history replay currently
+   refuses its unsupported snapshot-revision contract; that deployment is not
+   certified. Credentials belong in environment variables or secret files,
+   never in committed configuration.
 3. Set a strong `API_TOKEN` before using protected endpoints. Run
    `PYTHONPATH=src python -m stockmarket.ops check-config` to validate settings.
 4. Apply migrations explicitly with `PYTHONPATH=src python -m stockmarket.ops
@@ -395,7 +500,7 @@ bounded. Timeout raises explicitly. An interrupted execution retains a durable
 recovery requirement; never clear that claim without reconciliation. PostgreSQL
 still needs separately validated lock/statement settings and pool isolation.
 
-Routine execution state verification reads only bounded identity/status
+Routine execution state verification reads only bounded identity/status/economic-field
 projections (10,000 fills/orders), not full payloads. Position provenance queries
 only that instrument's current episode (1,000 fills). Orders/fills replay via
 keyset pages of 500 rows, capped at 100,000; orders use timestamp plus identity,
@@ -403,10 +508,15 @@ while fills reuse the durable feedback ordinal to preserve same-timestamp
 execution ordering. Unique-time legacy fills replay first, as in outcome feedback;
 ambiguous same-time legacy fills require reconciliation rather than guessed order.
 Interruption
-raises, never returns a completed partial portfolio. Recovery restarts replay
+raises, never returns a completed partial portfolio. Replay also validates page
+advance, expected row counts, contiguous known ordinals and SQLite local/external
+change revisions. Recovery restarts replay
 from durable data rather than trusting a partial in-memory checkpoint. It assumes
 the existing single-process startup admission barrier; this is not snapshot
-recovery under concurrent external database writers.
+recovery that can admit entries while arbitrary external writers are active.
+Changes observed during replay abort it; final execution-reserved projections
+also reject changed order/fill economics. No mechanism repairs externally edited
+financial records automatically.
 
 Prospective decisions/attachments/outcomes cap at 10,000, per-order fills at
 1,000 and events at 10,000. Overflow refuses reconciliation/dataset creation;
@@ -433,6 +543,87 @@ Offline stress harness (no credentials/network; creates only test state):
 $env:PYTHONPATH = 'src;tests'
 python -m unittest execution_isolation_stress
 ```
+
+### Protective-exit preparation and recovery validation
+
+Both ordinary monitoring and session flattening now prepare selected quotes outside
+the execution lock/account claim. They briefly snapshot current positions (including
+opening identity, side/quantity and portfolio revision) and pending orders, release
+the boundary for provider calls, then acquire a new reservation and compare current
+state. A changed snapshot reports `MONITORING_STATE_CHANGED` and performs no prepared
+price update/exit. The next complete monitoring pass may recover; the rejected pass
+does not retry an old quote or imply an exit succeeded.
+
+Each successful quote freezes instrument identity, adapter-callable source,
+provider timestamp and fetch timestamp. Map membership records availability;
+exceptions/missing data remain explicit per-instrument failures. Current instrument,
+tick grid, session, position opening time and freshness checks remain authoritative.
+Nested exit risk/reservation calculations use that map, never a missing-key provider
+fallback. Final RiskEngine still evaluates current quantities, exposure and controls.
+Prepared quote metadata/completeness is persisted with the ordinary order audit.
+
+A process-local lifecycle single-flight lock prevents overlapping preparation by
+direct callers as well as the supervisor. Entry admission reports
+`PROTECTIVE_RECONCILIATION_IN_PROGRESS` during provider preparation and
+`PROTECTIVE_RECONCILIATION_INCOMPLETE` following failure, stale input, partial work
+or changed state. Only a complete successful lifecycle check clears this barrier;
+it never clears another owner's kill/pause/recovery reason. A concurrent entry
+rejection itself persists a new order and can invalidate the prepared snapshot;
+that conservative failure is intentional. Cancellation remains available and also
+invalidates affected preparations. The existing startup barrier replaces this
+process-local state after restart. Quote work is capped by the monitoring item
+limit as well as the deadline; exhausted budgets are incomplete, not healthy.
+
+Provider waits in the lifecycle and its nested exit submission are removed from
+the atomic pass. Durable provenance reads, current-state validation, database writes
+and broker price/fill updates remain inside it. Entry preparation by a custom caller
+already holding an outer lock, vendor internals, native/GIL calls and shared database
+admission can still delay protection. A stalled provider read cannot be cancelled
+by a Python timeout and continues consuming its bounded lane slot. The watchdog
+does not promise a timely exit.
+
+Recovery starts with its own entry gate closed. Orders/fills are counted before
+replay; an explicit process-local completion flag also prevents `resume` or
+reconciliation from declaring success after interrupted order replay. An operator
+acknowledgement cannot substitute for completed replay. Histories exceeding
+100,000 replay records or 10,000 execution-verification records are refused.
+Tests use a real disposable 100,001-fill history and verify that
+neither a partial portfolio nor a new entry is published. Missing pages, non-advancing
+keys, ordinal gaps, row-count mismatches and SQLite revision changes abort replay.
+The SQLite revision combines `PRAGMA data_version` (other connections) and
+`total_changes` (this connection); unrelated writes can conservatively invalidate
+replay too. A fresh attempt restarts from durable data. Restoring a conflicting
+already-loaded order fails and requires a fresh restart/reconciliation, rather than
+silently retaining old state. Successful replay is not an immutable multi-query
+snapshot for arbitrary external writers, and cannot discover a legacy deletion
+that predates all available audit/order evidence.
+
+No durable checkpoint or migration is introduced. Existing PnL snapshots lack a
+complete accounting/FX/risk-baseline state plus an atomic replay cursor, and the
+execution-verification ceiling would still refuse large histories. A future
+checkpoint needs versioned complete accounting state, a fill high-watermark and
+integrity digest committed in the same fill transaction, validated delta replay,
+legacy coverage, atomic publication and durable current-state verification. Do not
+raise ceilings, discard old records or manually clear recovery gates as a shortcut.
+
+PostgreSQL assessment: `PostgresDatabase` exists, uses one connection and one RLock,
+and has no pool, admission deadline or default statement/lock-timeout configuration.
+The new validated history-revision contract is deliberately unsupported there;
+guarded startup replay fails explicitly rather than claiming SQLite-equivalent
+snapshot safety. PostgreSQL-backed paper startup is therefore not certified.
+No PostgreSQL server/driver/test DSN was available for this validation.
+
+Opt-in integration tests in `tests/test_postgres_isolation_integration.py` cover
+single-connection saturation, explicitly configured session timeouts, transaction
+contention/rollback and explicit refusal of unsupported validated replay. They skip
+without `STOCKMARKET_TEST_POSTGRES_DSN`; if supplied it must be a URI pointing to an
+explicitly disposable `stockmarket_test_*` database. They create only session-local
+temporary data, use an advisory transaction lock, and do not apply migrations.
+Install the optional psycopg driver in a separate approved test environment before
+running them. Skips are not successful PostgreSQL validation. Required follow-up:
+bounded pool/admission, backend-owned timeout settings, consistent snapshot/revision
+semantics, complete restart recovery and atomic financial integration tests, actually
+executed against supported PostgreSQL versions.
 
 Use the configured Python interpreter. The harness reports sample counts,
 p50/p95/worst observed scheduling/lock/quote/database timings, rejected entries,

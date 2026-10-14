@@ -423,6 +423,12 @@ _V24 = [
     "CREATE INDEX idx_fills_position ON fills (instrument_id, timestamp, fill_id)",
 ]
 
+_V25 = [
+    """CREATE TABLE market_watchlist (
+        instrument_id TEXT PRIMARY KEY REFERENCES instruments(instrument_id),
+        added_at TEXT NOT NULL)""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -444,7 +450,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (21, "paper_strategy_lifecycle_and_rankings", _V21),
     (22, "reproducible_strategy_comparisons", _V22),
     (23, "immutable_prospective_evidence", _V23),
-    (24, "bounded_execution_history_access", _V24)]
+    (24, "bounded_execution_history_access", _V24),
+    (25, "shared_market_watchlist", _V25)]
 
 
 def applied_versions(db: Database) -> set[int]:

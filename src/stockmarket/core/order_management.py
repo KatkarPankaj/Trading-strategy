@@ -409,6 +409,8 @@ class OrderManager:
         """Load a persisted order after a restart without contacting the gateway or firing hooks."""
         with self._lock:
             if order.client_order_id in self._orders:
+                if self._orders[order.client_order_id] != order:
+                    raise InvalidOrderTransition("restored order conflicts with existing state; restart recovery")
                 return
             self._orders[order.client_order_id] = order
             self._events[order.client_order_id] = list(events)
@@ -499,8 +501,12 @@ class OrderManager:
         updated = replace(order, status=target,
                           error=error if error is not None else order.error)
         self._orders[order.client_order_id] = updated
-        self._log(updated, current.status, target,
-                  detail or (error or ""), at, fill)
+        try:
+            self._log(updated, current.status, target,
+                      detail or (error or ""), at, fill)
+        except BaseException:
+            self._orders[order.client_order_id] = current
+            raise
         return updated
 
     def _log(self, order: ManagedOrder, previous: OrderStatus | None, target: OrderStatus,
@@ -509,4 +515,8 @@ class OrderManager:
             OrderEvent(at or self._clock(), previous, target, detail,
                        fill[0] if fill else None, fill[1] if fill else None))
         if self.on_change is not None:
-            self.on_change(order, self._events[order.client_order_id][-1])
+            try:
+                self.on_change(order, self._events[order.client_order_id][-1])
+            except BaseException:
+                self._events[order.client_order_id].pop()
+                raise

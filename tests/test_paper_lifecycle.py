@@ -304,6 +304,8 @@ class PaperPositionManagerTests(TestCase):
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
             paper_strategy_change=nullcontext,
+            monitoring_state=lambda: (),
+            monitoring_result=Mock(),
             order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
@@ -367,6 +369,8 @@ class PaperPositionManagerTests(TestCase):
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
             paper_strategy_change=nullcontext,
+            monitoring_state=lambda: (),
+            monitoring_result=Mock(),
             order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
@@ -400,6 +404,8 @@ class PaperPositionManagerTests(TestCase):
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
             paper_strategy_change=nullcontext,
+            monitoring_state=lambda: (),
+            monitoring_result=Mock(),
             order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),
@@ -489,6 +495,8 @@ class PaperPositionFlattenTests(TestCase):
         trading = SimpleNamespace(
             mode=TradingMode.PAPER,
             paper_strategy_change=nullcontext,
+            monitoring_state=lambda: (),
+            monitoring_result=Mock(),
             order_manager=SimpleNamespace(open_orders=lambda: ()),
             portfolio=SimpleNamespace(
                 positions=Mock(return_value={INSTRUMENT.instrument_id: position})),

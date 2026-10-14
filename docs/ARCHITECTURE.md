@@ -66,6 +66,33 @@ statement budgets fail explicitly; they are not one global transaction deadline.
 V24 adds replay/provenance indexes, with operator migration still unapplied.
 Live execution and model training/promotion remain disabled.
 
+### Protective-exit preparation and validated recovery
+
+The 8782588 successor splits `PaperPositionManager.manage/flatten` into a short
+execution-reserved snapshot, provider reads outside the boundary, and an atomic
+authoritative pass. An additional lifecycle single-flight lock never waits while
+owning the execution lock; duplicate invocations report incomplete/busy. The snapshot
+includes position opening time, quantity/side, pending orders and portfolio mutation
+revision. Any concurrent mutation discards that pass. Successful quote objects freeze
+instrument identity, adapter-callable source, provider timestamp and fetch timestamp;
+missing/failed quotes are explicit failures, not values. Quotes are validated before
+preparation and again before marking/submitting; current RiskEngine remains final.
+Nested lifecycle exit risk/reservation calculations consume the prepared map without
+provider fallback. Entry admission is closed throughout preparation and until a
+complete successful pass; protective exits remain possible through independent gates.
+
+Durable fill/order projections now compare economic fields as well as identities,
+with multiplicity for legacy fills. In-memory order transitions roll back on failed
+persistence callbacks; conflicting restored orders require restart/reconciliation.
+Replay validates strictly advancing keys, contiguous known fill ordinals, expected
+row counts and SQLite local/external change revisions. Oversized histories are
+rejected before replay, not truncated. There is no durable portfolio checkpoint:
+PnL snapshots and rollback checkpoints do not encode a complete restart state and
+cursor transaction. PostgreSQL's existing single-connection adapter has no validated
+equivalent revision contract and guarded replay explicitly refuses it.
+See [operations](OPERATIONS.md#protective-exit-preparation-and-recovery-validation)
+for limitations and opt-in disposable PostgreSQL tests.
+
 ## Existing implementation map
 
 | Responsibility | Existing implementation | Integration status |

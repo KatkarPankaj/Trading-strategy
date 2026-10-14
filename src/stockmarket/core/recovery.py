@@ -264,15 +264,19 @@ class RecoveryManager:
         self._broker, self._gate, self._log, self._alerts = broker, gate, logger, alerts
         self._retry, self._sleep = retry, sleep
         self._clock = clock or _now
+        self._replay_complete = False
 
     def recover(self) -> ReconciliationReport:
         """Startup sequence: load state, connect, reconcile, and halt new entries unless clean."""
+        self._gate.halt(GATE_CODE, "recovery in progress; no new entries until reconciliation completes")
+        self._replay_complete = False
         blocked = self._active_execution_report(0)
         if blocked is not None:
             self._conclude(blocked, "STARTUP_RECONCILIATION")
             return blocked
         try:
             restored = self._restore_orders()
+            self._replay_complete = True
         except Exception as exc:
             self._gate.halt(GATE_CODE, f"order replay incomplete: {type(exc).__name__}")
             raise RecoveryError("order replay incomplete; entries remain halted") from exc
@@ -298,6 +302,8 @@ class RecoveryManager:
         if not operator.strip() or not note.strip():
             raise RecoveryError(
                 "operator and note are required to resume trading")
+        if not self._replay_complete:
+            raise RecoveryError("history replay incomplete; complete recovery before resuming")
         report = self._reconcile(0)
         acknowledged = set(acknowledged)
         outstanding = [
@@ -326,6 +332,10 @@ class RecoveryManager:
         return count
 
     def _reconcile(self, restored: int) -> ReconciliationReport:
+        if not self._replay_complete:
+            return ReconciliationReport(self._clock(), (Discrepancy(
+                "HISTORY:INCOMPLETE", "HISTORY_REPLAY_INCOMPLETE", "history",
+                "incomplete", "", "complete validated replay before reconciliation"),), restored)
         blocked = self._active_execution_report(restored)
         if blocked is not None:
             return blocked

@@ -3,6 +3,7 @@ import json
 import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
 from threading import Event, local
 from time import perf_counter
 from unittest import TestCase, main
@@ -11,6 +12,7 @@ from unittest.mock import patch
 import test_paper_end_to_end as fixtures
 from stockmarket.core.models import OrderSide, OrderType
 from stockmarket.core.trading_service import OrderTicket
+from stockmarket.core.recovery import rebuild_portfolio
 
 
 def distribution(values):
@@ -52,6 +54,84 @@ class MeasuredLock:
 
 
 class IsolationStress(TestCase):
+    def test_controlled_protective_quotes_and_recovery(self):
+        f = fixtures.PaperEndToEndTests()
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        ctx = f.context(auto_loop=True)
+        client = f.client(ctx)
+        proposal = f.propose(client)
+        self.assertEqual(f.submit(client, proposal["proposal_id"]).status_code, 200)
+        measured = MeasuredLock(ctx.paper._submit_lock)
+        ctx.paper._submit_lock = measured
+        monitor = ctx.paper_loop.protective_monitor
+        monitor.enable()
+        monitor.recovery_complete = True
+        revised = hasattr(ctx.paper, "monitoring_result")
+        periods, quotes, contender_waits, recovery = [], [], [], []
+        blocked = failures = 0
+        original = ctx.paper_position_manager.quotes
+        for index in range(20):
+            entered, release = Event(), Event()
+
+            def slow(iid):
+                started = perf_counter()
+                entered.set()
+                try:
+                    if not release.wait(5):
+                        raise RuntimeError("controlled protective quote not released")
+                    return original(iid)
+                finally:
+                    quotes.append(perf_counter() - started)
+
+            def measured_cycle():
+                started = perf_counter()
+                try:
+                    return monitor.run_once()
+                finally:
+                    periods.append(perf_counter() - started)
+
+            if index == 19:
+                f.data.price = 100.
+                f.clock.at += timedelta(seconds=1)
+            with patch.object(ctx.paper_position_manager, "quotes", side_effect=slow):
+                with ThreadPoolExecutor(max_workers=1) as worker:
+                    future = worker.submit(measured_cycle)
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        started = perf_counter()
+                        acquired = ctx.paper._submit_lock.acquire(timeout=.01)
+                        contender_waits.append(perf_counter() - started)
+                        blocked += int(not acquired)
+                        if acquired:
+                            ctx.paper._submit_lock.release()
+                        self.assertEqual(acquired, revised)
+                    finally:
+                        release.set()
+                    result = future.result(timeout=5)
+                    failures += int(result["status"] != "HEALTHY")
+                    self.assertEqual(result["status"], "HEALTHY", result)
+            started = perf_counter()
+            rebuilt = rebuild_portfolio(f.store, ctx.paper.instruments, "USD", 100000.)
+            recovery.append(perf_counter() - started)
+            self.assertEqual(rebuilt.cash, ctx.paper.portfolio.cash)
+            self.assertEqual(len(rebuilt.fills), len(ctx.paper.portfolio.fills))
+        self.assertEqual(len(f.store.orders.all()), 2)
+        self.assertEqual(len(f.store.fills.all()), 2)
+        self.assertEqual(len(f.store.db.query("SELECT * FROM position_exit_proposals")), 1)
+        print("PROTECTIVE_EXIT_STRESS " + json.dumps({
+            "implementation": "revised" if revised else "8782588",
+            "monitor_seconds": distribution(periods), "quote_seconds": distribution(quotes),
+            "execution_lock_wait_seconds": distribution(measured.waits),
+            "critical_seconds": distribution(measured.durations),
+            "contender_wait_seconds": distribution(contender_waits),
+            "recovery_seconds": distribution(recovery),
+            "blocked_contenders": blocked, "failed_checks": failures,
+            "deadline_misses": monitor.status()["deadline_misses"], "duplicate_exits": 0,
+            "limits": "20 Event-held quotes; 10ms contender admission; one actual protective exit; "
+                      "20 one/two-fill recovery samples; fixture timings, not a vendor or large-history SLA"},
+            sort_keys=True))
+
     def test_controlled_history_and_database_contention(self):
         f = fixtures.PaperEndToEndTests()
         f.setUp()

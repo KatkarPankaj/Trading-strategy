@@ -41,6 +41,10 @@ def _pages(fetch: Callable[[tuple[str, str] | None, int], list[dict[str, Any]]],
         if not rows:
             return
         for row in rows:
+            key = (row["timestamp"], row[identity])
+            if cursor is not None and key <= cursor:
+                raise ValueError("HISTORY_ORDER_INVALID: replay cursor did not advance")
+            cursor = key
             count += 1
             if count > max_rows:
                 raise ValueError("HISTORY_LIMIT_EXCEEDED: reconciliation is incomplete")
@@ -291,7 +295,8 @@ class OrderRepository(_Repository):
     def execution_state(self, limit: int = 10000) -> list[dict[str, Any]]:
         _history_limit(limit)
         return bounded_rows(self._db.query(
-            "SELECT client_order_id, status, filled_quantity FROM orders "
+            "SELECT client_order_id, status, filled_quantity, quantity, instrument_id, side, "
+            "order_type, limit_price, stop_price, average_fill_price FROM orders "
             "ORDER BY client_order_id LIMIT ?", (limit + 1,)), limit)
 
     def iter_all(self, *, page_size: int = 500, max_rows: int = 100000) -> Iterator[dict[str, Any]]:
@@ -302,7 +307,17 @@ class OrderRepository(_Repository):
             return self._db.query(
                 "SELECT * FROM orders WHERE (timestamp, client_order_id) > (?, ?) "
                 "ORDER BY timestamp, client_order_id LIMIT ?", (*cursor, limit))
-        return _pages(fetch, "client_order_id", page_size=page_size, max_rows=max_rows)
+        revision = self._db.history_revision()
+        expected = self._db.query("SELECT COUNT(*) AS count FROM orders")[0]["count"]
+        _history_limit(max_rows)
+        if expected > max_rows:
+            raise ValueError("HISTORY_LIMIT_EXCEEDED: order recovery requires a validated checkpoint")
+        count = 0
+        for row in _pages(fetch, "client_order_id", page_size=page_size, max_rows=max_rows):
+            count += 1
+            yield row
+        if count != expected or revision != self._db.history_revision():
+            raise ValueError("HISTORY_SNAPSHOT_CHANGED: order replay is incomplete")
 
     def open_orders(self) -> list[dict[str, Any]]:
         return self._db.query(
@@ -342,10 +357,16 @@ class FillRepository(_Repository):
     def execution_state(self, limit: int = 10000) -> list[dict[str, Any]]:
         _history_limit(limit)
         return bounded_rows(self._db.query(
-            "SELECT client_order_id, fill_sequence FROM fills ORDER BY fill_id LIMIT ?",
+            "SELECT client_order_id, fill_sequence, instrument_id, side, quantity, price, fee, "
+            "slippage, currency, realized_pnl, timestamp FROM fills ORDER BY fill_id LIMIT ?",
             (limit + 1,)), limit)
 
     def iter_all(self, *, page_size: int = 500, max_rows: int = 100000) -> Iterator[dict[str, Any]]:
+        revision = self._db.history_revision()
+        expected = self._db.query("SELECT COUNT(*) AS count FROM fills")[0]["count"]
+        _history_limit(max_rows)
+        if expected > max_rows:
+            raise ValueError("HISTORY_LIMIT_EXCEEDED: fill recovery requires a validated checkpoint")
         def fetch(cursor: tuple[str, str] | None, limit: int) -> list[dict[str, Any]]:
             if cursor is None:
                 return self._db.query(
@@ -372,8 +393,13 @@ class FillRepository(_Repository):
                 "JOIN fills f ON f.fill_id = p.fill_id WHERE p.ordinal > ? "
                 "ORDER BY p.ordinal LIMIT ?", (ordinal, min(page_size, max_rows - count + 1)))
             if not rows:
+                if count != expected or revision != self._db.history_revision():
+                    raise ValueError("HISTORY_SNAPSHOT_CHANGED: fill replay is incomplete")
                 return
             for row in rows:
+                if row["replay_ordinal"] != ordinal + 1:
+                    raise ValueError("HISTORY_ORDINAL_GAP: fill replay is incomplete")
+                ordinal = row["replay_ordinal"]
                 count += 1
                 if count > max_rows:
                     raise ValueError("HISTORY_LIMIT_EXCEEDED: reconciliation is incomplete")
@@ -2225,12 +2251,36 @@ class ProspectiveRepository(_Repository):
                         (row["decision_id"], payload["manifest_id"], partition))
 
 
+class MarketWatchlistRepository(_Repository):
+    def list(self) -> list[dict[str, Any]]:
+        return self._db.query(
+            "SELECT instrument_id, added_at FROM market_watchlist ORDER BY instrument_id LIMIT 101")
+
+    def add(self, instrument_id: str, at: datetime) -> None:
+        with self._db.transaction():
+            # Acquire SQLite's writer lock before capacity admission, including an empty list.
+            self._db.execute("UPDATE market_watchlist SET added_at = added_at WHERE instrument_id = ?",
+                            (instrument_id,))
+            if self._db.query("SELECT instrument_id FROM market_watchlist WHERE instrument_id = ?",
+                              (instrument_id,)):
+                return
+            if len(self.list()) >= 100:
+                raise ValueError("shared watchlist is limited to 100 instruments")
+            self._db.execute(
+                "INSERT INTO market_watchlist (instrument_id, added_at) VALUES (?, ?)",
+                (instrument_id, at.isoformat()))
+
+    def remove(self, instrument_id: str) -> None:
+        self._db.execute("DELETE FROM market_watchlist WHERE instrument_id = ?", (instrument_id,))
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
     def __init__(self, db: Database) -> None:
         self.db = db
         self.instruments = InstrumentRepository(db)
+        self.watchlist = MarketWatchlistRepository(db)
         self.personal_research = PersonalResearchRepository(db)
         self.market_data = MarketDataMetadataRepository(db)
         self.signals = SignalRepository(db)
