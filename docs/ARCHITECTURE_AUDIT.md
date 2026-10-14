@@ -8,6 +8,88 @@ Scope: Non-destructive audit of the legacy implementation (baseline). Revised af
 
 ## 1) Executive Summary
 
+### Authorized local compatibility maintenance (2026-10-14)
+
+After separate operator approval, checked the existing US database read-only:
+schema 23 versus required 25. The old API lacked the automatic-entry pause route.
+Confirmed PAPER mode, USD 100,000 cash and no positions/orders before stopping
+the exact API/dashboard PIDs. These were process stops, not a demonstrated
+graceful ASGI shutdown. With both ports free, made an SQLite backup, verified its
+integrity and equality with the source, then explicitly applied migrations 24
+(history indexes) and 25 (watchlist table). Every preexisting non-audit domain
+table retained identical row counts and content hashes; integrity, foreign keys
+and the audit chain passed.
+
+Recorded a durable `PAPER_LOOP_ENTRIES_PAUSED` event through the audit repository
+before startup. Restarted the existing US task with automatic migrations
+disabled and the matching dashboard. API contract version 1 and all required
+features are advertised; automatic entries are paused, protective monitoring is
+enabled/healthy and recovery is complete without reported failures. The USD
+100,000 balance and zero exposure are unchanged. Missing pre-market execution
+data still leaves health degraded and entry-data readiness false. This
+operational repair does not validate a fresh execution feed, India readiness,
+live trading or unattended operation.
+
+Browser validation after restart loaded Trading Monitor, System health and
+Market Watch without the compatibility warning. Both previously missing API
+routes returned HTTP 200. A subsequent paper-loop tick logged
+`HISTORY_SNAPSHOT_CHANGED: fill replay is incomplete` during prospective
+evidence reconciliation; the loop reported one failure while protective
+monitoring remained healthy. No replay guard was bypassed, no new orders were
+created and automatic entries remain paused. Investigate this runtime
+contention/reconciliation rejection before claiming supervised auto-entry
+readiness.
+
+### AI input-limit candidate rejection fix (2026-10-14)
+
+After entries were re-enabled, the 21:00 IST US cycle rejected SPY and QQQ
+before strategy evaluation: each snapshot context was about 18.8k characters
+(20 news items about 14.6k) against the 6000-character AI input default. That
+rejection is fail-closed and is unchanged. The new `news_max_items` research
+setting (1-20, default 20) keeps only the most recent accepted events and
+records `NEWS_EVENTS_CAPPED`. `AI_MAX_INPUT_CHARS` (1000-64000, default 6000)
+is now configurable. The US task uses 5 items and 16000 characters. These
+changes alter research fingerprints but do not bypass AI, strategy, risk,
+freshness or recovery gates. Orders still require fresh execution data and a
+deterministic strategy signal.
+
+### Dashboard readiness preflight follow-up (2026-10-14)
+
+Browser/API inspection found a running older API: Market Watch and market
+readiness routes returned 404 while the dashboard already offered Market Watch.
+Its US/US_ALL loop was RUNNING but MARKET_CLOSED, with roughly 10.4-hour-old
+execution data, USD 100,000 cash, no positions and no fills. These observations
+do not establish India or US unattended-test readiness.
+
+Prepared-only remediation: shared explicit dashboard contract in health; refuse
+interactive rendering on missing/incompatible contracts while retaining
+read-only diagnostics and explicitly warning that this does not pause an active
+loop. Route-specific 404 messages identify capability mismatch. Health now
+distinguishes stale/missing data inside versus outside the selected worker's
+regular session without querying providers, changing timestamps or removing
+entry blockers. No runtime freshness or risk threshold was relaxed.
+
+Official NSE holiday-page retrieval again timed out. No calendar dates or
+execution feed/mapping attestations were fabricated; no account currency was
+changed. The running mismatch and stale-data conditions require a separately
+authorized operational alignment and an actual session-time feed check, not
+just code edits. See the operations preflight. This follow-up does not certify
+India execution or simultaneous workers.
+
+Validation (Python 3.11.6; disposable databases and injected providers):
+`PYTHONPATH=src;tests python -m unittest test_dashboard_compatibility test_dashboard_client test_india_readiness test_market_watch -q`
+passed 68 tests in 2.533s. With `PYTHONPATH=src`,
+`python -m unittest discover -s tests -v` discovered 705 tests: 700 passed,
+five PostgreSQL skips, zero failures/errors in 206.038s. Six new tests cover
+missing/future/malformed contracts, absent capabilities, safe read-only rendering,
+missing-route diagnostics and stale data inside/outside the US session.
+`python -m bandit -r src\stockmarket -c bandit.yaml -ll -f json -o <session-report>`
+retains the same seven pre-existing MEDIUM findings (nonzero exit), and
+`python -m pip_audit -r requirements.txt` found no known vulnerabilities.
+`git diff --check` and editor diagnostics passed. Existing AnyIO warnings remain.
+No service restart, operator database/account mutation, migration, provider
+promotion, funding conversion, commit, push or deployment was performed.
+
 ### India readiness and isolated-worker increment (2026-10-14)
 
 Audited baseline `14a5c49e5e397f9904ebcc5607ed9743b332744c`: Market Watch already

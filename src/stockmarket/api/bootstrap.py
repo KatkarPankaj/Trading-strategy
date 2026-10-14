@@ -156,11 +156,15 @@ def _research_from_env(
                 max_retries = _optional_int(env, "AI_MAX_RETRIES", 0)
                 token_budget = _optional_int(env, "AI_TOKEN_BUDGET", None)
                 max_output_tokens = _optional_int(env, "AI_MAX_OUTPUT_TOKENS", None)
+                max_input_chars = _optional_int(env, "AI_MAX_INPUT_CHARS", 6000)
+                if max_input_chars is None or not 1000 <= max_input_chars <= 64000:
+                    raise ValueError("AI_MAX_INPUT_CHARS must be between 1000 and 64000")
                 provider = OpenAICompatibleProvider(
                     base_url, model, key, timeout=timeout,
                     max_output_tokens=max_output_tokens)
                 analyst = AIAnalyst(
-                    provider, max_retries=max_retries, token_budget=token_budget)
+                    provider, max_retries=max_retries, token_budget=token_budget,
+                    max_input_chars=max_input_chars)
             except (SecurityError, TypeError, ValueError) as exc:
                 errors.append(f"invalid AI provider configuration: {exc}")
 

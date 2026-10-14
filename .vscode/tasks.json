@@ -13,6 +13,9 @@
 			"type": "shell",
 			"options": {
 				"env": {
+					"AUTO_MIGRATE": "false",
+					"AI_MAX_INPUT_CHARS": "16000",
+					"CANDIDATE_RESEARCH_SETTINGS": "{\"news_max_items\":5}",
 					"NEWS_PROVIDER": "finnhub",
 					"FINNHUB_API_KEY_FILE": "secrets\\finhub-api-key",
 					"FINNHUB_API_KEY": "",

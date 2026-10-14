@@ -135,9 +135,13 @@ class CandidateResearchSettings:
     max_candidates: int = 50
     cache_ttl_seconds: float = 30.0
     cache_capacity: int = 256
+    news_max_items: int = 20
 
     def __post_init__(self) -> None:
         interval_delta(self.interval)
+        if isinstance(self.news_max_items, bool) or not isinstance(self.news_max_items, int) \
+                or not 1 <= self.news_max_items <= 20:
+            raise ValueError("news_max_items must be an integer between 1 and 20")
         if isinstance(self.regime_lookback_bars, bool) \
                 or not isinstance(self.regime_lookback_bars, int) \
                 or not 2 <= self.regime_lookback_bars <= 500:
@@ -174,7 +178,7 @@ def parse_candidate_research_settings(raw: str | None) -> CandidateResearchSetti
         "regime_max_bar_age_seconds", "fundamental_max_age_seconds",
         "sector_max_age_seconds", "news_max_age_seconds",
         "news_current_window_seconds", "max_concurrency", "max_candidates",
-        "cache_ttl_seconds", "cache_capacity",
+        "cache_ttl_seconds", "cache_capacity", "news_max_items",
     }
     if not isinstance(payload, dict) or set(payload).difference(allowed):
         raise ValueError("CANDIDATE_RESEARCH_SETTINGS contains unsupported fields")
@@ -631,6 +635,15 @@ class CandidateResearchService:
                     warnings.append(f"NEWS_EVENT_OMITTED:{event_key}:FUTURE_OR_STALE")
                     continue
                 accepted.append(event)
+            cap = self.settings.news_max_items
+            if len(accepted) > cap:
+                # Keep the most recent events deterministically and disclose the omission.
+                kept = sorted(
+                    accepted, key=lambda e: (e.timestamp, str(e.event_id)), reverse=True)[:cap]
+                kept_ids = {str(e.event_id) for e in kept}
+                warnings.append(
+                    f"NEWS_EVENTS_CAPPED:kept={cap}:omitted={len(accepted) - cap}")
+                accepted = [e for e in accepted if str(e.event_id) in kept_ids]
             retrieved = self._now()
             for event in accepted:
                 evidence.append(self._record(

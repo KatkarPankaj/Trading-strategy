@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..core.audit_trail import AuditContext, reconstruct
+from ..core.api_contract import DASHBOARD_CONTRACT_VERSION, DASHBOARD_FEATURES
 from ..core.candidate_research import CandidateResearchService
 from ..core.ai.candidate_assessment import (
     CandidateAssessmentError,
@@ -259,6 +260,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
     @app.get("/health")
     def health() -> JSONResponse:
         report = ctx.health.report()
+        report["dashboard_contract"] = {
+            "version": DASHBOARD_CONTRACT_VERSION, "features": list(DASHBOARD_FEATURES)}
         report["trading_mode"] = ctx.mode
         report["application_mode"] = "PERSONAL_RESEARCH" if ctx.personal_research_mode else ctx.mode
         report["execution_enabled"] = not ctx.personal_research_mode
@@ -279,6 +282,22 @@ def create_app(ctx: ApiContext) -> FastAPI:
             report["execution_enabled"] = False
         if sessions.get(execution_market) != "REGULAR":
             blockers.append("NO_REGULAR_MARKET_SESSION")
+        regular_session = sessions.get(execution_market) == "REGULAR"
+        fresh = report["checks"]["market_data"]["healthy"]
+        report["execution_data_status"] = {
+            "market": execution_market,
+            "session": sessions.get(execution_market, "UNKNOWN"),
+            "status": ("FRESH" if fresh else
+                       "MISSING_OR_STALE_DURING_SESSION" if regular_session else
+                       "MISSING_OR_STALE_OUTSIDE_SESSION"),
+            "source_timestamp": report.get("last_market_data_timestamp"),
+            "age_seconds": report.get("market_data_age_seconds"),
+            "entry_data_ready": bool(regular_session and fresh),
+            "detail": (
+                "Stored data is not refreshed by this status request. During the selected market's "
+                "verified regular session, each entry needs a fresh provider quote and final risk "
+                "validation. A closed market is not repaired by switching markets or retimestamping data."),
+        }
         if worker and execution_market == "IN":
             blockers.extend(sorted({reason for row in worker["india"] for reason in row["blockers"]}))
             if not worker["india"]:

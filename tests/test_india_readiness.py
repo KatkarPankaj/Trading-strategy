@@ -298,6 +298,26 @@ class IndiaBootstrapTests(TestCase):
         health = client.get("/health").json()
         self.assertEqual(health["paper_readiness"]["execution_market"], "US")
         self.assertIn("NO_REGULAR_MARKET_SESSION", health["paper_readiness"]["blockers"])
+        self.assertEqual(health["dashboard_contract"]["version"], 1)
+        self.assertIn("execution_data_status", health["dashboard_contract"]["features"])
+
+    def test_health_does_not_mask_stale_quotes_when_us_is_closed_or_open(self):
+        from stockmarket.core.api_contract import dashboard_compatibility_problem
+        ctx = self.context()
+        client = TestClient(create_app(ctx))
+        self.addCleanup(client.close)
+        ctx.health.record_market_data(NOW - timedelta(hours=10))
+        for hour, expected in ((5, "MISSING_OR_STALE_OUTSIDE_SESSION"),
+                               (15, "MISSING_OR_STALE_DURING_SESSION")):
+            self.clock.at = NOW.replace(hour=hour)
+            report = client.get("/health").json()
+            self.assertIsNone(dashboard_compatibility_problem(report))
+            data = report["execution_data_status"]
+            self.assertEqual(data["market"], "US")
+            self.assertEqual(data["status"], expected)
+            self.assertFalse(data["entry_data_ready"])
+            self.assertEqual(data["source_timestamp"], (NOW - timedelta(hours=10)).isoformat())
+            self.assertIn("MISSING_OR_STALE_EXECUTION_DATA", report["paper_readiness"]["blockers"])
 
     def test_india_worker_requires_explicit_inr_and_no_fx(self):
         for changes in ({}, {"BASE_CURRENCY": "INR", "PAPER_STARTING_CASH": ""},

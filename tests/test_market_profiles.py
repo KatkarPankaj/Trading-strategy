@@ -247,6 +247,19 @@ class MarketBootstrapTests(unittest.TestCase):
         self.assertEqual(set(context.research_sessions), {"US", "IN", "DE"})
         self.assertEqual(len(context.instruments), 16)
 
+    def test_ai_input_limit_is_configurable_and_validated(self):
+        base = dict(self.env(), AI_BASE_URL="https://example.invalid/v1",
+                    AI_MODEL="fixture-model", AI_API_KEY="fixture-key-not-a-real-secret")
+        self.assertEqual(
+            self.build(base).candidate_assessment.analyst.max_input_chars, 6000)
+        self.assertEqual(
+            self.build(dict(base, AI_MAX_INPUT_CHARS="16000"))
+            .candidate_assessment.analyst.max_input_chars, 16000)
+        for value in ("999", "64001", "many"):
+            with self.subTest(value=value), self.assertRaises(Exception) as caught:
+                self.build(dict(base, AI_MAX_INPUT_CHARS=value))
+            self.assertIn("AI_MAX_INPUT_CHARS", str(caught.exception))
+
     def test_explicit_research_session_override_preserves_other_profiles(self):
         env = dict(self.env(), RESEARCH_SESSIONS=(
             '{"US":{"opening_range_minutes":20,"entry_cutoff":"14:00",'

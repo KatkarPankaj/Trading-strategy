@@ -18,6 +18,7 @@ from stockmarket.core.candidate_research import (
     EvidenceStatus,
     ResearchEvidenceRecord,
     EvidenceQuality,
+    parse_candidate_research_settings,
 )
 from stockmarket.core.data import DataPolicy, MockProvider, ResilientProvider
 from stockmarket.core.executors import TradingMode
@@ -274,6 +275,53 @@ class CandidateResearchTests(unittest.TestCase):
         self.assertEqual(news.payload["headline"], "Company reports quarterly results")
         self.assertEqual(news.provenance["provider"], "test-news")
         self.assertEqual(provider.calls, 1)
+
+    def test_news_is_capped_to_most_recent_events_with_disclosed_omission(self):
+        class ManyNewsProvider:
+            name = "many-news"
+
+            def get_news(self, query):
+                return tuple(NewsEvent(
+                    timestamp=AS_OF - timedelta(minutes=10 * (number + 1)),
+                    source="provider-newsroom",
+                    headline=f"Headline {number}",
+                    event_type=NewsEventType.EARNINGS,
+                    sentiment=NewsSentiment.UNKNOWN,
+                    sentiment_confidence=0,
+                    market_impact=MarketImpact.UNKNOWN,
+                    relevance=0.8,
+                    symbol="AAPL",
+                    affected_market="US",
+                ) for number in range(query.limit))
+
+        service = CandidateResearchService(
+            self.market_data,
+            self.store.scanner_runs,
+            self.store.research_runs,
+            {self.instrument.instrument_id: self.instrument},
+            news_provider=ManyNewsProvider(),
+            settings=CandidateResearchSettings(cache_ttl_seconds=0, news_max_items=3),
+            clock=lambda: AS_OF,
+        )
+
+        _, snapshots = service.run_scan("scan-test")
+
+        news = [item for item in snapshots[0].evidence if item.component == "news"]
+        self.assertEqual(
+            [item.payload["headline"] for item in news],
+            ["Headline 0", "Headline 1", "Headline 2"])
+        self.assertIn("NEWS_EVENTS_CAPPED:kept=3:omitted=17", snapshots[0].warnings)
+        component = next(item for item in snapshots[0].components if item.component == "news")
+        self.assertEqual(component.status, EvidenceStatus.AVAILABLE)
+        self.assertEqual(component.evidence_count, 3)
+
+    def test_news_cap_setting_is_validated(self):
+        for value in (0, 21, True, "5"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                CandidateResearchSettings(news_max_items=value)
+        self.assertEqual(
+            parse_candidate_research_settings('{"news_max_items": 5}').news_max_items, 5)
+        self.assertEqual(CandidateResearchSettings().news_max_items, 20)
 
     def test_historical_news_requires_an_archive_capable_provider(self):
         provider = StaticNewsProvider()

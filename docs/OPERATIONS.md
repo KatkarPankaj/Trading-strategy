@@ -9,6 +9,62 @@ terminator and network policy.
 
 ## Local API
 
+### Dashboard/API mismatch and supervised paper-test preflight
+
+The dashboard requires the shared `/health.dashboard_contract`: version `1`,
+with `market_watch`, `paper_market_readiness`, and `execution_data_status`.
+Missing/malformed/incompatible contracts show read-only health diagnostics and
+withhold interactive dashboard controls. This does **not** pause or stop a
+server-side loop that was already enabled. Compatibility is not risk approval:
+a compatible but degraded API remains blocked by its trading prerequisites.
+Missing Market Watch/readiness routes report a capability mismatch rather than
+an empty list of markets. A successful health response alone does not prove
+that the dashboard and API support the same features.
+
+Do not run a replacement worker alongside the existing account. Resolving a
+running old API requires a separately authorized controlled shutdown/restart
+using matching code and the intended environment. Before doing that, confirm
+the configured database schema with the existing schema-status procedure below,
+review backups/recovery, and leave automation disabled during startup validation.
+Do not apply migrations implicitly to the operator database, reset cash, switch
+the account's market, or delete its ownership sidecar to work around a blocker.
+The VS Code `Start US Paper Auto-Loop API` task sets `AUTO_MIGRATE=false`;
+pending schema changes must be reviewed, backed up and explicitly applied before
+starting it. Automatic-entry pauses are restored from the persisted audit
+control, independently of whether the scheduling loop is running.
+
+`/health.execution_data_status` distinguishes missing/stale data during the
+execution worker's regular session from missing/stale data outside that session.
+It retains original source timestamps/ages, never calls a provider, and never
+removes `MISSING_OR_STALE_EXECUTION_DATA` from readiness blockers. Closed-market
+prices are not a reason to overwrite timestamps, use zero prices, or silently
+switch to India. On 2026-10-14, the US normal opening is 13:30 UTC / 19:00 IST
+(09:30 America/New_York); use the configured reviewed calendar rather than this
+one-date example for scheduling. A pre-open stale observation is not proof of
+a broken feed, but it is not a usable entry quote either.
+
+Before a supervised US paper test, after separately approved service alignment:
+
+1. Confirm PAPER mode, the intended US worker identity, an unchanged USD account,
+   compatible dashboard contract, and the opt-in loop still disabled/paused.
+2. Verify completed recovery, healthy independent protective monitoring, entry
+   pause/kill-switch controls and no unexpected positions/pending orders.
+3. During a verified US session, validate actual provider entitlement, source
+   identity/timestamps/freshness, instrument mapping and limits. A closed circuit
+   alone is not feed validation. Use the existing bounded quote/order workflow;
+   never refresh data by changing timestamps or treat a status GET as a quote.
+4. Review conservative paper limits and monitor a small, supervised session.
+   A `COMPLETE` cycle or `RUNNING` loop is not evidence of a fill or profitability.
+
+India cannot be unblocked by this software preflight alone. Obtain official
+cash-equity calendar publications and review every date/session using the
+artifact contract below; independently validate an execution-quality India feed,
+mapping, entitlement, delay, tick/lot/quantity rules and cost assumptions. Current
+adapters have no such approval path. An isolated INR account/configuration needs
+separate authorization; the existing USD balance must never be relabeled as INR.
+No startup, funding, feed promotion, calendar certification or order action is
+performed by opening the dashboard.
+
 ### India readiness and single-market worker boundary
 
 `PAPER_EXECUTION_MARKET` binds one process to one market; absent that setting,
@@ -270,6 +326,15 @@ and fails closed with `AI_BUDGET_EXHAUSTED` (it resets on restart);
 `AI_MAX_OUTPUT_TOKENS` (1-32768) is sent as `max_tokens`, which some reasoning
 models reject. Each persisted assessment records `ai_usage` (calls, attempts,
 prompt/completion counts, and whether counts were estimated).
+`AI_MAX_INPUT_CHARS` (1000-64000, default 6000) is the serialized
+snapshot/selection context limit. Oversized contexts still fail closed as
+`INSUFFICIENT_EVIDENCE`; they are never truncated or treated as a signal.
+`CANDIDATE_RESEARCH_SETTINGS` accepts `news_max_items` (1-20, default 20); when
+more in-window events are accepted, only the most recent are kept and the
+snapshot records `NEWS_EVENTS_CAPPED:kept=N:omitted=M`. The US auto-loop task
+uses `AI_MAX_INPUT_CHARS=16000` and `news_max_items=5` because 20 news items
+pushed every US snapshot (about 18.8k characters) over the 6000 default,
+rejecting all candidates before strategy evaluation.
 Compose mounts `secrets/ai_api_key.txt` as the key-file secret. Keep the
 non-secret endpoint, model, and session settings in the ignored host `.env`.
 

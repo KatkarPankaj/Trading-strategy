@@ -84,6 +84,12 @@ class ApiClient:
     def _response_json(response: requests.Response, path: str) -> Any:
         if response.status_code == 401:
             raise ApiError("API rejected the token (401)", 401)
+        if response.status_code == 404 and (
+                path.startswith("/market-watch/") or path == "/paper/market-readiness"):
+            raise ApiError(
+                "Dashboard/API capability mismatch (404): this API lacks the requested Market Watch "
+                "or readiness route. Run matching versions after an authorized controlled restart; "
+                "do not reinterpret this as an empty market list or enable trading.", 404)
         if response.status_code == 503 and path == "/health":
             return response.json()
         if response.status_code == 503 and path == "/research":

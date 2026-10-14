@@ -11,6 +11,7 @@ import streamlit as st
 
 from . import views
 from .client import ApiClient, ApiError
+from ..core.api_contract import dashboard_compatibility_problem
 
 _COLORS = {"paper": "#1f6feb", "live": "#d1242f", "unknown": "#6e7781"}
 
@@ -48,6 +49,20 @@ def main() -> None:
         st.error(str(exc))
     label, level = views.mode_banner(health)
     _banner(label, level)
+    problem = dashboard_compatibility_problem(health)
+    if problem is not None:
+        st.error(problem)
+        st.warning(
+            "Interactive dashboard controls are unavailable until matching API/dashboard versions "
+            "are running. This does NOT pause an already-running paper loop. Do not start another "
+            "worker or bypass entry gates. Review schema compatibility and arrange an authorized "
+            "controlled restart; this page does not restart services or migrate databases.")
+        if health is not None:
+            st.subheader("Read-only API health (compatibility unverified)")
+            st.json(health)
+        if st.sidebar.button("Refresh"):
+            st.rerun()
+        return
     personal = bool(health and health.get("application_mode") == "PERSONAL_RESEARCH")
     if personal:
         _banner("PERSONAL RESEARCH - RECOMMENDATION ONLY - EXECUTION DISABLED", "paper")
@@ -837,6 +852,9 @@ def _health(health: Any, activity: dict[str, Any] | None = None,
     if health.get("paper_readiness") is not None:
         st.subheader("Paper execution readiness (not risk approval)")
         st.json(health["paper_readiness"])
+    if health.get("execution_data_status") is not None:
+        st.subheader("Execution data and selected market session")
+        st.json(health["execution_data_status"])
     _table(views.health_checks(health))
     st.json({k: health[k] for k in ("last_market_data_timestamp", "market_data_age_seconds",
                                     "last_successful_order", "error_counts")})
