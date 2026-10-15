@@ -10,6 +10,7 @@ from test_paper_end_to_end import HEADERS
 from test_personal_research import AS_OF, ResearchData, assessment_response
 
 from stockmarket.core.ai import AIAnalyst
+from stockmarket.core.autonomous_research import AutonomousResearchService
 from stockmarket.core.strategy_lab import StrategyLabError
 
 
@@ -141,6 +142,14 @@ class StrategyLifecycleTests(unittest.TestCase):
                     "universe_id": "US_ALL", "idempotency_key": "active-version-research",
                     "as_of": clock.at.isoformat(), "top_n": 1})
                 self.assertEqual(run.status_code, 200, run.text)
+                automatic = AutonomousResearchService.run(
+                    self.ctx.autonomous_research,
+                    "US_ALL", idempotency_key="reviewed-is-not-automatic",
+                    as_of=clock.at, top_n=1, validated_selection=True)
+                blocked = automatic["candidates"][0]["opportunity"]["assessment"]
+                self.assertEqual(blocked["status"], "NO_VALIDATED_STRATEGY")
+                self.assertIn("AUTOMATIC_VALIDATION_POLICY_UNAPPROVED", blocked["error"])
+                self.assertIsNone(blocked["recommended_strategy"])
                 candidate = run.json()["candidates"][0]
                 base = f"/research/autonomous/{run.json()['run_id']}/candidates/{candidate['instrument_id']}"
                 signal = self.client.post(base + "/signal", headers=HEADERS,

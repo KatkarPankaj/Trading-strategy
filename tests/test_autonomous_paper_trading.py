@@ -19,7 +19,8 @@ INSTRUMENT_ID = "XNAS:AAPL"
 
 
 class _Research:
-    def run(self, universe_id, *, idempotency_key, mode, as_of, top_n):
+    def run(self, universe_id, *, idempotency_key, mode, as_of, top_n, validated_selection):
+        assert validated_selection is True
         return {
             "run_id": "research-run-1",
             "status": "COMPLETE",

@@ -155,9 +155,12 @@ class AutonomousResearchService:
         mode: str = "PAPER",
         as_of: datetime | None = None,
         top_n: int | None = None,
+        validated_selection: bool = False,
     ) -> dict[str, Any]:
         if mode != "PAPER":
             raise AutonomousResearchError("autonomous opportunity discovery is PAPER-only")
+        if not isinstance(validated_selection, bool):
+            raise ValueError("validated_selection must be a bool")
         if self.strategy_refresh is not None:
             self.strategy_refresh()
         if not isinstance(idempotency_key, str) or not idempotency_key.strip() \
@@ -258,6 +261,7 @@ class AutonomousResearchService:
             "assessment_fingerprint": (
                 self.candidate_assessment.configuration_fingerprint),
             "strategy_catalog": strategy_catalog,
+            "selection_scope": "VALIDATED_AUTOMATIC" if validated_selection else "EXPERIMENTAL_RESEARCH",
             "instrument_scope_fingerprint": instrument_scope_fingerprint,
         }
         request_hash = hashlib.sha256(
@@ -363,18 +367,28 @@ class AutonomousResearchService:
                      and item["stage"] in ("STRATEGY_SELECTED", "REJECTED")),
                     None,
                 )
-                if existing is not None:
+                automatic = request.get("selection_scope") == "VALIDATED_AUTOMATIC"
+                if existing is not None and (
+                    not automatic or existing["payload"].get("opportunity", {}).get(
+                        "assessment", {}).get("status") == "NO_VALIDATED_STRATEGY"
+                ):
                     candidate_outputs.append(existing["payload"])
                     continue
                 try:
                     stored_opportunity = (
                         self.candidate_assessment.repository.opportunity_for_snapshot(
                             snapshot_id))
-                    if stored_opportunity is not None and self._assessment_matches_request(
-                            stored_opportunity, request):
+                    if stored_opportunity is not None and (
+                        not automatic or stored_opportunity.get(
+                            "assessment", {}).get("status") == "NO_VALIDATED_STRATEGY"
+                    ) and self._assessment_matches_request(stored_opportunity, request):
                         opportunity = stored_opportunity
                     else:
-                        result = self.candidate_assessment.assess(
+                        assessor = (
+                            self.candidate_assessment.assess_automatic
+                            if automatic
+                            else self.candidate_assessment.assess)
+                        result = assessor(
                             snapshot_id,
                             strategy_allowlist=tuple(request["strategy_allowlist"]),
                         )
@@ -500,6 +514,8 @@ class AutonomousResearchService:
             "idempotency_key": run["idempotency_key"],
             "mode": "PAPER",
             "research_only": True,
+            "selection_scope": run["payload"].get("request", {}).get(
+                "selection_scope", "LEGACY_UNVERIFIED"),
             "status": run["status"],
             "stage": run["stage"],
             "as_of": run["as_of"],

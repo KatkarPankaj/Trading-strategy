@@ -91,7 +91,8 @@ class PaperEndToEndTests(unittest.TestCase):
         self.data = ControlledData(self.clock)
         self.ai = AdvisoryAI()
 
-    def context(self, *, auto_loop=False, allow_short=False, token_budget=None):
+    def context(self, *, auto_loop=False, allow_short=False, token_budget=None,
+                experimental_selection=True):
         env = dict(ENV, PAPER_AUTO_LOOP=str(auto_loop).lower(), PAPER_AUTO_LOOP_TOP_N="1")
         ctx = build_context(
             load_settings(env), env, store=self.store,
@@ -101,7 +102,64 @@ class PaperEndToEndTests(unittest.TestCase):
             clock=self.clock, market_data_provider=self.data,
         )
         self.addCleanup(ctx.market_data.close)
+        if experimental_selection:
+            # Existing lifecycle fixtures exercise exploratory execution, not validation certification.
+            research_run = ctx.autonomous_research.run
+
+            def experimental_run(*args, **kwargs):
+                kwargs["validated_selection"] = False
+                return research_run(*args, **kwargs)
+
+            ctx.autonomous_research.run = experimental_run
         return ctx
+
+    def test_automatic_selection_without_approved_policy_is_persisted_and_never_orders(self):
+        ctx = self.context(auto_loop=True, experimental_selection=False)
+        result = ctx.paper_loop.tick()
+        cycle = ctx.autonomous_paper_trading.get_run(result["run_id"])
+        candidate = cycle["candidates"][0]
+        self.assertEqual(candidate["status"], "RESEARCH_REJECTED")
+        assessment = candidate["payload"]["research_assessment"]
+        self.assertEqual(assessment["status"], "NO_VALIDATED_STRATEGY")
+        self.assertIn("AUTOMATIC_VALIDATION_POLICY_UNAPPROVED", assessment["error"])
+        self.assertIsNone(assessment["recommended_strategy"])
+        self.assertEqual(len(self.ai.users), 0)
+        self.assertEqual(self.store.orders.all(), [])
+        self.assertEqual(self.store.fills.all(), [])
+        self.assertEqual(self.store.signals.recent(), [])
+        self.assertEqual(self.store.prospective.decisions()[0]["selected_strategy"], "NO_TRADE")
+        research = ctx.autonomous_research.get_run(
+            cycle["payload"]["research_run_id"])
+        self.assertEqual(research["selection_scope"], "VALIDATED_AUTOMATIC")
+        restarted = self.context(auto_loop=True, experimental_selection=False)
+        self.assertEqual(restarted.paper_loop.tick()["run_id"], result["run_id"])
+        self.assertEqual(self.store.orders.all(), [])
+
+    def test_experimental_result_cannot_be_reused_as_validated_selection(self):
+        ctx = self.context(experimental_selection=False)
+        run = ctx.autonomous_research.run(
+            "US_ALL", idempotency_key="scope-isolation", as_of=AS_OF, top_n=1)
+        self.assertEqual(run["candidates"][0]["stage"], "STRATEGY_SELECTED")
+        self.assertEqual(run["selection_scope"], "EXPERIMENTAL_RESEARCH")
+        from stockmarket.core.autonomous_research import IdempotencyConflict
+        with self.assertRaises(IdempotencyConflict):
+            ctx.autonomous_research.run(
+                "US_ALL", idempotency_key="scope-isolation", as_of=AS_OF, top_n=1,
+                validated_selection=True)
+        self.assertEqual(self.store.orders.all(), [])
+
+    def test_validated_resume_rejects_cached_experimental_selection(self):
+        ctx = self.context(experimental_selection=False)
+        run = ctx.autonomous_research.run(
+            "US_ALL", idempotency_key="cached-experiment", as_of=AS_OF, top_n=1)
+        self.assertEqual(run["candidates"][0]["stage"], "STRATEGY_SELECTED")
+        saved = ctx.autonomous_research.repository.get_run(run["run_id"])
+        request = dict(saved["payload"]["request"], selection_scope="VALIDATED_AUTOMATIC")
+        resumed = ctx.autonomous_research._resume(saved, request)
+        assessment = resumed["candidates"][0]["opportunity"]["assessment"]
+        self.assertEqual(assessment["status"], "NO_VALIDATED_STRATEGY")
+        self.assertIsNone(assessment["recommended_strategy"])
+        self.assertEqual(self.store.orders.all(), [])
 
     def client(self, ctx):
         client = TestClient(create_app(ctx))

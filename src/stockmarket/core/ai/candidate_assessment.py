@@ -40,6 +40,7 @@ class AssessmentStatus(str, Enum):
     NO_VALID_STRATEGY = "NO_VALID_STRATEGY"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
     NO_TRADE = "NO_TRADE"
+    NO_VALIDATED_STRATEGY = "NO_VALIDATED_STRATEGY"
 
 
 class OpportunityState(str, Enum):
@@ -528,6 +529,34 @@ class CandidateAssessmentService:
 
     def get_assessment(self, assessment_id: str) -> dict[str, Any] | None:
         return self.repository.get_assessment(assessment_id)
+
+    def assess_automatic(
+        self, snapshot_id: str, *, strategy_allowlist: tuple[str, ...],
+    ) -> AIResearchOpportunity:
+        """Automatic selection needs an approved validation policy, not lab review alone."""
+        if any(name not in self.strategies for name in strategy_allowlist):
+            raise ValueError("automatic selection contains an unregistered strategy")
+        row = self.repository.get_snapshot(snapshot_id)
+        if row is None:
+            raise KeyError(f"unknown research snapshot {snapshot_id!r}")
+        context = self._context(row, {
+            name: self.strategies[name] for name in strategy_allowlist})
+        now = self._now()
+        reason = (
+            "NO_VALIDATED_STRATEGY: AUTOMATIC_VALIDATION_POLICY_UNAPPROVED; "
+            "no approved evidence expiry, chronological OOS qualification and "
+            "holdout-isolated promotion policy is registered. "
+            "Strategy registration, lab activation and paper outcomes are not certification."
+        )
+        assessment = self._failed_assessment(
+            context, AssessmentStatus.NO_VALIDATED_STRATEGY,
+            self.analyst.provider_name, now, reason)
+        assessment = replace(
+            assessment, outcome="NO_TRADE",
+            rejection_reasons=("AUTOMATIC_VALIDATION_POLICY_UNAPPROVED",),
+            explanation=reason)
+        return self._persist(self._opportunity(
+            assessment, OpportunityState.REJECTED, None, now))
 
     def snapshot_context(self, snapshot_id: str) -> AIResearchContext:
         row = self.repository.get_snapshot(snapshot_id)

@@ -248,6 +248,7 @@ class AutonomousPaperTradingService:
                     mode=TradingMode.PAPER.value,
                     as_of=datetime.fromisoformat(request["as_of"]),
                     top_n=request["top_n"],
+                    validated_selection=True,
                 )
             except IdempotencyConflict as exc:
                 if not recovering:
