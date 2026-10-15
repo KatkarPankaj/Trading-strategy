@@ -1659,6 +1659,60 @@ execution with snapshot/version revalidation; replace full bounded state compari
 with validated durable delta/checkpoints; add consistent snapshot evidence/recovery
 above current ceilings and separately test PostgreSQL admission/statement/pool bounds.
 
+### Operational audit: history snapshot, cadence, news and AI budgets (Oct 2026)
+
+**Root cause and fix: `HISTORY_SNAPSHOT_CHANGED: fill replay is incomplete`.**
+`SQLiteDatabase.history_revision()` used `sqlite3.Connection.total_changes`,
+which counts every write on the shared connection, including cycle, lock and
+event rows. A cycle write between the two snapshot reads changed the revision,
+so prospective-evidence reconciliation rejected a consistent history and paused
+automatic entries.
+
+The revision is now `(PRAGMA data_version, sum of connection-local TEMP trigger
+counters)`. The counters track only `orders`, `order_events`, `fills` and
+`paper_feedback_fills`. Genuine history writes, from this connection or another
+one, still invalidate the snapshot, and replay safeguards are unchanged.
+Regression tests are in `tests/test_protective_exit_isolation.py`
+(`RecoverySnapshotTests`).
+
+**Cadence.** ORB/VWAP fires only on the latest volume-spike bar, so scan
+cadence determines how many signals are captured. A Twelve Data replay over
+640 US symbol-days gave these first-signal days:
+
+| Cadence | First-signal days | Mean delay |
+|---|---|---|
+| 5 min | 196 | — |
+| 10 min | 133 | 28.6 min |
+| 15 min | 100 | 42.4 min |
+| 30 min | 64 | 58.4 min |
+
+The basic plan allows 8 requests per minute and 800 credits per day. Each scan
+uses about 16 credits, so a 5-minute cadence is infeasible. The US task now uses
+10 minutes (~625 credits/day); protective monitoring stays independently
+scheduled.
+
+**News cap.** The cap keeps the newest events, breaks ties by
+`(timestamp, event_id)`, preserves deterministic final ordering and reports
+kept/omitted counts. The provider query still requests `limit=20`, and a
+longer collection fails closed. Reducing that limit is not proven safe because
+the Finnhub ordering and completeness are unverified.
+
+**AI budgets: open gaps, fail-closed today.**
+- `AI_MAX_INPUT_CHARS` covers only the payload JSON. It excludes the system
+  prompt, schema, the context suffix of up to 2,000 characters and the
+  `<untrusted>` wrappers.
+- Budget reservation counts prompt tokens but not `max_output_tokens`. Overshoot
+  is rejected only after the tokens have been spent.
+- `strategy_pipeline.select_strategies` and research `analyze` rely on silent
+  sanitizer truncation rather than a pre-check.
+
+**Remaining blockers.**
+- With entries enabled, health is DEGRADED because execution quotes are fetched
+  only on entry attempts.
+- SPY is rejected as `unknown strategy candidate: orb_vwap v1.0.0`.
+- Exhausting Twelve Data credits would also starve protective-monitor quotes.
+- India execution remains blocked by design.
+
 ### Recommended next implementation phase (historical context)
 
 Next, connect persisted completed paper outcomes to sample-qualified,

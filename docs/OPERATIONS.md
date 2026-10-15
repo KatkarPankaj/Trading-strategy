@@ -1187,12 +1187,26 @@ blocks any entry on stale data.
 
 Limitations: fills are simulated against quotes (no queue, partial-fill or
 market-impact realism); Twelve Data free-plan pacing and daily credits limit
-universe size and cadence (prefer a 30-minute interval and `TOP_N` 1–2); every
+universe size and cadence (the US task uses a 10-minute interval and `TOP_N` 2;
+see the cadence note below); every
 cycle may spend AI tokens; the token budget and OrderManager remain
 process-local. Account submission claims are durable, but this is still a
 single-worker application, not a validated multi-worker execution system.
 Actual reported AI usage above the configured token budget invalidates that
 response; it never supplies fallback trading advice. Budgets reset on restart.
+
+Cadence note (Oct 2026 audit). ORB/VWAP evaluates only the latest completed
+5-minute bar, so a scan that does not land on the volume-spike bar misses the
+signal. A Twelve Data replay of 10 US symbols (15 Jul–13 Oct 2026, 640
+symbol-days) found the first BUY signal on 196 days at a 5-minute cadence, 133 at 10
+minutes (mean delay 28.6 min), 100 at 15 minutes (42.4 min) and 64 at 30 minutes
+(58.4 min). Each scan uses about 16 Twelve Data credits (bars plus a quote per
+eligible symbol, no cache). The basic plan allows 8 requests per minute and 800
+credits per day, so 5 minutes (~1,250 credits/day) is not viable. 10 minutes
+(~39 scans, ~625 credits) leaves limited headroom for protective-monitor and
+execution quotes. Check `https://api.twelvedata.com/api_usage` before widening
+the universe or adding manual scans. Exhausted credits fail closed: provider
+errors block entries, and repeated failures stop the loop in exits-only mode.
 A profitable or unprofitable run verifies the plumbing and rule behaviour, not
 strategy edge; judge the strategy only with proper backtests and many sessions.
 

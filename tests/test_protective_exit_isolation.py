@@ -296,6 +296,35 @@ class RecoverySnapshotTests(TestCase):
                 two.close()
                 one.close()
 
+    def test_unrelated_shared_connection_write_does_not_invalidate_history_replay(self):
+        # Heartbeats, audit and research writes share the connection; they are not fill/order history.
+        fills = self.f.store.fills.iter_all(page_size=1)
+        orders = self.f.store.orders.iter_all(page_size=1)
+        next(fills)
+        next(orders)
+        self.f.db.execute("CREATE TABLE IF NOT EXISTS unrelated_fixture (value INTEGER)")
+        self.f.db.execute("INSERT INTO unrelated_fixture VALUES (1)")
+        self.assertEqual(len(list(fills)), 1)
+        self.assertEqual(len(list(orders)), 1)
+
+    def test_same_connection_same_count_history_update_invalidates_replay(self):
+        for table, iterate in (("fills", self.f.store.fills.iter_all),
+                               ("orders", self.f.store.orders.iter_all)):
+            with self.subTest(table=table):
+                iterator = iterate(page_size=1)
+                next(iterator)
+                column = "price" if table == "fills" else "quantity"
+                self.f.db.execute(f"UPDATE {table} SET {column} = {column}")  # nosec B608 - fixed test identifiers
+                with self.assertRaisesRegex(ValueError, "HISTORY_SNAPSHOT_CHANGED"):
+                    list(iterator)
+
+    def test_same_connection_feedback_ordinal_change_invalidates_replay(self):
+        iterator = self.f.store.fills.iter_all(page_size=1)
+        next(iterator)
+        self.f.db.execute("UPDATE paper_feedback_fills SET ordinal = ordinal")
+        with self.assertRaisesRegex(ValueError, "HISTORY_SNAPSHOT_CHANGED"):
+            list(iterator)
+
     def test_concurrent_wal_reader_and_writer_observe_only_committed_state(self):
         with TemporaryDirectory() as directory:
             path = str(Path(directory) / "isolated-concurrency.db")
