@@ -18,6 +18,7 @@ from stockmarket.core.signal_generation import (
 )
 from stockmarket.core.persistence.repositories import to_json
 from stockmarket.core.strategies.orb_vwap import OrbVwapConfig, OrbVwapStrategy
+from stockmarket.core.strategies.base import strategy_parameters_hash
 
 
 ZONE = "America/New_York"
@@ -182,6 +183,7 @@ class SignalGenerationTests(unittest.TestCase):
                         "name": strategy.name,
                         "implementation": type(strategy).__name__,
                         "version": strategy.version,
+                        "parameters_hash": strategy_parameters_hash(strategy),
                     }],
                 },
             },
@@ -262,6 +264,17 @@ class SignalGenerationTests(unittest.TestCase):
 
         self.assertEqual(result["reason"], "STRATEGY_VERSION_MISMATCH")
         self.assertEqual(self.market_data.calls, 0)
+
+    def test_changed_or_missing_catalog_parameters_rejected_before_data_access(self):
+        catalog = self.autonomous_repository.candidate["payload"]["opportunity"][
+            "assessment"]["input_context"]["registered_strategies"][0]
+        for digest in ("different-parameters", None):
+            with self.subTest(digest=digest):
+                catalog["parameters_hash"] = digest
+                result = self.service.generate(
+                    RUN_ID, INSTRUMENT.instrument_id, evaluation_as_of=EVALUATION_AS_OF)
+                self.assertEqual(result["reason"], "STRATEGY_CONFIGURATION_MISMATCH")
+                self.assertEqual(self.market_data.calls, 0)
 
     def test_rejects_stale_bars_without_advancing_candidate(self):
         self.market_data.bars = self.market_data.bars.iloc[:-2]

@@ -171,6 +171,46 @@ class AutonomousPaperTradingTests(TestCase):
         self.assertEqual(candidate["status"], "COMPLETE")
         self.assertEqual(candidate["payload"]["decision_trace"]["final_status"], "SUBMITTED")
 
+    def test_order_states_are_persisted_and_rendered_without_conflation(self):
+        from stockmarket.dashboard.views import cycle_candidates
+
+        for state, decision in (
+            (OrderStatus.SUBMITTED, "SUBMITTED"),
+            (OrderStatus.PARTIALLY_FILLED, "SUBMITTED"),
+            (OrderStatus.FILLED, "FILLED"),
+            (OrderStatus.REJECTED, "REJECTED"),
+            (OrderStatus.CANCELLED, "CANCELLED"),
+        ):
+            with self.subTest(state=state):
+                class StateExecution(_Execution):
+                    def submit(self, *args, **kwargs):
+                        result = super().submit(*args, **kwargs)
+                        result["order"].status = state
+                        result["order"].filled_quantity = (
+                            5 if state == OrderStatus.FILLED else
+                            2 if state == OrderStatus.PARTIALLY_FILLED else 0)
+                        result["order"].error = (
+                            "INSUFFICIENT_CASH: fixture rejection"
+                            if state == OrderStatus.REJECTED else None)
+                        return result
+
+                service = _service(self.store, execution=StateExecution())
+                result = service.run(
+                    "US_ALL", idempotency_key=f"state-{state.value}", operator="fixture")
+                persisted = self.store.autonomous_paper_cycles.get_candidate(
+                    result["run_id"], INSTRUMENT_ID)
+                trace = persisted["payload"]["decision_trace"]
+                self.assertEqual(trace["final_status"], decision)
+                self.assertEqual(persisted["payload"]["order"]["status"], state.value)
+                shown = cycle_candidates([persisted]).iloc[0]
+                self.assertEqual(shown["decision"], decision)
+                self.assertEqual(shown["order_status"], state.value)
+                if state == OrderStatus.CANCELLED:
+                    self.assertIsNone(trace["rejection_code"])
+                    self.assertIn("cancelled", trace["reason"].lower())
+                if state == OrderStatus.REJECTED:
+                    self.assertEqual(trace["rejection_code"], "INSUFFICIENT_CASH")
+
     def test_obsolete_configuration_recovery_terminates_without_retrying_entries(self):
         from stockmarket.core.autonomous_research import IdempotencyConflict
 

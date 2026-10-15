@@ -116,6 +116,20 @@ class PaperActivityDashboardTests(TestCase):
         self.assertEqual(row["rejection_code"], "NO_CONFIRMED_BREAKOUT")
         self.assertEqual(row["order_status"], "NOT_SUBMITTED")
 
+    def test_rejected_strategy_trace_is_rendered_before_signal_generation(self):
+        row = views.cycle_candidates([{
+            "candidate_id": "XNAS:AAPL", "status": "SIGNAL_REJECTED",
+            "payload": {"decision_trace": {
+                "strategy": "orb_vwap", "strategy_version": "1.0.0",
+                "final_status": "REJECTED", "rejection_code": "STRATEGY_VERSION_MISMATCH",
+                "reason": "STRATEGY_VERSION_MISMATCH: registered version changed",
+            }},
+        }]).iloc[0]
+        self.assertEqual(row["strategy"], "orb_vwap")
+        self.assertEqual(row["strategy_version"], "1.0.0")
+        self.assertEqual(row["intent"], "NOT_GENERATED")
+        self.assertEqual(row["order_status"], "NOT_SUBMITTED")
+
     @patch.object(app, "st")
     def test_news_shows_existing_cycle_assessment_and_snapshot_evidence(self, ui):
         ui.expander.return_value = nullcontext()

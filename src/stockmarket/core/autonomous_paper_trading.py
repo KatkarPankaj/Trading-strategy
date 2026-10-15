@@ -448,7 +448,8 @@ class AutonomousPaperTradingService:
         outcome["status"] = (
             "COMPLETE" if order.status.value in {
                 "SUBMITTED", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
-            } else "ORDER_REJECTED")
+            } else "ORDER_CANCELLED" if order.status.value == "CANCELLED"
+            else "ORDER_REJECTED")
         return outcome
 
     def _save_candidate(
@@ -497,8 +498,11 @@ class AutonomousPaperTradingService:
             final = {
                 "FILLED": "FILLED", "SUBMITTED": "SUBMITTED", "ACCEPTED": "SUBMITTED",
                 "PARTIALLY_FILLED": "SUBMITTED", "NEW": "PENDING", "VALIDATED": "PENDING",
+                "CANCELLED": "CANCELLED",
             }.get(order.get("status"), "REJECTED")
             reason = order.get("error") if final == "REJECTED" else None
+            if final == "CANCELLED":
+                reason = order.get("error") or "Paper order cancelled; any recorded fills remain in the ledger."
         if final in {"NO_TRADE", "REJECTED", "BLOCKED"}:
             head = str(reason or "").split(":", 1)[0]
             code = payload.get("rejection_code") or code or (

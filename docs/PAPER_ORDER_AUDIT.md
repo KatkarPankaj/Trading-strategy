@@ -364,3 +364,57 @@ Review [test_paper_end_to_end.py](../tests/test_paper_end_to_end.py),
 
 No service was restarted, no operator migration/database write/control POST was
 issued, and no real order, funding change, commit, push or deployment was made.
+
+## 9. Verification follow-up from afc1623 (2026-10-15)
+
+The worktree was clean at `afc1623` before this follow-up. Exact strategy-ID and
+version rejection, history-only replay, reason persistence and paper submission
+were re-executed, not merely reviewed. Further isolated reproductions confirmed
+cancelled-order misclassification, missing pre-signal strategy display and missing
+ORB/VWAP configuration binding. Prepared fixes preserve cancellation identity,
+render the trace strategy, and reject changed/missing catalog parameters or
+post-approval configuration drift with STRATEGY_CONFIGURATION_MISMATCH. No
+strategy parameter values or risk thresholds were relaxed.
+
+Read-only preflight again found schema 25, complete migration history 1-25,
+intact SQLite/FK/audit checks, persisted US/USD seed 100000 and zero execution
+history/exposure. **Entries are currently enabled, not paused.** The API and
+dashboard still predate the reviewed commit; migration 26 and all follow-up code
+remain unapplied to operator runtime. Separate approval must cover a durable
+entry pause before maintenance. No pause, migration, stop/restart or operator
+write was performed during verification.
+
+The [migration preflight and acceptance report](PAPER_MIGRATION_ACCEPTANCE.md)
+records the exact task-derived database, worker observations, frozen-backup
+comparison procedure, supported migration commands, controlled shutdown/restart,
+isolated acceptance matrix, supervised paused runtime checklist and data-only
+Kite integration plan. It supplements rather than replaces the blockers above.
+India still lacks reviewed execution feed/mapping/calendar/cost/funding evidence
+and remains BLOCKED; no Kite adapter or broker order integration was added.
+
+Final executed validation (Python 3.11.6, PowerShell, repository root):
+
+```powershell
+$env:PYTHONPATH='src;tests'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_protective_exit_isolation test_ai_strategy_selection test_ai_research_schema test_openai_structured_output test_autonomous_paper_trading test_paper_end_to_end test_dashboard_paper_activity test_paper_cadence_audit test_signal_generation test_paper_lifecycle test_paper_order_management test_trade_proposals test_trade_intent test_paper_loop test_india_readiness -q
+$env:PYTHONPATH='src'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest discover -s tests -q
+git diff --check
+```
+
+- Final focused acceptance: **226 tests passed in 14.081s**.
+- Final full discovery: **734 tests ran in 159.153s; OK, five PostgreSQL skips**
+  (729 passed, five skipped).
+- Supported ops backup/migration/status/audit rehearsal preserved all old table
+  records and rebuilt cash on a disposable schema-25 fixture with fills.
+- The documented read-only logical comparison was also executed directly before
+  and after migration on an isolated fixture: integrity/FKs/data preserved,
+  schema 25 then 26.
+- Initial reproduction failures were resolved. One initial test selector used
+  the wrong dashboard class name; corrected and executed. One rehearsal initially
+  failed Windows temporary-file cleanup because sqlite's connection context
+  manager does not close the handle; fixed with explicit closing and rerun.
+- Expected injected-failure logs and existing AnyIO ResourceWarnings occurred.
+  Editor diagnostics for changed source/tests reported no errors; whitespace
+  validation passed. No vendor feed, paid model, PostgreSQL, live execution,
+  security scan or runtime restart certification is implied.

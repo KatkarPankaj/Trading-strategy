@@ -9,6 +9,10 @@ terminator and network policy.
 
 ## Local API
 
+For the reviewed `afc1623` follow-up, see the
+[US migration preflight and acceptance procedure](PAPER_MIGRATION_ACCEPTANCE.md).
+Its operator commands are approval-gated instructions, not completed actions.
+
 ### Dashboard/API mismatch and supervised paper-test preflight
 
 The dashboard requires the shared `/health.dashboard_contract`: version `1`,

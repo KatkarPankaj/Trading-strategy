@@ -325,6 +325,22 @@ class PaperEndToEndTests(unittest.TestCase):
     def test_actual_loop_missing_execution_quote_is_rejected(self):
         self.assert_execution_quote_rejected(None, "EXECUTION_QUOTE_MISSING")
 
+    def test_changed_strategy_configuration_blocks_previously_approved_proposal(self):
+        from dataclasses import replace
+        from stockmarket.core.paper_lifecycle import PaperLifecycleError
+
+        ctx = self.context()
+        client = self.client(ctx)
+        proposal = self.propose(client)
+        strategy = ctx.paper_proposal_execution.strategies["orb_vwap"]
+        strategy.config = replace(strategy.config, allow_short=True)
+        with self.assertRaises(PaperLifecycleError) as rejected:
+            ctx.paper_proposal_execution.submit(
+                proposal["proposal_id"], operator="fixture",
+                sizing_mode="AUTOMATIC_SIZING", quantity=None)
+        self.assertEqual(rejected.exception.code, "STRATEGY_CONFIGURATION_MISMATCH")
+        self.assert_untouched(client, audit_orders=())
+
     def test_actual_loop_fresh_research_cannot_replace_stale_execution_quote(self):
         self.assert_execution_quote_rejected(
             (102.0, AS_OF - timedelta(minutes=6)), "EXECUTION_QUOTE_STALE")

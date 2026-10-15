@@ -95,7 +95,7 @@ def cycle_candidates(candidates: list[dict[str, Any]]) -> pd.DataFrame:
             "status": candidate["status"],
             "decision": trace.get("final_status", "LEGACY_TRACE_UNAVAILABLE"),
             "intent": signal.get("intent", "NOT_GENERATED"),
-            "strategy": signal.get("strategy"),
+            "strategy": trace.get("strategy") or signal.get("strategy"),
             "strategy_version": trace.get("strategy_version"),
             "rejection_code": trace.get("rejection_code"),
             "strategy_reasons": ", ".join(signal.get("reasons") or []),

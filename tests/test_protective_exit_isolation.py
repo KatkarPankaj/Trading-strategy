@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, redirect_stdout
 from datetime import timedelta
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
@@ -11,6 +13,8 @@ import test_paper_end_to_end as fixtures
 import test_trade_intent as intent
 from stockmarket.core.models import OrderSide, OrderStatus, OrderType
 from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
+from stockmarket.core.persistence.database import DatabaseError
+from stockmarket.core.persistence.migrations import MIGRATIONS
 from stockmarket.core.persistence.repositories import _pages
 from stockmarket.core.recovery import RecoveryError, rebuild_portfolio
 from stockmarket.core.trading_service import OrderTicket
@@ -358,8 +362,61 @@ class RecoverySnapshotTests(TestCase):
 
     def test_missing_revision_trigger_fails_closed(self):
         self.f.db.execute("DROP TRIGGER execution_history_fills_update")
-        with self.assertRaisesRegex(Exception, "HISTORY_REVISION_UNAVAILABLE"):
+        with self.assertRaisesRegex(DatabaseError, "HISTORY_REVISION_UNAVAILABLE"):
             list(self.f.store.fills.iter_all())
+
+    def test_missing_revision_counter_row_fails_closed(self):
+        self.f.db.execute("DELETE FROM execution_history_revision")
+        with self.assertRaisesRegex(DatabaseError, "HISTORY_REVISION_UNAVAILABLE"):
+            list(self.f.store.fills.iter_all())
+
+    def test_missing_revision_counter_table_fails_closed(self):
+        self.f.db.execute("DROP TABLE execution_history_revision")
+        with self.assertRaisesRegex(DatabaseError, "HISTORY_REVISION_UNAVAILABLE"):
+            list(self.f.store.orders.iter_all())
+
+    def test_supported_backup_and_migration_preserve_schema25_account_history(self):
+        from stockmarket import ops
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "schema25-fixture.db"
+            db = SQLiteDatabase(str(path))
+            try:
+                with patch("stockmarket.core.persistence.migrations.MIGRATIONS",
+                           [item for item in MIGRATIONS if item[0] <= 25]):
+                    migrate(db)
+                store = Store(db)
+                store.instruments.save(next(iter(self.f.service.instruments.values())))
+                for order in self.f.service.order_manager.orders():
+                    store.orders.save_with_events(
+                        order, self.f.service.order_manager.events(order.client_order_id))
+                for fill in self.f.portfolio.fills:
+                    store.fills.save(fill)
+                store.audit.append("fixture", "PAPER_WORKER_BOUND", "paper-worker", "fixture",
+                                   {"market": "US", "base_currency": "USD", "starting_cash": 50000})
+                tables = [row["name"] for row in db.query(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")
+                    if row["name"] != "schema_migrations"]
+                before = {table: db.query(f'SELECT * FROM "{table}"') for table in tables}
+                backup = ops.backup("sqlite:///" + str(path), Path(directory) / "backups", 1)
+                with closing(sqlite3.connect(backup.as_uri() + "?mode=ro", uri=True)) as saved:
+                    self.assertEqual(saved.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+                    self.assertEqual(saved.execute(
+                        "SELECT MAX(version) FROM schema_migrations").fetchone()[0], 25)
+                with patch.object(ops, "database_url", return_value="sqlite:///" + str(path)):
+                    with redirect_stdout(StringIO()):
+                        self.assertEqual(ops.main(["migrate"]), 0)
+                        self.assertEqual(ops.main(["status"]), 0)
+                        self.assertEqual(ops.main(["verify-audit"]), 0)
+                self.assertEqual(
+                    {table: db.query(f'SELECT * FROM "{table}"') for table in tables}, before)
+                self.assertEqual(db.query("PRAGMA integrity_check"), [{"integrity_check": "ok"}])
+                self.assertEqual(db.history_revision(), (0, 0))
+                rebuilt = rebuild_portfolio(store, self.f.service.instruments, "USD", 50000)
+                self.assertEqual(rebuilt.cash, self.f.portfolio.cash)
+                self.assertEqual(len(rebuilt.fills), 2)
+            finally:
+                db.close()
 
     def test_same_connection_same_count_history_update_invalidates_replay(self):
         for table, iterate in (("fills", self.f.store.fills.iter_all),

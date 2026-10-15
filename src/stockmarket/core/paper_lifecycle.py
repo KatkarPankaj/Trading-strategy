@@ -24,6 +24,7 @@ from .models import (
     TradeIntent,
 )
 from .risk import OrderIntent
+from .strategies.base import strategy_parameters
 from .order_management import InvalidOrderTransition, UnknownOrder
 from .trade_proposals import TradeProposalService
 from .trading_service import AutomaticSizingRejected, OrderTicket, PreparedQuote, TradingService
@@ -379,6 +380,12 @@ class PaperProposalExecutionService:
         if current_version != proposal.get("strategy_version"):
             raise PaperLifecycleError("proposal strategy version is not currently registered",
                                       code="STRATEGY_VERSION_MISMATCH")
+        parameters = strategy_parameters(strategy)
+        provenance = (generation.get("payload") or {}).get("provenance") or {}
+        if parameters is not None and provenance.get("strategy_config") != parameters:
+            raise PaperLifecycleError(
+                "proposal strategy configuration no longer matches its deterministic signal",
+                code="STRATEGY_CONFIGURATION_MISMATCH")
         try:
             signal = TradeProposalService._signal_from_row(signal_row)
         except ValueError as exc:

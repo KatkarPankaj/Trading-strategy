@@ -35,6 +35,14 @@ no integrated broker-authorized feed, reviewed mappings/calendar or explicit
 INR account certification exists. A healthy empty-book protective monitor and
 offline tests do not establish production/unattended or live readiness.
 
+Follow-up from `afc1623` re-executed 226 focused and 734 full-suite tests (five
+PostgreSQL skips). Prepared-only corrections bind ORB/VWAP configuration at
+signal/submission boundaries and retain cancelled/pre-signal display identity.
+The [migration preflight and acceptance report](PAPER_MIGRATION_ACCEPTANCE.md)
+records schema-25 read-only integrity, enabled entries requiring an approved
+pause, isolated backup/migration preservation and the blocked data-only India
+plan. No operator migration, pause, restart or funding action was performed.
+
 ### Authorized local compatibility maintenance (2026-10-14)
 
 After separate operator approval, checked the existing US database read-only:

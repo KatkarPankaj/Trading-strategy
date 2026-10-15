@@ -23,7 +23,7 @@ from .data.quality import completed_intraday_bars, validate_bars
 from .market_session import MarketSession
 from .markets import MarketRegistry, SessionPhase, UnknownMarket
 from .models import Instrument, Signal, SignalSide, TradingStatus
-from .strategies.base import Strategy, StrategyMetadata
+from .strategies.base import Strategy, StrategyMetadata, strategy_parameters_hash
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +363,20 @@ class SignalGenerationService:
                 or selected_metadata.get("version") != metadata.version:
             return self._reject(
                 "STRATEGY_VERSION_MISMATCH",
+                run_id=run_id,
+                candidate_id=instrument_id,
+                opportunity_id=opportunity_id,
+                snapshot_id=snapshot_id,
+                instrument_id=instrument_id,
+                strategy_name=strategy_name,
+                strategy_version=metadata.version,
+                evaluation_as_of=evaluation_as_of,
+                started=started,
+            )
+        parameters_hash = strategy_parameters_hash(strategy)
+        if parameters_hash is not None and selected_metadata.get("parameters_hash") != parameters_hash:
+            return self._reject(
+                "STRATEGY_CONFIGURATION_MISMATCH",
                 run_id=run_id,
                 candidate_id=instrument_id,
                 opportunity_id=opportunity_id,
