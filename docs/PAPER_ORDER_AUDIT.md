@@ -581,3 +581,62 @@ when none qualify, while keeping experimental paper research explicitly separate
 from promoted/validated selection. Use the existing lab/ranking/governance
 repositories, never automatic promotion or a weaker risk gate. India data-only
 mapping certification remains a separate prerequisite, not a runtime shortcut.
+
+## 12. Automatic-selection policy guard from c3e5e10
+
+Started at clean `c3e5e10e35d6d55e2dedb468fe087671362f900e`.
+Inspection confirmed base catalog registration bypassed lab review, and lab
+paper activation is not an approved automatic-validation policy: its review
+checks use final-holdout metrics and provide no evidence-expiry contract.
+Existing advisory ranking and paper samples do not supply that missing approval.
+
+The bounded implementation therefore **blocks**, rather than invents, automatic
+qualification. `AutonomousPaperTradingService` requests validated selection from
+`AutonomousResearchService`; its request hash persists VALIDATED_AUTOMATIC versus
+EXPERIMENTAL_RESEARCH. `CandidateAssessmentService.assess_automatic` preserves
+validated snapshot/catalog context and persists NO_VALIDATED_STRATEGY with
+AUTOMATIC_VALIDATION_POLICY_UNAPPROVED, NO_TRADE, no recommendation and no AI call.
+Cached experimental opportunities cannot be reused during validated resume.
+Ordinary research remains explicitly experimental; no automatic fallback exists.
+Existing independent execution/risk/readiness/protective gates remain unchanged.
+No migration, operator control, funding, restart or live-order capability changed.
+
+Changed production files are `core/ai/candidate_assessment.py`,
+`core/autonomous_research.py`, `core/autonomous_paper_trading.py`.
+Changed tests are `test_paper_end_to_end.py`, `test_autonomous_paper_trading.py`,
+`test_strategy_lifecycle.py`. Existing lifecycle fixtures explicitly select
+experimental research in test-only wrappers; the new production-composition
+test uses the unwrapped automatic path and verifies persisted rejection,
+zero signals/orders/fills/provider calls and restart idempotency. The reviewed
+ORB/SMA lab fixture also proves activation does not certify automatic selection.
+
+Executed with Python 3.11.6:
+
+```powershell
+$env:PYTHONPATH='src;tests'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_paper_end_to_end test_autonomous_research test_autonomous_paper_trading -q
+# 44 passed, 9.011s.
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_paper_end_to_end test_autonomous_research test_autonomous_paper_trading test_strategy_lifecycle test_ai_research_schema test_strategy_ranking -q
+# First run: 70 tests, two failures from the experimental fixture wrapper.
+# After correction: 71 tests, one new fixture unpacking error; both lab-template
+# integration subtests passed. Fixed the unpacking error, then ran:
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_paper_end_to_end test_autonomous_research test_autonomous_paper_trading test_ai_research_schema test_strategy_ranking -q
+# 69 passed, 9.857s.
+$env:PYTHONPATH='src'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest discover -s tests -q
+# Tool execution interrupted by the subsequent user request; no result captured.
+```
+
+The full-suite attempt was not repeated; no full-suite pass or skip count is
+claimed for this increment. Expected injected-failure logs and preexisting AnyIO
+ResourceWarnings occurred. Changed-file editor diagnostics were clear, and
+Pylance found all 13 research.run call sites signature-compatible; these are not
+a repository-wide static-analysis gate.
+
+Verdict: **PARTIAL**. Automatic fail-closed enforcement is demonstrated, but no
+validated strategy is demonstrated. Valid-evidence acceptance and evidence-specific
+expiry/version/market/timeframe/sample tests remain blocked until an authorized
+policy defines expiry and compatible independent OOS review without holdout-based
+promotion. Existing exploratory version/configuration/data/risk tests are not
+misrepresented as that certification. This guard cannot make the old running
+worker safe without separately authorized source/schema maintenance.
