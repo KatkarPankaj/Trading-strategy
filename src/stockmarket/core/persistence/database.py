@@ -100,40 +100,26 @@ class SQLiteDatabase(Database):
             with self._statement():
                 self._conn.execute(sql, tuple(params))
 
-    _HISTORY_TABLES = ("orders", "order_events", "fills", "paper_feedback_fills")
-
     def history_revision(self) -> tuple[int, int]:
-        """`data_version` covers other connections; connection-local TEMP triggers count this
-        connection's writes to replayed history only, so unrelated shared-connection writes
-        (heartbeats, audit, research) cannot invalidate a replay snapshot."""
+        """A transactional, history-only revision shared by every SQLite connection."""
         with self._access("history_revision"):
             with self._statement():
-                self._install_history_counter()
-                return (self._conn.execute("PRAGMA data_version").fetchone()[0],
-                        self._conn.execute(
-                            "SELECT COALESCE(SUM(writes), 0) FROM temp.history_writes").fetchone()[0])
-
-    def _install_history_counter(self) -> None:
-        conn = self._conn
-        conn.execute("CREATE TEMP TABLE IF NOT EXISTS history_writes "
-                     "(table_name TEXT PRIMARY KEY, writes INTEGER NOT NULL)")
-        present = {r[0] for r in conn.execute(
-            "SELECT name FROM main.sqlite_master WHERE type = 'table'")}
-        missing = [t for t in self._HISTORY_TABLES if t not in present]
-        if missing:
-            raise DatabaseError(f"history replay tables are missing: {', '.join(missing)}")
-        installed = {r[0] for r in conn.execute(
-            "SELECT name FROM temp.sqlite_master WHERE type = 'trigger'")}
-        for table in self._HISTORY_TABLES:
-            conn.execute("INSERT OR IGNORE INTO temp.history_writes VALUES (?, 0)", (table,))
-            for event in ("INSERT", "UPDATE", "DELETE"):
-                name = f"history_writes_{table}_{event.lower()}"
-                if name not in installed:
-                    # Identifiers come from the fixed tuple above, never from input.
-                    conn.execute(
-                        f"CREATE TEMP TRIGGER {name} AFTER {event} ON main.{table} BEGIN "  # nosec B608
-                        f"UPDATE history_writes SET writes = writes + 1 "
-                        f"WHERE table_name = '{table}'; END")
+                try:
+                    row = self._conn.execute(
+                        "SELECT revision FROM execution_history_revision WHERE singleton = 1").fetchone()
+                except sqlite3.OperationalError as exc:
+                    raise DatabaseError(
+                        "HISTORY_REVISION_UNAVAILABLE: migration 26 is required") from exc
+                expected = {
+                    f"execution_history_{table}_{event}"
+                    for table in ("orders", "order_events", "fills", "paper_feedback_fills")
+                    for event in ("insert", "update", "delete")
+                }
+                installed = {r[0] for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'")}
+                if row is None or not expected.issubset(installed):
+                    raise DatabaseError("HISTORY_REVISION_UNAVAILABLE: history counter is incomplete")
+                return (row[0], 0)
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         with self._access("query"):

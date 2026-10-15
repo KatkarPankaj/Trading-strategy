@@ -40,6 +40,12 @@ _SUBMISSION_OUTCOME = {
 class PaperLifecycleError(ValueError):
     """A paper lifecycle request cannot be safely evaluated or submitted."""
 
+    def __init__(self, message: str, *, code: str = "PAPER_LIFECYCLE_REJECTED",
+                 details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
+
 
 class _MonitoringBudget:
     def __init__(self, max_items: int | None, deadline: float | None,
@@ -90,6 +96,7 @@ class PaperProposalExecutionService:
         strategies: Mapping[str, Any],
         max_age: timedelta,
         clock: Callable[[], datetime] | None = None,
+        quote_provider: str = "unknown",
     ) -> None:
         if trading.mode is not TradingMode.PAPER:
             raise ValueError("proposal execution requires PAPER mode")
@@ -104,6 +111,7 @@ class PaperProposalExecutionService:
         self.strategies = dict(strategies)
         self.max_age = max_age
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.quote_provider = quote_provider
         self.strategy_refresh: Callable[[], None] | None = None
 
     def submit(
@@ -192,24 +200,35 @@ class PaperProposalExecutionService:
             or now - generated_at > self.max_age
             or now - signal.timestamp > self.max_age
         ):
-            raise PaperLifecycleError("proposal is stale and must be regenerated")
+            raise PaperLifecycleError("proposal is stale and must be regenerated", code="PROPOSAL_STALE")
         if not self.markets.is_regular_session(instrument.market, now):
             raise PaperLifecycleError(
-                f"market session is not regular for {instrument.market}")
+                f"market session is not regular for {instrument.market}", code="MARKET_SESSION_NOT_REGULAR")
         if self.trading.portfolio.positions().get(instrument.instrument_id):
-            raise PaperLifecycleError("position already exists for proposal instrument")
+            raise PaperLifecycleError("position already exists for proposal instrument", code="POSITION_EXISTS")
         if any(
             order.instrument_id == instrument.instrument_id
             and not (retry and order.client_order_id == client_order_id)
             for order in self.trading.order_manager.open_orders()
         ):
-            raise PaperLifecycleError("an open order already targets the instrument")
+            raise PaperLifecycleError("an open order already targets the instrument", code="OPEN_ORDER_EXISTS")
 
         quote = self.quotes(instrument.instrument_id)
         if quote is None:
-            raise PaperLifecycleError("fresh market quote is unavailable")
+            raise PaperLifecycleError("fresh market quote is unavailable", code="EXECUTION_QUOTE_MISSING")
         price, timestamp = quote
-        _validate_quote(instrument, price, timestamp, now, self.max_age)
+        quote_trace = {
+            "price": price if isinstance(price, (int, float)) and not isinstance(price, bool)
+            and isfinite(price) else None, "source_timestamp": timestamp.isoformat()
+            if isinstance(timestamp, datetime) else None,
+            "checked_at": now.isoformat(), "source": self.quote_provider,
+            "instrument_id": instrument.instrument_id,
+        }
+        try:
+            _validate_quote(instrument, price, timestamp, now, self.max_age)
+        except PaperLifecycleError as exc:
+            exc.details["execution_quote"] = quote_trace
+            raise
         self.update_price(instrument.instrument_id, price, timestamp)
 
         claimed = (
@@ -283,7 +302,7 @@ class PaperProposalExecutionService:
                 quantity=None,
                 error=str(exc),
             )
-            raise PaperLifecycleError(str(exc)) from exc
+            raise PaperLifecycleError(str(exc), code=str(exc).split(":", 1)[0]) from exc
         except (TypeError, ValueError) as exc:
             self.store.proposal_submissions.finish(
                 proposal_id,
@@ -304,6 +323,7 @@ class PaperProposalExecutionService:
             "client_order_id": client_order_id,
             "order": result.order,
             "risk_decision": result.risk,
+            "execution_quote": quote_trace,
             "duplicate": result.duplicate,
             "execution": _SUBMISSION_OUTCOME.get(
                 result.order.status, "PAPER_ORDER_CREATED"),
@@ -357,14 +377,16 @@ class PaperProposalExecutionService:
         if current_version is None and strategy is not None:
             current_version = getattr(getattr(strategy, "metadata", None), "version", None)
         if current_version != proposal.get("strategy_version"):
-            raise PaperLifecycleError("proposal strategy version is not currently registered")
+            raise PaperLifecycleError("proposal strategy version is not currently registered",
+                                      code="STRATEGY_VERSION_MISMATCH")
         try:
             signal = TradeProposalService._signal_from_row(signal_row)
         except ValueError as exc:
             raise PaperLifecycleError(
                 f"AMBIGUOUS_LEGACY_INTENT: persisted signal cannot be submitted: {exc}") from exc
         if signal.side not in (SignalSide.BUY, SignalSide.SELL) or not signal.intent.is_entry:
-            raise PaperLifecycleError("only persisted actionable entry signals may be submitted")
+            raise PaperLifecycleError("only persisted actionable entry signals may be submitted",
+                                      code="NON_ACTIONABLE_SIGNAL")
         if proposal.get("intent") not in (None, signal.intent.value):
             raise PaperLifecycleError("proposal trade intent does not match its signal")
         if (
@@ -988,12 +1010,13 @@ def _validate_quote(
         or not instrument.is_valid_price(price)
     ):
         raise PaperLifecycleError(
-            f"quote price is invalid or off tick for {instrument.instrument_id}")
+            f"quote price is invalid or off tick for {instrument.instrument_id}", code="EXECUTION_QUOTE_INVALID")
     quote_at = _parse_aware(timestamp, "quote timestamp")
     age = now - quote_at
     if age < timedelta(0) or age > max_age:
         raise PaperLifecycleError(
-            f"quote is stale or from the future for {instrument.instrument_id}")
+            f"quote is stale or from the future for {instrument.instrument_id}",
+            code="EXECUTION_QUOTE_FUTURE" if age < timedelta(0) else "EXECUTION_QUOTE_STALE")
     return quote_at
 
 

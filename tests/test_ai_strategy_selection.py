@@ -105,6 +105,26 @@ class AIStrategySelectionTests(unittest.TestCase):
         self.assertIn("STRATEGY_SELECTION_REJECTED", result.error)
         self.assertIsNone(selection)
 
+    def test_strategy_id_is_an_exact_catalog_enum_not_a_version_label(self):
+        class SchemaProvider(StaticProvider):
+            def complete_structured_with_usage(self, system, user, name, schema):
+                self.schema = schema
+                return self.complete(system, user), None
+
+        provider = SchemaProvider(response(ranked_strategies=[{
+            "strategy": "orb_vwap v1.0.0", "confidence": 0.9,
+            "rationale": "The model appended display metadata.",
+        }]))
+        result, selection = self.select(self.make_analyst(provider))
+        self.assertFalse(result.ok)
+        self.assertIsNone(selection)
+        self.assertIn("unknown strategy candidate: orb_vwap v1.0.0", result.error)
+        self.assertEqual(
+            provider.schema["$defs"]["StrategyRankSchema"]["properties"]["strategy"]["enum"],
+            ["orb_vwap", "mean_reversion"],
+        )
+        self.assertIn("exact strategy ID", provider.last_system)
+
     def test_duplicate_rankings_are_rejected(self):
         provider = StaticProvider(response(ranked_strategies=[
             {

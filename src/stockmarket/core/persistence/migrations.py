@@ -429,6 +429,21 @@ _V25 = [
         added_at TEXT NOT NULL)""",
 ]
 
+_V26 = [
+    """CREATE TABLE execution_history_revision (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        revision BIGINT NOT NULL CHECK (revision >= 0))""",
+    "INSERT INTO execution_history_revision (singleton, revision) VALUES (1, 0)",
+]
+
+_SQLITE_HISTORY_TRIGGERS = [
+    f"CREATE TRIGGER execution_history_{table}_{event.lower()} "
+    f"AFTER {event} ON {table} BEGIN "
+    "UPDATE execution_history_revision SET revision = revision + 1 WHERE singleton = 1; END"
+    for table in ("orders", "order_events", "fills", "paper_feedback_fills")
+    for event in ("INSERT", "UPDATE", "DELETE")
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -451,7 +466,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (22, "reproducible_strategy_comparisons", _V22),
     (23, "immutable_prospective_evidence", _V23),
     (24, "bounded_execution_history_access", _V24),
-    (25, "shared_market_watchlist", _V25)]
+    (25, "shared_market_watchlist", _V25),
+    (26, "durable_execution_history_revision", _V26)]
 
 
 def applied_versions(db: Database) -> set[int]:
@@ -479,6 +495,9 @@ def migrate(db: Database) -> list[int]:
         with db.transaction():
             for sql in statements:
                 db.execute(sql)
+            if version == 26 and db.dialect == "sqlite":
+                for sql in _SQLITE_HISTORY_TRIGGERS:
+                    db.execute(sql)
             db.execute("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                        (version, name, datetime.now(timezone.utc).isoformat()))
         applied.append(version)

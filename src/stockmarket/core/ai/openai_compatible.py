@@ -26,6 +26,7 @@ class OpenAICompatibleProvider:
         *,
         timeout: float = 20.0,
         max_output_tokens: int | None = None,
+        context_window_tokens: int = 32_768,
     ) -> None:
         parsed = urlparse(base_url)
         if parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS:
@@ -45,13 +46,19 @@ class OpenAICompatibleProvider:
                 isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int)
                 or not 1 <= max_output_tokens <= 32_768):
             raise ValueError("AI max output tokens must be from 1 to 32768")
+        if isinstance(context_window_tokens, bool) or not isinstance(context_window_tokens, int) \
+                or not 1 <= context_window_tokens <= 1_048_576:
+            raise ValueError("AI context window tokens must be from 1 to 1048576")
 
         self.name = "openai_compatible"
         self._endpoint = base_url.rstrip("/") + "/chat/completions"
         self._model = model.strip()
         self._api_key = api_key
         self._timeout = float(timeout)
-        self._max_output_tokens = max_output_tokens
+        self._max_output_tokens = max_output_tokens if max_output_tokens is not None else 4096
+        self._context_window_tokens = context_window_tokens
+        if self._max_output_tokens >= context_window_tokens:
+            raise ValueError("AI output budget must be smaller than the context window")
         self._structured_outputs = parsed.hostname == "api.openai.com"
 
     def complete(self, system: str, user: str) -> str:
@@ -68,22 +75,27 @@ class OpenAICompatibleProvider:
     ) -> tuple[str, dict[str, int] | None]:
         if not self._structured_outputs:
             return self.complete_with_usage(system, user)
-        return self._request(system, user, {
+        return self._request(system, user, self._response_format(name, schema))
+
+    def _response_format(self, name: str, schema: dict[str, Any]) -> dict[str, Any]:
+        if not self._structured_outputs:
+            return {"type": "json_object"}
+        return {
             "type": "json_schema",
             "json_schema": {
                 "name": name, "strict": True, "schema": _strict_schema(schema),
             },
-        })
+        }
 
-    def _request(
-        self, system: str, user: str, response_format: dict[str, Any],
-    ) -> tuple[str, dict[str, int] | None]:
-        options: dict[str, Any] = {}
-        if self._max_output_tokens is not None:
-            # Chat Completions "max_tokens"; some reasoning models require
-            # "max_completion_tokens" instead and may reject this field.
-            options["max_tokens"] = self._max_output_tokens
-        body = json.dumps({
+    def request_token_reserve(
+        self, system: str, user: str, name: str, schema: dict[str, Any],
+    ) -> tuple[int, int]:
+        body = self._body(system, user, self._response_format(name, schema))
+        self._check_request_budget(body)
+        return len(body), self._max_output_tokens
+
+    def _body(self, system: str, user: str, response_format: dict[str, Any]) -> bytes:
+        return json.dumps({
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
@@ -91,8 +103,22 @@ class OpenAICompatibleProvider:
             ],
             "temperature": 0,
             "response_format": response_format,
-            **options,
+            "max_tokens": self._max_output_tokens,
         }).encode("utf-8")
+
+    def _check_request_budget(self, body: bytes) -> None:
+        # Serialized UTF-8 bytes conservatively bound input tokens, including both schemas
+        # and chat wrappers; 64 extra tokens reserve service-side message framing.
+        if len(body) + 64 + self._max_output_tokens > self._context_window_tokens:
+            raise AIUnavailable(
+                "AI_REQUEST_BUDGET_EXCEEDED: full request plus output reserve exceeds "
+                "the configured context window")
+
+    def _request(
+        self, system: str, user: str, response_format: dict[str, Any],
+    ) -> tuple[str, dict[str, int] | None]:
+        body = self._body(system, user, response_format)
+        self._check_request_budget(body)
         request = Request(
             self._endpoint,
             data=body,

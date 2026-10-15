@@ -307,6 +307,60 @@ class RecoverySnapshotTests(TestCase):
         self.assertEqual(len(list(fills)), 1)
         self.assertEqual(len(list(orders)), 1)
 
+    def test_external_non_history_commit_does_not_invalidate_replay(self):
+        with TemporaryDirectory() as directory:
+            path = str(Path(directory) / "isolated-history.db")
+            one, two = SQLiteDatabase(path), SQLiteDatabase(path)
+            try:
+                migrate(one)
+                store = Store(one)
+                store.instruments.save(next(iter(self.f.service.instruments.values())))
+                for fill in self.f.portfolio.fills:
+                    store.fills.save(fill)
+                iterator = store.fills.iter_all(page_size=1)
+                next(iterator)
+                two.execute("CREATE TABLE heartbeat_fixture (value INTEGER)")
+                two.execute("INSERT INTO heartbeat_fixture VALUES (1)")
+                self.assertEqual(len(list(iterator)), 1)
+            finally:
+                two.close()
+                one.close()
+
+    def test_external_order_event_commit_invalidates_fill_replay(self):
+        with TemporaryDirectory() as directory:
+            path = str(Path(directory) / "isolated-history.db")
+            one, two = SQLiteDatabase(path), SQLiteDatabase(path)
+            try:
+                migrate(one)
+                store = Store(one)
+                store.instruments.save(next(iter(self.f.service.instruments.values())))
+                for order in self.f.service.order_manager.orders():
+                    store.orders.save_with_events(
+                        order, self.f.service.order_manager.events(order.client_order_id))
+                for fill in self.f.portfolio.fills:
+                    store.fills.save(fill)
+                iterator = store.fills.iter_all(page_size=1)
+                next(iterator)
+                two.execute("UPDATE order_events SET detail = detail")
+                with self.assertRaisesRegex(ValueError, "HISTORY_SNAPSHOT_CHANGED"):
+                    list(iterator)
+            finally:
+                two.close()
+                one.close()
+
+    def test_rollback_does_not_publish_history_revision(self):
+        before = self.f.db.history_revision()
+        with self.assertRaisesRegex(RuntimeError, "fixture rollback"):
+            with self.f.db.transaction():
+                self.f.db.execute("UPDATE fills SET price = price + 1")
+                raise RuntimeError("fixture rollback")
+        self.assertEqual(self.f.db.history_revision(), before)
+
+    def test_missing_revision_trigger_fails_closed(self):
+        self.f.db.execute("DROP TRIGGER execution_history_fills_update")
+        with self.assertRaisesRegex(Exception, "HISTORY_REVISION_UNAVAILABLE"):
+            list(self.f.store.fills.iter_all())
+
     def test_same_connection_same_count_history_update_invalidates_replay(self):
         for table, iterate in (("fills", self.f.store.fills.iter_all),
                                ("orders", self.f.store.orders.iter_all)):

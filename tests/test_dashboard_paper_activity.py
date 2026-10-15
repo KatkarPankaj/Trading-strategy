@@ -91,6 +91,31 @@ class PaperActivityDashboardTests(TestCase):
         self.assertEqual(row["risk_status"], "NOT_EVALUATED")
         self.assertEqual(row["reason"], "STALE_DATA")
 
+    def test_twenty_hold_export_rows_remain_explicit_abstentions(self):
+        rows = [{"timestamp": "2026-10-14T18:00:00+00:00", "symbol": f"FIXTURE{i}",
+                 "strategy": "orb_vwap", "side": "HOLD", "confidence": 0,
+                 "payload": {"intent": "NO_TRADE", "regime": "UNKNOWN"}}
+                for i in range(20)]
+        shown = views.top_signals(rows)
+        self.assertEqual(len(shown), 20)
+        self.assertEqual(set(shown["intent"]), {"NO_TRADE"})
+        self.assertEqual(set(shown["side"]), {"HOLD"})
+        self.assertEqual(set(shown["confidence"]), {0})
+        self.assertEqual(set(shown["regime"]), {"UNKNOWN"})
+
+    def test_structured_decision_trace_is_visible_without_claiming_an_order(self):
+        item = cycle()["candidates"][0]
+        item["payload"]["decision_trace"] = {
+            "symbol": "SPY", "strategy_version": "1.0.0",
+            "decision_timestamp": "2026-10-14T18:00:00+00:00",
+            "final_status": "NO_TRADE", "rejection_code": "NO_CONFIRMED_BREAKOUT",
+            "reason": "NO_CONFIRMED_BREAKOUT",
+        }
+        row = views.cycle_candidates([item]).iloc[0]
+        self.assertEqual(row["decision"], "NO_TRADE")
+        self.assertEqual(row["rejection_code"], "NO_CONFIRMED_BREAKOUT")
+        self.assertEqual(row["order_status"], "NOT_SUBMITTED")
+
     @patch.object(app, "st")
     def test_news_shows_existing_cycle_assessment_and_snapshot_evidence(self, ui):
         ui.expander.return_value = nullcontext()

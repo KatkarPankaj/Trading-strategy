@@ -221,6 +221,12 @@ def _cycle_outcomes(activity: dict[str, Any]) -> None:
         else "No candidates recorded for this cycle.")
     with st.expander("Cycle events and position-management results"):
         st.json({"payload": cycle["payload"], "events": cycle.get("events", [])})
+    with st.expander("Candidate decision traces (not order records)"):
+        st.json([{"candidate_id": item["candidate_id"],
+                  "decision_trace": item["payload"].get("decision_trace"),
+                  "trace_status": "RECORDED" if item["payload"].get("decision_trace")
+                  else "LEGACY_TRACE_UNAVAILABLE"}
+                 for item in cycle.get("candidates", [])])
 
 
 def _personal_research(client: ApiClient) -> None:
@@ -601,7 +607,9 @@ def _markets(client: ApiClient) -> None:
 
 
 def _signals(client: ApiClient) -> None:
-    st.subheader("Top signals")
+    st.subheader("Deterministic signal evaluations (not orders)")
+    st.caption("HOLD / NO_TRADE records are abstentions, not actionable BUY/SHORT signals. "
+               "A signal is not risk approval or an order; consult actual paper orders and fills.")
     _table(views.top_signals(_safe(client, "/signals", limit=500) or []))
 
 

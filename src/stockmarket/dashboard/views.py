@@ -87,13 +87,20 @@ def cycle_candidates(candidates: list[dict[str, Any]]) -> pd.DataFrame:
         signal = generation.get("signal") or {}
         risk = payload.get("risk") or {}
         order = payload.get("order") or {}
+        trace = payload.get("decision_trace") or {}
         rows.append({
             "instrument": candidate["candidate_id"],
+            "symbol": trace.get("symbol"),
+            "decision_timestamp": trace.get("decision_timestamp"),
             "status": candidate["status"],
+            "decision": trace.get("final_status", "LEGACY_TRACE_UNAVAILABLE"),
             "intent": signal.get("intent", "NOT_GENERATED"),
             "strategy": signal.get("strategy"),
+            "strategy_version": trace.get("strategy_version"),
+            "rejection_code": trace.get("rejection_code"),
             "strategy_reasons": ", ".join(signal.get("reasons") or []),
-            "reason": payload.get("error") or payload.get("research_error") or risk.get("reason"),
+            "reason": trace.get("reason") or payload.get("error") or payload.get("research_error")
+            or risk.get("reason") or generation.get("reason"),
             "risk_status": risk.get("status", "NOT_EVALUATED"),
             "order_id": order.get("client_order_id"),
             "order_status": order.get("status", "NOT_SUBMITTED"),

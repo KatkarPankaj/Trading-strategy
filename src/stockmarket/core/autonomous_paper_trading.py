@@ -12,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from .executors import TradingMode
 from .autonomous_research import IdempotencyConflict
 from .paper_lifecycle import PaperLifecycleError
+from .persistence.repositories import to_json
 
 
 class AutonomousPaperCycleError(RuntimeError):
@@ -276,12 +277,18 @@ class AutonomousPaperTradingService:
                 if not candidate_id:
                     continue
                 if candidate_id not in selected_ids:
-                    self.repository.save_candidate(
+                    assessment = (candidate.get("opportunity") or {}).get("assessment") or {}
+                    self._save_candidate(
                         run_id, candidate_id, status="RESEARCH_REJECTED",
                         payload={
                             "instrument_id": candidate_id,
                             "research_stage": candidate.get("stage"),
-                            "research_error": candidate.get("error"),
+                            "research_assessment": assessment,
+                            "research_error": ("CANDIDATE_LIMIT: selected candidate exceeds this cycle's top_n"
+                            if candidate.get("stage") == "STRATEGY_SELECTED" else
+                            candidate.get("error") or assessment.get("error")
+                            or "; ".join(assessment.get("rejection_reasons") or [])
+                            or assessment.get("strategy_reason")),
                         })
             self._checkpoint_payload(
                 run_id, payload, "PROCESSING_CANDIDATES", owner_token)
@@ -310,8 +317,9 @@ class AutonomousPaperTradingService:
                         as_of=evaluation_as_of,
                         lease_lost=lease_lost,
                         lease_error=lease_error,
+                        research_candidate=candidate,
                     )
-                    self.repository.save_candidate(
+                    self._save_candidate(
                         run_id, candidate_id, status=outcome["status"],
                         payload=outcome)
                     self._event(
@@ -331,7 +339,7 @@ class AutonomousPaperTradingService:
                         "error": f"{type(exc).__name__}: {exc}",
                         "execution": "PAPER",
                     }
-                    self.repository.save_candidate(
+                    self._save_candidate(
                         run_id, candidate_id, status="FAILED", payload=outcome)
                     self._event(
                         run_id, candidate_id, "CANDIDATE_FAILED", outcome)
@@ -371,10 +379,13 @@ class AutonomousPaperTradingService:
         as_of: datetime,
         lease_lost: threading.Event,
         lease_error: list[str],
+        research_candidate: Mapping[str, Any],
     ) -> dict[str, Any]:
-        self.repository.save_candidate(
+        assessment = (research_candidate.get("opportunity") or {}).get("assessment") or {}
+        self._save_candidate(
             run_id, candidate_id, status="IN_PROGRESS",
-            payload={"instrument_id": candidate_id, "stage": "SIGNAL_GENERATION"})
+            payload={"instrument_id": candidate_id, "stage": "SIGNAL_GENERATION",
+                     "research_assessment": assessment, "research_stage": "STRATEGY_SELECTED"})
         signal_result = self.signals.generate(
             research_run_id, candidate_id, evaluation_as_of=as_of)
         self._assert_lease(run_id, owner_token, lease_lost, lease_error)
@@ -389,7 +400,7 @@ class AutonomousPaperTradingService:
                 "reason", "signal generation rejected")
             return outcome
 
-        self.repository.save_candidate(
+        self._save_candidate(
             run_id, candidate_id, status="IN_PROGRESS",
             payload={**outcome, "stage": "RISK_EVALUATION"})
         risk_result = self.proposals.evaluate(
@@ -406,7 +417,7 @@ class AutonomousPaperTradingService:
 
         proposal_id = str(proposal["proposal_id"])
         outcome["proposal_id"] = proposal_id
-        self.repository.save_candidate(
+        self._save_candidate(
             run_id, candidate_id, status="IN_PROGRESS",
             payload={**outcome, "stage": "ORDER_SUBMISSION"})
         try:
@@ -419,6 +430,8 @@ class AutonomousPaperTradingService:
         except PaperLifecycleError as exc:
             outcome["status"] = "EXECUTION_REJECTED"
             outcome["error"] = str(exc)
+            outcome["rejection_code"] = exc.code
+            outcome["execution_quote"] = exc.details.get("execution_quote")
             return outcome
         self._assert_lease(run_id, owner_token, lease_lost, lease_error)
         order = execution_result["order"]
@@ -430,11 +443,98 @@ class AutonomousPaperTradingService:
             "average_fill_price": order.average_fill_price,
             "error": order.error,
         }
+        outcome["execution_quote"] = execution_result.get("execution_quote")
+        outcome["execution_risk"] = execution_result.get("risk_decision")
         outcome["status"] = (
             "COMPLETE" if order.status.value in {
-                "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
+                "SUBMITTED", "ACCEPTED", "PARTIALLY_FILLED", "FILLED",
             } else "ORDER_REJECTED")
         return outcome
+
+    def _save_candidate(
+        self, run_id: str, candidate_id: str, *, status: str, payload: Mapping[str, Any],
+    ) -> None:
+        previous = self.repository.get_candidate(run_id, candidate_id)
+        prior_payload = dict(previous["payload"]) if previous else {}
+        if status == "IN_PROGRESS" and payload.get("stage") == "SIGNAL_GENERATION":
+            for key in ("error", "rejection_code", "signal", "risk", "order",
+                        "execution_quote", "execution_risk"):
+                prior_payload.pop(key, None)
+        material = {**prior_payload, **json.loads(to_json(payload)), "status": status}
+        material["decision_trace"] = self._decision_trace(run_id, candidate_id, status, material)
+        self.repository.save_candidate(run_id, candidate_id, status=status, payload=material)
+
+    def _decision_trace(
+        self, run_id: str, candidate_id: str, status: str, payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        generation = payload.get("signal") or {}
+        signal = generation.get("signal") or {}
+        provenance = generation.get("provenance") or {}
+        assessment = payload.get("research_assessment") or {}
+        risk = payload.get("risk") or {}
+        order = payload.get("order") or {}
+        strategy = signal.get("strategy") or provenance.get("strategy") or assessment.get("recommended_strategy")
+        catalog = (assessment.get("input_context") or {}).get("registered_strategies") or []
+        metadata = next((item for item in catalog if item.get("name") == strategy), {})
+        instrument = getattr(self.signals, "instruments", {}).get(candidate_id)
+        reason = payload.get("error") or payload.get("research_error") or risk.get("reason")
+        final = "PENDING"
+        code = None
+        if status == "NON_ACTIONABLE":
+            final = "NO_TRADE"
+            reason = generation.get("reason") or reason
+            code = next(iter(signal.get("reasons") or []), None)
+        elif status == "RESEARCH_REJECTED":
+            final = "NO_TRADE" if assessment.get("status") == "NO_TRADE" else "REJECTED"
+            code = "RESEARCH_NO_TRADE" if final == "NO_TRADE" else (
+                assessment.get("status") or "RESEARCH_REJECTED")
+            reason = reason or "Candidate was not selected for deterministic strategy evaluation."
+        elif status in {"SIGNAL_REJECTED", "RISK_REJECTED", "EXECUTION_REJECTED", "FAILED"}:
+            final = "BLOCKED" if status in {"EXECUTION_REJECTED", "FAILED"} else "REJECTED"
+            if status == "SIGNAL_REJECTED":
+                reason = generation.get("reason") or reason
+        elif order:
+            final = {
+                "FILLED": "FILLED", "SUBMITTED": "SUBMITTED", "ACCEPTED": "SUBMITTED",
+                "PARTIALLY_FILLED": "SUBMITTED", "NEW": "PENDING", "VALIDATED": "PENDING",
+            }.get(order.get("status"), "REJECTED")
+            reason = order.get("error") if final == "REJECTED" else None
+        if final in {"NO_TRADE", "REJECTED", "BLOCKED"}:
+            head = str(reason or "").split(":", 1)[0]
+            code = payload.get("rejection_code") or code or (
+                head if head and all(c.isupper() or c.isdigit() or c == "_" for c in head)
+                else f"{status}_BLOCKER")
+            reason = reason or f"Candidate stopped at {status}; no paper submission was authorized."
+            if reason == code:
+                reason = f"{code}: {str(code).replace('_', ' ').capitalize()}."
+            if generation.get("detail") and status == "SIGNAL_REJECTED":
+                reason += f" {generation['detail']}"
+        gates = [
+            {"gate": "research_eligibility", "outcome": payload.get("research_stage", "NOT_EVALUATED"),
+             "reason": payload.get("research_error")},
+            {"gate": "strategy_signal_and_registration",
+             "outcome": generation.get("status", "NOT_EVALUATED"),
+             "reason": generation.get("reason"), "provenance": provenance},
+            {"gate": "proposal_risk_and_sizing", "outcome": risk.get("status", "NOT_EVALUATED"),
+             "reason": risk.get("reason")},
+            {"gate": "fresh_quote_session_and_final_execution_risk",
+             "outcome": order.get("status") or (
+                 "BLOCKED" if status == "EXECUTION_REJECTED" else "NOT_EVALUATED"),
+             "reason": payload.get("error"), "quote": payload.get("execution_quote"),
+             "risk_decision": payload.get("execution_risk")},
+        ]
+        return {
+            "candidate_id": candidate_id, "cycle_id": run_id,
+            "symbol": signal.get("symbol") or (instrument.symbol if instrument else candidate_id),
+            "strategy": strategy, "strategy_version": provenance.get("strategy_version")
+            or metadata.get("version"), "decision_timestamp": self._now().isoformat(),
+            "signal_result": {"status": generation.get("status", "NOT_EVALUATED"),
+                              "intent": signal.get("intent"), "side": signal.get("side"),
+                              "reason": generation.get("reason")},
+            "gate_outcomes": gates, "final_status": final, "rejection_code": code,
+            "reason": reason, "client_order_id": order.get("client_order_id"),
+            "execution": "PAPER" if order else "NOT_SUBMITTED",
+        }
 
     def _checkpoint_payload(
         self,

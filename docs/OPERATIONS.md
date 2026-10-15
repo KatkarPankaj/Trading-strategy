@@ -323,9 +323,22 @@ does not trigger an automatic retry. Check run/order status before resubmitting.
 Optional cost controls: `AI_MAX_RETRIES` (0-3, default 0) retries only
 timeouts and HTTP 408/429/5xx; `AI_TOKEN_BUDGET` caps per-process token use
 and fails closed with `AI_BUDGET_EXHAUSTED` (it resets on restart);
-`AI_MAX_OUTPUT_TOKENS` (1-32768) is sent as `max_tokens`, which some reasoning
+`AI_MAX_OUTPUT_TOKENS` (1-32768, default 4096) is sent as `max_tokens`, which some reasoning
 models reject. Each persisted assessment records `ai_usage` (calls, attempts,
 prompt/completion counts, and whether counts were estimated).
+`AI_CONTEXT_WINDOW_TOKENS` (1-1048576, default 32768) is a conservative
+application cap, not automatic detection of the selected model's actual window.
+Configure it no larger than independently verified model capacity. Before HTTP,
+the OpenAI-compatible adapter checks the exact serialized request, including
+system instructions, inline and response-format schemas, message wrappers and
+output-token reserve. Serialized UTF-8 bytes conservatively bound input tokens;
+64 additional tokens reserve service framing. This is deliberately an upper
+bound, not a tokenizer measurement. Exceeding it returns
+`AI_REQUEST_BUDGET_EXCEEDED` without a model call. Analyst admission includes
+this full reserve for compatible adapters; process-local cumulative usage is
+not a durable account spend limit or a cross-thread/retry budget reservation.
+The analyst also rejects oversized raw inputs/context rather than silently
+truncating them (`AI_INPUT_LIMIT_EXCEEDED`, `AI_CONTEXT_LIMIT_EXCEEDED`).
 `AI_MAX_INPUT_CHARS` (1000-64000, default 6000) is the serialized
 snapshot/selection context limit. Oversized contexts still fail closed as
 `INSUFFICIENT_EVIDENCE`; they are never truncated or treated as a signal.
@@ -343,6 +356,15 @@ opportunities, paper-order review, and explicit proposal acceptance. Before
 submitting a proposal it checks that `/health` reports `PAPER`; the API
 independently enforces PAPER mode, proposal freshness, and RiskEngine approval.
 The legacy dashboards and their local files are not changed by this UI.
+
+The [paper-order audit and India readiness plan](PAPER_ORDER_AUDIT.md) records
+the 2026-10-15 non-order samples, source fixes and offline acceptance evidence.
+Prepared migration 26 replaces broad SQLite `data_version` replay invalidation
+with a durable history-only revision shared across connections. It does not
+relax genuine order/fill mutation guards. It has **not** been applied to the
+operator database: a future separately authorized backup, migration and
+controlled restart are required. Missing revision state/triggers fail closed.
+PostgreSQL replay remains unsupported.
 The multi-instrument proposal endpoint also requires news intelligence. Enable
 `NEWS_PROVIDER=finnhub` and place its key in `FINNHUB_API_KEY` or
 `FINNHUB_API_KEY_FILE`; Compose mounts `secrets/finnhub_api_key.txt`. Finnhub

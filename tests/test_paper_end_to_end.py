@@ -191,6 +191,14 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(len(orders), 1)
         entry = orders[0]
         self.assertEqual((entry["status"], entry["trade_intent"]), ("FILLED", "BUY"))
+        trace = ctx.autonomous_paper_trading.get_run(tick["run_id"])["candidates"][0]["payload"]["decision_trace"]
+        self.assertEqual(trace["final_status"], "FILLED")
+        self.assertEqual(trace["client_order_id"], entry["client_order_id"])
+        self.assertEqual(trace["strategy_version"], "1.0.0")
+        self.assertIsNone(trace["rejection_code"])
+        final_gate = trace["gate_outcomes"][-1]
+        self.assertEqual(final_gate["quote"]["source"], self.data.name)
+        self.assertEqual(final_gate["risk_decision"]["status"], "APPROVED")
         quantity, price = entry["filled_quantity"], entry["average_fill_price"]
         opened = self.state(client)
         self.assertEqual(opened["cash"]["USD"], STARTING_CASH - quantity * price)
@@ -256,6 +264,14 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertTrue(run["candidates"])
         self.assertTrue(all(candidate["status"] in {"NON_ACTIONABLE", "RESEARCH_REJECTED"}
                             for candidate in run["candidates"]), run["candidates"])
+        trace = run["candidates"][0]["payload"]["decision_trace"]
+        self.assertEqual(trace["final_status"], "NO_TRADE")
+        self.assertEqual(trace["rejection_code"], "NO_CONFIRMED_BREAKOUT")
+        self.assertEqual(trace["strategy_version"], "1.0.0")
+        self.assertEqual(trace["signal_result"]["intent"], "NO_TRADE")
+        self.assertEqual(trace["execution"], "NOT_SUBMITTED")
+        self.assertIsNone(trace["client_order_id"])
+        self.assertEqual(len(trace["gate_outcomes"]), 4)
         self.assert_untouched(self.client(ctx), audit_orders=())
 
     def test_actual_auto_loop_short_and_eod_cover_survive_restart(self):
@@ -290,7 +306,7 @@ class PaperEndToEndTests(unittest.TestCase):
         restarted.paper_loop.tick()
         self.assertEqual(self.state(self.client(restarted)), final)
 
-    def assert_execution_quote_rejected(self, quote):
+    def assert_execution_quote_rejected(self, quote, code):
         ctx = self.context(auto_loop=True)
         ctx.paper_proposal_execution.quotes = lambda _: quote
         tick = ctx.paper_loop.tick()
@@ -300,13 +316,18 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(candidate["status"], "EXECUTION_REJECTED")
         self.assertEqual(candidate["payload"]["signal"]["status"], "SIGNAL_GENERATED")
         self.assertEqual(candidate["payload"]["risk"]["status"], "RISK_APPROVED")
+        trace = candidate["payload"]["decision_trace"]
+        self.assertEqual(trace["final_status"], "BLOCKED")
+        self.assertEqual(trace["rejection_code"], code)
+        self.assertEqual(trace["execution"], "NOT_SUBMITTED")
         self.assert_untouched(self.client(ctx), audit_orders=())
 
     def test_actual_loop_missing_execution_quote_is_rejected(self):
-        self.assert_execution_quote_rejected(None)
+        self.assert_execution_quote_rejected(None, "EXECUTION_QUOTE_MISSING")
 
     def test_actual_loop_fresh_research_cannot_replace_stale_execution_quote(self):
-        self.assert_execution_quote_rejected((102.0, AS_OF - timedelta(minutes=6)))
+        self.assert_execution_quote_rejected(
+            (102.0, AS_OF - timedelta(minutes=6)), "EXECUTION_QUOTE_STALE")
 
     def test_actual_loop_ai_budget_exhaustion_never_creates_fallback_trade(self):
         ctx = self.context(auto_loop=True, token_budget=1)
@@ -314,6 +335,47 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
         self.assertEqual(self.ai.users, [])
         self.assert_untouched(self.client(ctx), audit_orders=())
+
+    def test_protective_exit_continues_during_failed_entry_research(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from unittest.mock import patch
+        from stockmarket.core.autonomous_paper_trading import AutonomousPaperCycleError
+        from stockmarket.core.data.provider import DataUnavailable
+
+        ctx = self.context(auto_loop=True)
+        ctx.paper_loop.tick()
+        self.assertEqual(len(self.store.fills.all()), 1)
+        self.assertTrue(ctx.recovery.recover().clean)
+        ctx.paper_loop.protective_monitor.enable()
+        ctx.paper_loop.protective_monitor.recovery_complete = True
+        self.assertEqual(ctx.paper_loop.protective_monitor.run_once()["status"], "HEALTHY")
+        entered, release = Event(), Event()
+
+        def failed_research(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("fixture research was not released")
+            raise DataUnavailable("fixture entry research provider unavailable")
+
+        with patch.object(ctx.autonomous_paper_trading.research, "run", side_effect=failed_research):
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                future = workers.submit(
+                    ctx.autonomous_paper_trading.run, "US_ALL",
+                    idempotency_key="failed-research-with-open-position", operator="fixture")
+                try:
+                    self.assertTrue(entered.wait(5))
+                    self.clock.at += timedelta(minutes=1)
+                    self.data.price = 100.0
+                    self.assertEqual(ctx.paper_loop.protective_monitor.run_once()["status"], "HEALTHY")
+                    self.assertEqual(len(self.store.fills.all()), 2)
+                    self.assertEqual(ctx.paper.portfolio.positions(), {})
+                finally:
+                    release.set()
+                with self.assertRaisesRegex(AutonomousPaperCycleError, "entry research provider unavailable"):
+                    future.result(timeout=5)
+        self.assertEqual(len(self.store.orders.all()), 2)
+        self.assertEqual(self.store.orders.all()[-1]["trade_intent"], "SELL_TO_CLOSE")
 
     def test_monitoring_orders_and_fills_is_read_only(self):
         ctx = self.context(auto_loop=True)

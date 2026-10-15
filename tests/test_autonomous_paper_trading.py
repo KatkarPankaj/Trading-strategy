@@ -131,6 +131,45 @@ class AutonomousPaperTradingTests(TestCase):
         self.assertEqual(len(execution.calls), 1)
         self.assertEqual(execution.calls[0][2:], ("AUTOMATIC_SIZING", None))
         self.assertEqual(self.store.autonomous_paper_cycles.unfinished(), [])
+        trace = result["candidates"][0]["payload"]["decision_trace"]
+        self.assertEqual(trace["final_status"], "FILLED")
+        self.assertEqual(trace["client_order_id"], "paper-client-1")
+        self.assertIsNone(trace["rejection_code"])
+
+    def test_research_selection_error_is_retained_in_candidate_trace(self):
+        class RejectedResearch(_Research):
+            def run(self, *args, **kwargs):
+                result = super().run(*args, **kwargs)
+                result["candidates"][0].update({
+                    "stage": "REJECTED",
+                    "opportunity": {"assessment": {
+                        "status": "NO_VALID_STRATEGY",
+                        "error": "STRATEGY_SELECTION_REJECTED: unknown strategy candidate: orb_vwap v1.0.0",
+                    }},
+                })
+                return result
+        execution = _Execution()
+        service = _service(self.store, execution=execution, research=RejectedResearch())
+        result = service.run("US_ALL", idempotency_key="bad-strategy", operator="fixture")
+        candidate = result["candidates"][0]
+        trace = candidate["payload"]["decision_trace"]
+        self.assertEqual(trace["final_status"], "REJECTED")
+        self.assertEqual(trace["rejection_code"], "NO_VALID_STRATEGY")
+        self.assertIn("orb_vwap v1.0.0", trace["reason"])
+        self.assertEqual(execution.calls, [])
+
+    def test_submitted_order_is_not_reported_as_rejected_or_filled(self):
+        class PendingExecution(_Execution):
+            def submit(self, *args, **kwargs):
+                result = super().submit(*args, **kwargs)
+                result["order"].status = OrderStatus.SUBMITTED
+                result["order"].filled_quantity = 0
+                return result
+        service = _service(self.store, execution=PendingExecution())
+        result = service.run("US_ALL", idempotency_key="submitted", operator="fixture")
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["status"], "COMPLETE")
+        self.assertEqual(candidate["payload"]["decision_trace"]["final_status"], "SUBMITTED")
 
     def test_obsolete_configuration_recovery_terminates_without_retrying_entries(self):
         from stockmarket.core.autonomous_research import IdempotencyConflict
@@ -250,6 +289,10 @@ class AutonomousPaperTradingTests(TestCase):
         self.assertEqual(recovered["status"], "COMPLETE", recovered)
         self.assertEqual(recovered["candidates"][0]["status"], "COMPLETE")
         self.assertEqual(len(execution.calls), 2)
+        payload = recovered["candidates"][0]["payload"]
+        self.assertNotIn("error", payload)
+        self.assertEqual(payload["decision_trace"]["final_status"], "FILLED")
+        self.assertIsNone(payload["decision_trace"]["rejection_code"])
 
     def test_cycle_scope_lock_prevents_overlapping_runs(self):
         entered = threading.Event()

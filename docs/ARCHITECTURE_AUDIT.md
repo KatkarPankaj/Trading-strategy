@@ -8,6 +8,33 @@ Scope: Non-destructive audit of the legacy implementation (baseline). Revised af
 
 ## 1) Executive Summary
 
+### Missing-order source audit and prepared fixes (2026-10-15)
+
+Read-only runtime/persistence inspection found 26 HOLD/NO_TRADE/confidence-zero
+generated signals and no orders/fills/positions. The latest 20 cycle candidates
+include expected breakout/off-tick abstentions, four exact strategy-ID selection
+failures (`orb_vwap v1.0.0` versus registered `orb_vwap` / `1.0.0`) and two
+invalid-schema assessments. Cycle-level research errors had been discarded.
+The supplied 20-row export description is covered by a synthetic display test;
+no export file was attached/found.
+
+Prepared-only fixes constrain model selection to exact catalog IDs, retain
+research failures and structured candidate decision traces, distinguish durable
+submission from fills, and guard full serialized model requests plus output
+reserve before HTTP. A two-connection fixture reproduced replay invalidation
+on a non-history commit; prepared migration 26 uses a persistent transactional
+history-only counter while preserving genuine-change/incomplete-replay guards.
+The operator DB remains schema 25 and the running API was not restarted.
+No risk threshold, price tick, currency funding, pause, kill switch, holdout,
+recovery, worker ownership or PAPER-only boundary was relaxed.
+
+The [paper-order audit and India readiness plan](PAPER_ORDER_AUDIT.md) contains
+the precise sampled reasons, runtime evidence, regression results, provider/
+cadence measurements and observation-first checklist. India remains blocked:
+no integrated broker-authorized feed, reviewed mappings/calendar or explicit
+INR account certification exists. A healthy empty-book protective monitor and
+offline tests do not establish production/unattended or live readiness.
+
 ### Authorized local compatibility maintenance (2026-10-14)
 
 After separate operator approval, checked the existing US database read-only:
