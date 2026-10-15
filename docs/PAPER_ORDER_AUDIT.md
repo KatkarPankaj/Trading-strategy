@@ -418,3 +418,24 @@ git diff --check
   Editor diagnostics for changed source/tests reported no errors; whitespace
   validation passed. No vendor feed, paid model, PostgreSQL, live execution,
   security scan or runtime restart certification is implied.
+
+## 10. b94a8f3 supervised US readiness refresh
+
+Read-only verification from clean `b94a8f3` on October 15 around 06:06 UTC
+confirmed the same runtime gaps: schema 25, pre-commit API/dashboard processes,
+enabled automatic entries, closed US session and missing execution timestamp.
+Integrity/FK/audit checks remain good; persisted US/USD identity, cash 100000
+and zero orders/fills/positions remain unchanged. No operator action was taken.
+
+Re-executed 252 focused tests (15.340s) and full discovery of 734 tests (199.814s),
+OK with five PostgreSQL skips. Added execution-safety/MVP/portfolio modules to the
+focused selection for actual partial fills, cancellation and nonzero fees/P&L.
+No production defect was reproduced and no completed fix was repeated.
+
+Section 6 of [PAPER_MIGRATION_ACCEPTANCE.md](PAPER_MIGRATION_ACCEPTANCE.md)
+contains the refreshed preflight, approval scope, complete 66-candidate historical
+non-order decision matrix and supervised go/no-go checklist. All historical
+reasons were recovered without modifying operator rows; missing cycle reasons
+were read from linked assessments. US remains NO-GO pending approved maintenance
+and session-time feed/protection evidence. The separate next India task is an
+offline instrument-master mapping importer/test slice, not India execution.

@@ -319,3 +319,166 @@ Official API references reviewed (not proof of this operator's subscription):
 [authentication](https://kite.trade/docs/connect/v3/user/),
 [exceptions](https://kite.trade/docs/connect/v3/exceptions/).
 Only market-data endpoints are planned; **no broker live order API calls**.
+
+## 6. Supervised US decision refresh from b94a8f3
+
+Verified 2026-10-15, starting 06:06 UTC / 11:36 IST.
+Exact HEAD: `b94a8f3e96d4e22a9960de458eaa46f25f9164ec`; working tree was clean.
+Committed cancellation/display/configuration fixes were reviewed and retested;
+no new production defect was reproduced and no production code was changed.
+Migration 26 remains an additive transactional SQLite counter/12-trigger change.
+The schema-25 backup/migration preservation rehearsal passed again in isolation.
+PostgreSQL guarded replay remains unsupported; skips do not certify compatibility.
+
+### Refreshed preflight and maintenance decision
+
+| Check | Current observation |
+| --- | --- |
+| Configured source | Repository HEAD b94a8f3; existing US task uses module stockmarket.api.bootstrap:create_app_from_env, development PAPER, live false, AUTO_MIGRATE=false, one worker. |
+| API / dashboard | Port 8000 PID 32680 (02:32:44 IST); port 8501 PID 14348 (02:22:46 IST), both October 15, Python 3.11.6 executable. Predate b94a8f3 (11:33:17 IST); loaded commit unverified, no runtime build hash. |
+| Database | Explicitly derived from US task: `sqlite:///outputs/paper_auto_us.db`, resolved existing `C:\Users\katka\Trading-strategy\outputs\paper_auto_us.db`. |
+| Schema / integrity | Versions 1-25 without gaps; migration-26 table/triggers absent. Read-only integrity_check ok, foreign_key_check empty; API audit chain intact, 20 entries. |
+| Account / worker | Persisted PAPER_WORKER_BOUND US/USD/100000 seed; worker sidecar exists; one observed listening API. Ownership exclusion tests passed, but sidecar existence does not identify its OS lock owner. No ownership probe or second worker was launched. |
+| Pause / kill | Automatic/operator entries enabled; latest durable control seq 17 is RESUMED. Kill switch inactive, no reported breaches. Controls were not changed. |
+| Recovery / protection | Runtime recovery halted false, no reasons/failures; protective recovery complete and HEALTHY, 30-second interval, no positions/pending orders inspected. Empty-book health is not active-feed certification. |
+| Account state | USD cash/equity 100000, fees/P&L/exposure zero; zero positions, orders, fills, order events, execution attempts/records, feedback fills and reservations. |
+| Session / feed | US CLOSED; MISSING_OR_STALE_OUTSIDE_SESSION, no source timestamp, entry_data_ready false. Healthy provider circuits do not establish mapping, entitlement or freshness. |
+| Decision | **NO-GO for a supervised entry trial.** Source/schema alignment, durable pause and session-time feed/protection validation remain prerequisites. |
+
+API GETs and native SQLite `mode=ro` / query_only reads were separate snapshots
+while the existing worker ran. No operator migration, backup, POST, shutdown or
+restart was performed. Existing processes continued listening with the same PIDs.
+
+Approval scope is exactly section 3: (1) durably pause automatic entries without
+disabling exits/resetting kill state; (2) quiesce the identified dashboard/API
+through their owning consoles and verify normal ASGI shutdown; (3) capture the
+offline baseline and WAL-safe backup, verify integrity/audit/all old table data;
+(4) explicitly run supported migration 26; (5) compare preserved state and
+restart only the existing US task/dashboard, one worker, AUTO_MIGRATE=false;
+(6) verify source/schema/recovery/protection and **leave entries paused**.
+Do not imply that approval also permits forced process termination, account
+funding, automatic-entry resumption, live orders or India execution.
+If normal console shutdown cannot be driven with the available tools, the
+operator must perform that step; forced termination is not a substitute.
+
+### Every persisted candidate non-order
+
+The complete read-only snapshot contains **66 candidates in 33 cycles**:
+26 NO_TRADE, 33 RESEARCH_REJECTED and seven historical FAILED candidates whose
+precise blocker is OPPORTUNITY_STALE. There are zero submitted/filled orders.
+All 26 generated signals remain HOLD/confidence 0; research rejections are not
+signals, and the legacy payload's execution="PAPER" is not proof of submission.
+Historical FAILED is retained, not rewritten as a new operator trace.
+
+Reason keys below encode both disposition and the exact retained reason:
+
+| Key | Disposition | Exact reason | Evidence source | Count |
+| --- | --- | --- | --- | --- |
+| B | NO_TRADE | NO_CONFIRMED_BREAKOUT | Candidate deterministic signal; proposal NO_SIGNAL prevents an order | 22 |
+| T | NO_TRADE | PRICE_OFF_TICK | Candidate deterministic signal; proposal NO_SIGNAL prevents an order | 4 |
+| S | RESEARCH_REJECTED | STRATEGY_SELECTION_REJECTED: unknown strategy candidate: orb_vwap v1.0.0 | Linked research assessment; no signal generated | 8 |
+| V | RESEARCH_REJECTED | SCHEMA_VALIDATION_FAILED: ValidationError [<root>:value_error] | Linked assessment; finer validator detail unavailable, not invented | 2 |
+| I | RESEARCH_REJECTED | snapshot context exceeds the configured AI input limit | Linked assessment; no fallback signal | 16 |
+| C | RESEARCH_REJECTED | SCHEMA_VALIDATION_FAILED: ValidationError [component_scores.momentum:extra_forbidden, component_scores.volume:extra_forbidden] | Linked assessment; unsupported schema fields | 7 |
+| O | BLOCKED (persisted FAILED) | OPPORTUNITY_STALE | Candidate error; no execution approval | 7 |
+
+Cycle prefixes are unique in this snapshot; each non-dash cell represents one
+candidate, canonical column identity plus cycle prefix. Reasons discarded from
+legacy cycle payloads were recovered by joining the cycle's research_run_id to
+the matching persisted research candidate assessment. Nothing was backfilled.
+
+| Cycle prefix | XNAS:QQQ | ARCX:SPY | XNAS:NVDA |
+| --- | --- | --- | --- |
+| 22d334a285 | B | B | - |
+| 28b753353f | B | B | - |
+| f5bddb0ffa | V | B | - |
+| 92df4fe14d | B | S | - |
+| 1c51c3ec01 | B | B | - |
+| 26790a8919 | B | T | - |
+| d1a6096877 | S | B | - |
+| df04243ca6 | S | S | - |
+| 5c87e314fc | B | B | - |
+| b5a8e90ea0 | V | B | - |
+| 2a08dc931e | B | B | - |
+| c9837d33c8 | S | S | - |
+| 55a5d0db09 | B | T | - |
+| dce174db99 | B | B | - |
+| 62bb07190c | T | B | - |
+| 172c311ca7 | T | S | - |
+| 35236efe7d | B | S | - |
+| 692d16ef8d | I | I | - |
+| 1a359c2e49 | I | I | - |
+| 2c895b2b11 | I | - | I |
+| 0edc434e31 | I | - | I |
+| 6ce57ce501 | I | - | I |
+| e12dc8e0eb | I | I | - |
+| 026da51b55 | I | I | - |
+| 639fa1a9d4 | I | I | - |
+| 028c1f8434 | B | B | - |
+| 5c524a1a9d | O | O | - |
+| 8445e908f1 | C | C | - |
+| a51a278802 | C | C | - |
+| ce3cbaf935 | C | C | - |
+| 19dd0b3849 | O | O | - |
+| 93bb531257 | O | - | O |
+| 30995b40e9 | C | - | O |
+
+For future candidate traces, NO_TRADE means deterministic abstention; REJECTED
+means a failed research/signal/risk decision; BLOCKED means execution/infrastructure
+preconditions failed; PENDING is not submitted; SUBMITTED is not FILLED.
+PARTIALLY_FILLED stays visible as actual order status/quantity under the broader
+SUBMITTED decision; CANCELLED is distinct and never erases prior fills.
+Every displayed research record remains NOT_SUBMITTED unless an actual order ID
+and durable order ledger state exist. This contract was re-executed with fixtures.
+
+### Executed validation at b94a8f3
+
+The editor test runner discovered no tests; the existing unittest runner was
+executed using configured Python 3.11.6:
+
+```powershell
+$env:PYTHONPATH='src;tests'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_protective_exit_isolation test_ai_strategy_selection test_ai_research_schema test_openai_structured_output test_autonomous_paper_trading test_paper_end_to_end test_dashboard_paper_activity test_paper_cadence_audit test_signal_generation test_paper_lifecycle test_paper_order_management test_trade_proposals test_trade_intent test_paper_loop test_india_readiness test_paper_execution_safety test_paper_mvp_reliability test_portfolio_manager -q
+$env:PYTHONPATH='src'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest discover -s tests -q
+```
+
+- **252 focused tests passed in 15.340s.**
+- **734 full-suite tests ran in 199.814s: OK, five PostgreSQL skips**
+  (729 passed, five skipped).
+- Production-composition fixtures cover eligible BUY, permitted SHORT/cover,
+  exits, order/fill persistence, duplicate prevention, restart and recovery.
+- Actual bounded partial-fill and pending-order cancellation fixtures were
+  executed, not only status-display mocks. Broker/portfolio tests verify nonzero
+  long/short fees, cash and gross/net P&L. The basic bootstrap end-to-end fixture
+  uses zero-fee defaults; this is not a certification of the operator's cost model.
+- Expected injected-failure logs and existing AnyIO ResourceWarnings occurred.
+  No paid feed/model or operator demonstration order was used.
+- Untested operational cases: actual session-time quote mapping/latency,
+  entitlements, vendor remaining quota/429/reconnect behavior, real provider
+  protective capacity and post-restart source alignment. PostgreSQL is untested.
+
+### Go/no-go gates and separate India next step
+
+A supervised US trial remains NO-GO until all are checked:
+
+- [ ] Explicit maintenance approval; correct owner/process/database identified.
+- [ ] Durable pause verified; exits preserved; no unexplained kill/recovery state.
+- [ ] Graceful quiescence, verified WAL-safe backup and preserved account history.
+- [ ] Schema 26, expected revision/triggers, one aligned US/USD PAPER worker.
+- [ ] Clean recovery and independent healthy protection after restart.
+- [ ] Entries remain paused during official session-time provider/mapping/freshness
+      and quota/error-path observation; no retimestamping or research fallback.
+- [ ] Operator cost/risk configuration reviewed; no threshold relaxation.
+- [ ] Separate approval to resume supervised PAPER entries, with rejection/order/
+      fill monitoring and an agreed pause/incident procedure.
+
+The next smallest India task is **an offline data-only instrument-master importer
+and fixture tests**: Kite NSE/BSE EQ rows to reviewed XNSE/XBOM canonical identity,
+transport tokens, tick/lot/INR/timezone and snapshot provenance. Reject ambiguous
+or missing rows and token reassignment; prove imported but unreviewed metadata
+cannot authorize entries. Reuse existing instrument/provider boundaries.
+This task is separate from US maintenance, does not require purchasing a plan,
+does not implement execution or flip mapping/feed readiness, and requires its
+own scope approval. Calendar, streaming/entitlement, costs, INR funding and
+recovery remain later evidence gates; India remains BLOCKED.

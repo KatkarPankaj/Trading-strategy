@@ -43,6 +43,13 @@ records schema-25 read-only integrity, enabled entries requiring an approved
 pause, isolated backup/migration preservation and the blocked data-only India
 plan. No operator migration, pause, restart or funding action was performed.
 
+Verification from `b94a8f3` on October 15 re-executed 252 focused tests and 734
+full-suite tests (five PostgreSQL skips). No new production defect was reproduced.
+The refreshed acceptance report accounts for all 66 historical candidates using
+read-only candidate/linked-assessment evidence. Schema 25, older process owners,
+enabled entries and missing session-time quote evidence remain US trial blockers;
+maintenance and entry resumption still require separate approvals.
+
 ### Authorized local compatibility maintenance (2026-10-14)
 
 After separate operator approval, checked the existing US database read-only:
