@@ -50,6 +50,15 @@ read-only candidate/linked-assessment evidence. Schema 25, older process owners,
 enabled entries and missing session-time quote evidence remain US trial blockers;
 maintenance and entry resumption still require separate approvals.
 
+Incremental development from `d79f358` reproduced and fixed unfinished/misaligned
+opening-range bars at the shared ORB strategy boundary and concurrent AI budget
+over-admission. Six new regression tests and an extended production-composition
+outcome-to-prospective-evidence assertion passed: 266 focused, 740 full-suite
+tests (five PostgreSQL skips). See section 11 of the paper-order audit for exact
+commands, runtime read-only refresh and limits. No alpha threshold, migration,
+operator control or promotion changed; reviewed strategy eligibility/OOS evidence,
+calibration and session-time provider readiness remain uncertified.
+
 ### Authorized local compatibility maintenance (2026-10-14)
 
 After separate operator approval, checked the existing US database read-only:

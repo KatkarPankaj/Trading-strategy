@@ -141,6 +141,33 @@ class OrbVwapStrategyTests(unittest.TestCase):
         self.assertIs(signal.side, SignalSide.HOLD)
         self.assertEqual(signal.reasons, ("OPENING_RANGE_INCOMPLETE",))
 
+    def test_unfinished_breakout_bar_cannot_create_long_or_short(self):
+        for direction in ("up", "down"):
+            with self.subTest(direction=direction):
+                signal = OrbVwapStrategy(OrbVwapConfig(allow_short=True)).evaluate(
+                    self.instrument, make_bars(direction=direction), self.session,
+                    as_of=BAR_TIMES[-1].to_pydatetime() + timedelta(minutes=4))
+                self.assertIs(signal.side, SignalSide.HOLD)
+                self.assertEqual(signal.reasons, ("INCOMPLETE_BAR",))
+                self.assertIsNone(signal.entry_price)
+
+    def test_bar_completion_boundary_remains_actionable(self):
+        for zone in (ZONE, "UTC"):
+            with self.subTest(zone=zone):
+                bars = make_bars()
+                bars.index = bars.index.tz_convert(zone)
+                signal = self.strategy.evaluate(
+                    self.instrument, bars, self.session, as_of=AS_OF)
+                self.assertIs(signal.side, SignalSide.BUY)
+
+    def test_shifted_opening_range_is_not_complete_despite_row_count(self):
+        bars = make_bars()
+        bars.index = bars.index + timedelta(minutes=1)
+        signal = self.strategy.evaluate(
+            self.instrument, bars, self.session, as_of=AS_OF + timedelta(minutes=1))
+        self.assertIs(signal.side, SignalSide.HOLD)
+        self.assertEqual(signal.reasons, ("OPENING_RANGE_INCOMPLETE",))
+
     def test_stale_or_malformed_bars_raise_quality_error(self):
         stale_as_of = AS_OF + timedelta(minutes=30)
         with self.assertRaises(DataQualityError) as stale:

@@ -96,6 +96,9 @@ class OrbVwapStrategy:
         local_index = bars.index.tz_convert(session.zone)
         latest = bars.iloc[-1]
         latest_at = bars.index[-1].to_pydatetime()
+        interval = interval_delta(self.config.interval)
+        if latest_at + interval > as_of:
+            return self._hold(instrument, latest_at, "INCOMPLETE_BAR")
         latest_local = local_index[-1]
         latest_time = latest_local.time().replace(tzinfo=None)
         if not session.market_open <= latest_time < session.market_close:
@@ -109,12 +112,14 @@ class OrbVwapStrategy:
             for at in day_index
         ]
         opening_range = day_bars.loc[range_mask]
-        interval = interval_delta(self.config.interval)
         range_duration = datetime.combine(
             latest_local.date(), session.opening_range_end
         ) - datetime.combine(latest_local.date(), session.market_open)
         expected_range_bars = ceil(range_duration / interval)
-        if expected_range_bars < 1 or len(opening_range) < expected_range_bars:
+        expected_range = pd.date_range(
+            datetime.combine(latest_local.date(), session.market_open, session.zone),
+            periods=expected_range_bars, freq=interval)
+        if expected_range_bars < 1 or not opening_range.index.tz_convert(session.zone).equals(expected_range):
             return self._hold(instrument, latest_at, "OPENING_RANGE_INCOMPLETE")
         if latest_time < session.opening_range_end:
             return self._hold(instrument, latest_at, "OPENING_RANGE_ACTIVE")

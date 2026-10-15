@@ -439,3 +439,145 @@ reasons were recovered without modifying operator rows; missing cycle reasons
 were read from linked assessments. US remains NO-GO pending approved maintenance
 and session-time feed/protection evidence. The separate next India task is an
 offline instrument-master mapping importer/test slice, not India execution.
+
+## 11. Incremental P0 development from assessment d79f358
+
+### Current baseline and verified root causes
+
+October 15 continuation started at exact HEAD
+`d79f358086806789f94b81a90f5df3bb7992f740`, with a clean worktree.
+That commit contains only the previous readiness report updates; its production
+source matches b94a8f3. Existing catalog-ID/version/configuration checks, strict
+component-score schemas, serialized model-context guards, preserved rejection
+traces and migration 26 were inspected and re-executed, not reimplemented.
+
+Two new producer-level defects were reproduced with deterministic tests:
+
+1. **ORB data eligibility:** `OrbVwapStrategy.evaluate` checked bar-open timestamps
+   for freshness, but not bar completion. A breakout four minutes into a five-minute
+   bar emitted BUY or SHORT. Opening-range completeness relied on row count: bars
+   shifted one minute from the exchange-open grid still emitted BUY.
+   The main generated-signal path already filters unfinished bars; the shared
+   strategy contract did not. Misaligned ranges could still pass that filter.
+2. **Concurrent AI budget admission:** `_reserve_budget` only inspected completed
+   usage. Two requests each reserving 264 tokens could enter a provider under a
+   264-token budget while the first was outstanding. A coordinated blocking
+   provider reproduced the second request succeeding before the first settled.
+   Request-envelope/context-size validation was already present; this is a
+   cumulative-admission race, not a reason to enlarge the model's context window.
+
+### Completed fixes and scope
+
+- `core/strategies/orb_vwap.py`: returns unpriced HOLD with `INCOMPLETE_BAR`
+  before setup evaluation; requires the exact expected opening-range timestamp
+  grid, returning `OPENING_RANGE_INCOMPLETE` when it is shifted/incomplete.
+  UTC and exchange-local indexes are equivalent. Exact bar-close boundary BUY
+  remains valid. Strategy thresholds, risk-price rounding and catalog identity
+  are unchanged; invalid bars are not repaired or retimestamped.
+- `core/ai/analyst.py`: reserves in-flight request tokens under the existing usage
+  lock and settles the reservation atomically with completed usage/error recording.
+  Concurrent calls cannot spend the same available allowance. Denied calls return
+  `AI_BUDGET_EXHAUSTED` without calling the provider. Terminal provider failures
+  release the in-flight reservation, preserving existing failure semantics.
+- Regression files: `test_deterministic_strategies.py`, `test_ai_research_schema.py`,
+  `test_signal_generation.py`, `test_paper_end_to_end.py`. Tests cover long/short
+  unfinished bars, shifted grids, UTC equivalence, the completed boundary,
+  persisted NO_SIGNAL/reason/NOT_SUBMITTED, overlapping budget admission and
+  failure cleanup.
+- The production-composition entry/exit test now follows outcome fill IDs through
+  execution signal ID, generated signal, opportunity/assessment and prospective
+  decision. It verifies frozen strategy version, decision features, source
+  provenance, exit reason and research's NOT_AUTHORIZED_BY_RESEARCH marker.
+  Existing learning records were reused, not reconstructed or rewritten.
+
+This is a bounded P0 safety/correctness increment, not a completed multi-market
+platform. No migration, runtime task, operator control, provider subscription,
+live-order path, funding or strategy-promotion configuration was changed.
+
+### Verified current implementation versus remaining acceptance
+
+| Area | Evidence and boundary |
+| --- | --- |
+| Research to proposal | Scanner, timestamped snapshots, strict AI assessment, catalog selection, deterministic generation, risk/sizing and persisted proposal paths exist and pass isolated tests. Arbitrary suffixed strategy IDs and unsupported component-score fields remain rejected, not aliased. |
+| HOLD/confidence | Operator still has 26 HOLD/0 records: 22 NO_CONFIRMED_BREAKOUT, four PRICE_OFF_TICK. These are abstentions, not zero-confidence orders. Deterministic entry signals also do not supply a calibrated probability; confidence alone is not an authorization gate. Model-reported confidence is advisory; calibrated_probability remains None. No fabricated confidence/price was added. |
+| Strategy comparison | ORB/VWAP and SMA trend templates exist; default automatic catalog is ORB only unless explicitly configured. Laboratory/comparison/ranking services support version/config matching, realistic-cost historical evaluation, chronological windows and final-holdout isolation. Paper outcomes and exploratory reports are not independent OOS certification; default runtime strategy eligibility is not an established validated champion/challenger promotion gate. No validated momentum/mean-reversion/news execution family was established. |
+| PAPER lifecycle | Production-composition BUY, supported SHORT, cover/stop/target/session exits, idempotency and restart tests pass. Dedicated execution/MVP fixtures cover fees, cash/P&L, partial fills, pending cancellation and independent protection. Full suite also covers partial exit episode accounting. Fill/cost assumptions are simulation models, not certified liquidity/market-impact realism. |
+| Decision states | Deterministic NO_TRADE, research rejection, execution blockage, proposal, submission, partial/final fill and cancellation are distinct. A complete market-wide WAITING_FOR_ENTRY/trigger-expiry product contract is not certified by these tests; do not label an unexecuted research row as an order. |
+| Learning | Closed episodes persist fills/costs/exit reason and versioned attribution; prospective immutable decision records retain features/evidence and append-only follow-up. known_at/as_of guards, chronological evaluation and reserved holdouts have tests. Calibration, adequate unseen samples, independent review and certified rollback/promotion remain unmet. Legacy unattributed episodes cannot become valid training evidence by guesswork. |
+| Markets | Runtime remains single-market US/USD PAPER. India readiness is explicitly BLOCKED; Germany is later. Neither INR funding nor a broker-authorized India feed, reviewed instrument/calendar evidence or simultaneous-worker certification was introduced. |
+
+### Runtime observation, read-only
+
+At 06:41 UTC / 12:11 IST the same API PID 32680 and dashboard PID 14348 were
+listening, with October 15 start times 02:32:44 and 02:22:46 IST respectively.
+The configured US task still selects `sqlite:///outputs/paper_auto_us.db`,
+PAPER/live false, US/USD, one worker and AUTO_MIGRATE=false.
+Native SQLite mode=ro/query_only checks found schema 25, integrity ok, no FK
+violations, no history-revision components and zero orders/fills/positions/
+execution records/outcomes. Runtime GETs report enabled entries, inactive kill
+switch, recovery not halted, US CLOSED and missing execution timestamp.
+Protection is HEALTHY/recovery-complete at 30 seconds, with zero positions or
+pending orders checked: no active-feed capacity certification is implied.
+
+The status inspection initially used a nonexistent candidate `stage` column;
+that read-only query failed explicitly and was corrected to the actual `status`
+column. Confirmed counts remain 26 NON_ACTIONABLE, 33 RESEARCH_REJECTED, seven
+FAILED. This was an inspection-query error, not a schema migration failure.
+Neither GETs nor SQLite inspection initialized application services or wrote
+operator state. Operator runtime still predates the reviewed/new source.
+
+### Executed tests
+
+Python 3.11.6, declared development requirements inspected. Editor test discovery
+returned no tests, so the repository unittest commands were used:
+
+```powershell
+$env:PYTHONPATH='src;tests'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_deterministic_strategies test_ai_research_schema -q
+# Before fixes: 31 tests, four failed assertions across three tests/subtests.
+# Refined race reproduction separately failed because the second request succeeded:
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_ai_research_schema.AnalystCostControlTests.test_concurrent_requests_reserve_budget_before_provider_call -q
+# After fixes, initial integration selection:
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_deterministic_strategies test_ai_research_schema test_signal_generation test_paper_end_to_end test_strategy_pipeline test_trend_strategy test_openai_structured_output -q
+# Final focused selection after all test additions:
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest test_deterministic_strategies test_ai_research_schema test_signal_generation test_paper_end_to_end test_strategy_pipeline test_trend_strategy test_openai_structured_output test_ai_strategy_selection test_candidate_research test_protective_exit_isolation test_trade_proposals test_paper_lifecycle test_paper_execution_safety test_paper_mvp_reliability test_outcome_feedback test_prospective_evidence test_strategy_ranking test_strategy_comparison test_strategy_evidence test_strategy_lab test_india_readiness -q
+$env:PYTHONPATH='src'
+& 'C:\Users\katka\AppData\Local\Programs\Python\Python311\python.exe' -m unittest discover -s tests -q
+```
+
+- Initial post-fix integration: **95 passed, 6.675s**.
+- Final focused selection: **266 passed, 94.635s**.
+- Full suite: **740 ran, 262.011s; OK with five PostgreSQL skips**
+  (735 passed, five skipped).
+- Expected injected-provider/recovery/kill-switch errors and preexisting AnyIO
+  unclosed-memory-stream ResourceWarnings were emitted. They are not claims of
+  operator incidents. No paid-model/feed request or demonstration operator order
+  was used.
+- Editor diagnostics report no errors in the six changed Python files; Pylance
+  verified all four `_record_usage` call sites after its private signature change.
+  This is not a repository-wide static/security gate.
+
+### Unmet gates and next development increment
+
+US runtime remains NO-GO until separately approved durable pause, graceful owner
+shutdown, WAL-safe verified backup, explicit migration 26, one-worker aligned
+restart and paused session-time quote/protection qualification. Follow the
+existing [maintenance acceptance procedure](PAPER_MIGRATION_ACCEPTANCE.md);
+entry resumption is a separate approval.
+
+Provider credentials/entitlements, remaining quota, measured reconnect/429 paths,
+mapping and calendar provenance, operator costs and session-time protection are
+still untested operational dependencies. The AI reservation fix is a process-local
+admission guard, not a vendor invoice cap: generic providers without output bounds
+use estimates, and failures/retries with no reported usage can have unknown billed
+tokens. A hard cross-process spending limit requires durable, per-attempt uncertain
+usage accounting; no claim of that capability is made here.
+
+The next highest-priority development slice is an **authoritative strategy
+eligibility/evidence contract**: bind independently reviewed chronological OOS
+reports, instrument/timeframe/market/config/version, costs, sample coverage and
+expiry to the selectable catalog; persist precise NO_VALIDATED_STRATEGY reasons
+when none qualify, while keeping experimental paper research explicitly separate
+from promoted/validated selection. Use the existing lab/ranking/governance
+repositories, never automatic promotion or a weaker risk gate. India data-only
+mapping certification remains a separate prerequisite, not a runtime shortcut.

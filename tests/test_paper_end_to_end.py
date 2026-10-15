@@ -222,6 +222,18 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(outcomes[0]["net_pnl"], -2.0 * quantity)
         self.assertEqual(outcomes[0]["attribution"]["strategy_version"], "1.0.0")
         self.assertEqual(outcomes[0]["attribution"]["timeframe"], "5m")
+        execution = self.store.execution_records.for_order(entry["client_order_id"])
+        generation = self.store.signal_generations.get_by_signal(execution["signal_id"])
+        opportunity = self.store.research_runs.get_opportunity(generation["opportunity_id"])
+        assessment = opportunity["payload"]["assessment"]
+        decision = self.store.prospective.decision(assessment["assessment_id"])
+        self.assertEqual(decision["opportunity_id"], generation["opportunity_id"])
+        self.assertEqual(decision["strategy_catalog"]["orb_vwap"]["version"], "1.0.0")
+        self.assertTrue(decision["features"])
+        self.assertTrue(decision["data_provenance"])
+        self.assertEqual(decision["risk_status"], "NOT_AUTHORIZED_BY_RESEARCH")
+        self.assertEqual(set(outcomes[0]["fill_ids"]), {f["fill_id"] for f in self.store.fills.all()})
+        self.assertIn("STOP_LOSS", outcomes[0]["exit_reasons"])
         metrics = client.get("/paper/strategy-performance", headers=HEADERS).json()["performance"]
         self.assertEqual(metrics[0]["trade_count"], 1)
         self.assertEqual(metrics[0]["sample_status"], "INSUFFICIENT_EVIDENCE")

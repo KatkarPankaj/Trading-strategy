@@ -156,6 +156,7 @@ class AIAnalyst:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._estimated_calls = 0
+        self._reserved_tokens = 0
 
     @property
     def usage(self) -> AIUsage:
@@ -233,18 +234,18 @@ class AIAnalyst:
                     lambda: self._complete(system, user, task, response_schema))
                 break
             except CircuitOpenError:
-                self._record_usage(attempts, None, None, False)
+                self._record_usage(attempts, None, None, False, reserved_tokens=request_reserve)
                 return self._result(task, False, None, "AI_CIRCUIT_OPEN", prompt_hash, None, now,
                                     started, attempts=attempts)
             except AIUnavailable as exc:
                 if exc.retryable and attempts <= self._max_retries:
                     self._sleep(self._backoff * (2 ** (attempts - 1)))
                     continue
-                self._record_usage(attempts, None, None, False)
+                self._record_usage(attempts, None, None, False, reserved_tokens=request_reserve)
                 return self._result(task, False, None, f"AI_PROVIDER_ERROR: {type(exc).__name__}",
                                     prompt_hash, None, now, started, attempts=attempts)
             except Exception as exc:
-                self._record_usage(attempts, None, None, False)
+                self._record_usage(attempts, None, None, False, reserved_tokens=request_reserve)
                 return self._result(task, False, None, f"AI_PROVIDER_ERROR: {type(exc).__name__}",
                                     prompt_hash, None, now, started, attempts=attempts)
 
@@ -255,7 +256,8 @@ class AIAnalyst:
             prompt_tokens = estimated_prompt
         if completion_tokens is None:
             completion_tokens = _estimate_tokens(str(raw))
-        self._record_usage(attempts, prompt_tokens, completion_tokens, estimated)
+        self._record_usage(attempts, prompt_tokens, completion_tokens, estimated,
+                           reserved_tokens=request_reserve)
         token_fields = {
             "attempts": attempts, "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens, "usage_estimated": estimated,
@@ -292,15 +294,17 @@ class AIAnalyst:
         return self._provider.complete(system, user), None
 
     def _reserve_budget(self, estimated_prompt_tokens: int) -> bool:
-        if self._token_budget is None:
-            return True
         with self._usage_lock:
-            used = self._prompt_tokens + self._completion_tokens
-            return used + estimated_prompt_tokens <= self._token_budget
+            used = self._prompt_tokens + self._completion_tokens + self._reserved_tokens
+            if self._token_budget is not None and used + estimated_prompt_tokens > self._token_budget:
+                return False
+            self._reserved_tokens += estimated_prompt_tokens
+            return True
 
     def _record_usage(self, attempts: int, prompt_tokens: int | None,
-                      completion_tokens: int | None, estimated: bool) -> None:
+                      completion_tokens: int | None, estimated: bool, *, reserved_tokens: int) -> None:
         with self._usage_lock:
+            self._reserved_tokens -= reserved_tokens
             self._calls += 1
             self._attempts += attempts
             self._prompt_tokens += prompt_tokens or 0

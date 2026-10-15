@@ -310,6 +310,16 @@ class SignalGenerationTests(unittest.TestCase):
         self.assertEqual(result["execution"], "NOT_SUBMITTED")
         self.assertEqual(result["risk_status"], "NOT_EVALUATED")
 
+    def test_shifted_range_preserves_explicit_abstention_reason(self):
+        self.market_data.bars.index += timedelta(minutes=1)
+        result = self.service.generate(
+            RUN_ID, INSTRUMENT.instrument_id, evaluation_as_of=EVALUATION_AS_OF)
+        self.assertEqual(result["status"], "SIGNAL_GENERATED")
+        self.assertEqual(result["signal_type"], "NO_SIGNAL")
+        self.assertEqual(result["signal"]["side"], "HOLD")
+        self.assertEqual(result["signal"]["reasons"], ["OPENING_RANGE_INCOMPLETE"])
+        self.assertEqual(result["execution"], "NOT_SUBMITTED")
+
     def test_settings_are_bounded_and_reject_unknown_fields(self):
         settings = parse_signal_generation_settings(
             '{"max_opportunity_age_seconds": 300}')

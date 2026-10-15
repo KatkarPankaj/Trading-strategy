@@ -1,7 +1,9 @@
 """Milestone 2 P4: AI research schema extensions and cost controls."""
 
 from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Event
 import unittest
 
 from pydantic import ValidationError
@@ -283,6 +285,52 @@ class AnalystCostControlTests(unittest.TestCase):
         self.assertTrue(result.usage_estimated)
         self.assertGreater(result.prompt_tokens, 0)
         self.assertEqual(analyst.usage.estimated_calls, 1)
+
+    def test_concurrent_requests_reserve_budget_before_provider_call(self):
+        entered, release = Event(), Event()
+
+        class BlockingProvider(UsageProvider):
+            def request_token_reserve(self, system, user, task, schema):
+                return 100, 100
+
+            def complete_with_usage(self, system, user):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError("test provider release timed out")
+                return super().complete_with_usage(system, user)
+
+        provider = BlockingProvider(
+            [assessment_response(), assessment_response()],
+            usage={"prompt_tokens": 100, "completion_tokens": 100})
+        analyst = AIAnalyst(provider, token_budget=264)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(analyst.analyze, "candidate_assessment", "{}")
+            try:
+                self.assertTrue(entered.wait(5))
+                second = analyst.analyze("candidate_assessment", "{}")
+            finally:
+                release.set()
+            result = first.result(timeout=5)
+        self.assertFalse(second.ok)
+        self.assertEqual(second.error, "AI_BUDGET_EXHAUSTED")
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(analyst.usage.calls, 1)
+
+    def test_failed_request_releases_inflight_reservation(self):
+        class ReservedProvider(UsageProvider):
+            def request_token_reserve(self, system, user, task, schema):
+                return 100, 100
+
+        provider = ReservedProvider(
+            [AIUnavailable("test failure"), assessment_response()],
+            usage={"prompt_tokens": 100, "completion_tokens": 100})
+        analyst = AIAnalyst(provider, token_budget=264)
+        self.assertFalse(analyst.analyze("candidate_assessment", "{}").ok)
+        second = analyst.analyze("candidate_assessment", "{}")
+        self.assertTrue(second.ok, second.error)
+        self.assertEqual(provider.calls, 2)
 
     def test_invalid_cost_settings_are_rejected(self):
         for kwargs in ({"max_retries": 4}, {"max_retries": -1},
