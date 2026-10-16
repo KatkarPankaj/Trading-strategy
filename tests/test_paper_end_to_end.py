@@ -199,6 +199,34 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(self.store.orders.all(), [])
         self.assertEqual(self.store.fills.all(), [])
 
+    def test_exploratory_paper_mode_trades_through_gates_and_is_labelled(self):
+        ctx = self.context(auto_loop=True, experimental_selection=False,
+                           extra_env={"PAPER_EXPLORATORY_AUTO_ENTRIES": "true"})
+        tick = ctx.paper_loop.tick()
+        self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
+        cycle = ctx.autonomous_paper_trading.get_run(tick["run_id"])
+        self.assertEqual(cycle["payload"]["selection_scope"], "EXPLORATORY_UNVALIDATED")
+        trace = cycle["candidates"][0]["payload"]["decision_trace"]
+        self.assertEqual((trace["final_status"], trace["selection_scope"]),
+                         ("FILLED", "EXPLORATORY_UNVALIDATED"))
+        final_gate = trace["gate_outcomes"][-1]
+        self.assertEqual(final_gate["risk_decision"]["status"], "APPROVED")
+        orders = self.store.orders.all()
+        self.assertEqual([(o["status"], o["trade_intent"]) for o in orders], [("FILLED", "BUY")])
+        research = ctx.autonomous_research.get_run(cycle["payload"]["research_run_id"])
+        self.assertEqual(research["selection_scope"], "EXPERIMENTAL_RESEARCH")
+        report = self.client(ctx).get("/paper/diagnostics", headers=HEADERS).json()
+        self.assertEqual(report["selection_mode"], "EXPLORATORY_UNVALIDATED")
+        self.assertEqual(report["last_cycle"]["selection_scope"], "EXPLORATORY_UNVALIDATED")
+        self.assertIn("not validation evidence", report["detail"])
+        # Exploratory fills never make the strategy validated.
+        self.assertEqual(ctx.candidate_assessment.automatic_qualification(
+            "orb_vwap", self.instrument_id), "NOT_A_QUALIFIED_LAB_VERSION")
+
+    def test_exploratory_switch_rejects_invalid_values(self):
+        with self.assertRaises(ConfigurationError):
+            self.context(auto_loop=True, extra_env={"PAPER_EXPLORATORY_AUTO_ENTRIES": "maybe"})
+
     def test_experimental_result_cannot_be_reused_as_validated_selection(self):
         ctx = self.context(experimental_selection=False)
         run = ctx.autonomous_research.run(

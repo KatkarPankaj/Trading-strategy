@@ -94,7 +94,9 @@ def main() -> None:
         diagnostics = _safe(client, "/paper/diagnostics") if loop and loop.get("state") != "DISABLED" else None
         if diagnostics is not None:
             st.caption(views.paper_diagnostics_line(diagnostics))
-            if diagnostics.get("automatic_entries") == "BLOCKED_NO_VALIDATED_STRATEGY":
+            if diagnostics.get("selection_mode") == "EXPLORATORY_UNVALIDATED":
+                st.warning(diagnostics["detail"])
+            elif diagnostics.get("automatic_entries") == "BLOCKED_NO_VALIDATED_STRATEGY":
                 st.warning(diagnostics["detail"])
 
     tabs = st.tabs(["Research (advisory)", "Opportunities", "Markets & regime",

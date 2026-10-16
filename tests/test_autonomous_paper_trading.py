@@ -293,6 +293,48 @@ class AutonomousPaperTradingTests(TestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(evaluation_times, [NOW + timedelta(seconds=5)])
 
+    def test_exploratory_mode_is_opt_in_labelled_and_still_risk_gated(self):
+        scopes = []
+
+        class RecordingResearch:
+            def run(self, universe_id, *, idempotency_key, mode, as_of, top_n, validated_selection):
+                scopes.append(validated_selection)
+                return _Research.run(_Research(), universe_id, idempotency_key=idempotency_key,
+                                     mode=mode, as_of=as_of, top_n=top_n, validated_selection=True)
+
+        class RejectingProposals(_Proposals):
+            def evaluate(self, run_id, candidate_id, *, evaluation_as_of):
+                return {"status": "RISK_REJECTED", "reason": "MAX_POSITION_RISK"}
+
+        execution = _Execution()
+        default = AutonomousPaperTradingService(
+            repository=self.store.autonomous_paper_cycles, research=RecordingResearch(),
+            signals=_Signals(), proposals=_Proposals(), execution=execution,
+            positions=_Positions(), gate=_Gate(), max_candidates=3, clock=lambda: NOW,
+            heartbeat_interval=60)
+        validated = default.run("us-equities", idempotency_key="validated", operator="operator",
+                                as_of=NOW, top_n=1)
+        exploratory = AutonomousPaperTradingService(
+            repository=self.store.autonomous_paper_cycles, research=RecordingResearch(),
+            signals=_Signals(), proposals=RejectingProposals(), execution=execution,
+            positions=_Positions(), gate=_Gate(), max_candidates=3, clock=lambda: NOW,
+            heartbeat_interval=60, exploratory=True)
+        result = exploratory.run("us-equities", idempotency_key="exploratory", operator="operator",
+                                 as_of=NOW, top_n=1)
+
+        self.assertEqual(scopes, [True, False])
+        self.assertEqual(validated["payload"]["selection_scope"], "VALIDATED_AUTOMATIC")
+        self.assertEqual(result["payload"]["selection_scope"], "EXPLORATORY_UNVALIDATED")
+        trace = result["candidates"][0]["payload"]["decision_trace"]
+        self.assertEqual(trace["selection_scope"], "EXPLORATORY_UNVALIDATED")
+        self.assertEqual(result["candidates"][0]["status"], "RISK_REJECTED")
+        self.assertEqual(len(execution.calls), 1)  # only the validated cycle's approved entry
+        with self.assertRaises(ValueError):
+            _service(self.store).__class__(
+                repository=self.store.autonomous_paper_cycles, research=_Research(),
+                signals=_Signals(), proposals=_Proposals(), execution=execution,
+                positions=_Positions(), gate=_Gate(), exploratory="yes")
+
     def test_risk_is_evaluated_after_the_signal_is_persisted(self):
         # Regression: risk reused the signal's evaluation time, so the signal's own
         # generated_at (written later on a real clock) was rejected as FUTURE_DATED.

@@ -1194,7 +1194,8 @@ def create_app(ctx: ApiContext) -> FastAPI:
             market=(loop or {}).get("market") or ctx.settings.markets[0],
             loop_status=loop, ledger_orders=len(ctx.store.orders.all()),
             ledger_fills=len(ctx.store.fills.all()),
-            now=service.clock().astimezone(timezone.utc)))
+            now=service.clock().astimezone(timezone.utc),
+            exploratory=service.exploratory))
 
     @app.post("/paper/loop/control", dependencies=[Depends(auth)])
     def paper_loop_control(body: PaperLoopControlBody) -> dict[str, Any]:

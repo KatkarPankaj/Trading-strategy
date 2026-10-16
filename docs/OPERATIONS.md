@@ -541,6 +541,7 @@ startup `ConfigurationError`s. Defaults are off.
 | `PAPER_AUTO_LOOP_UNIVERSE` | `<MARKET>_ALL` | scanner universe |
 | `PAPER_AUTO_LOOP_INTERVAL_MINUTES` | `15` | cadence, aligned to wall-clock slots |
 | `PAPER_AUTO_LOOP_TOP_N` | `3` | capped by the autonomous cycle bound |
+| `PAPER_EXPLORATORY_AUTO_ENTRIES` | `false` | `true` lets unvalidated strategies open PAPER positions automatically to observe P&L; all strategy, sizing, freshness, session, risk and exit gates still apply; cycles/decisions are labelled `EXPLORATORY_UNVALIDATED` and never count as validation (goal rule 5.1 exception) |
 | `AUTOMATIC_EVIDENCE_MAX_AGE_DAYS` | unset | 1-365, operator-chosen. Automatic selection may use only an `ACTIVE_FOR_PAPER` Strategy Lab version for that instrument that still passes `paper-review-v1` and whose holdout ended within this window. Unset keeps every automatic entry blocked (`NO_VALIDATED_STRATEGY`) |
 | `PAPER_DISCOVERY_ENABLED` | `false` | adaptive discovery: rank long-HOLD instruments after fresh scanner candidates; never authorizes an order |
 | `PAPER_DISCOVERY_HOLD_MINUTES` | `30` | 5-1440; continuous HOLD/NO_TRADE time before an instrument is rotated |

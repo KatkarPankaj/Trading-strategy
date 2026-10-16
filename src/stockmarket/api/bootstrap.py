@@ -826,6 +826,7 @@ def _build_context(
             max_candidates=autonomous_research.settings.max_candidates,
             clock=now,
             discovery=_discovery_from_env(env),
+            exploratory=_exploratory_from_env(env),
         )
         if autonomous_research is not None and not personal_research_mode else None
     )
@@ -1062,6 +1063,14 @@ def _protective_monitor_settings(env: Mapping[str, str], interval: int) -> Prote
         lock_timeout_seconds=float(env.get("PAPER_MONITOR_LOCK_TIMEOUT_SECONDS") or 1),
         quote_timeout_seconds=float(env.get("PAPER_MONITOR_QUOTE_TIMEOUT_SECONDS") or 2),
         max_items=int(env.get("PAPER_MONITOR_MAX_ITEMS") or 100))
+
+
+def _exploratory_from_env(env: Mapping[str, str]) -> bool:
+    """PAPER_EXPLORATORY_AUTO_ENTRIES=true lets unvalidated strategies enter PAPER positions."""
+    value = (env.get("PAPER_EXPLORATORY_AUTO_ENTRIES") or "false").strip().lower()
+    if value not in {"true", "false"}:
+        raise ConfigurationError(["PAPER_EXPLORATORY_AUTO_ENTRIES must be true or false"])
+    return value == "true"
 
 
 def _evidence_max_age_from_env(env: Mapping[str, str]) -> timedelta | None:

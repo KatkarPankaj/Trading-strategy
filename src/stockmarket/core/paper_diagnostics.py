@@ -97,9 +97,12 @@ def summarize_cycle(run: Mapping[str, Any] | None, *, now: datetime) -> dict[str
 
 def paper_diagnostics(
     *, run: Mapping[str, Any] | None, market: str, loop_status: Mapping[str, Any] | None,
-    ledger_orders: int, ledger_fills: int, now: datetime,
+    ledger_orders: int, ledger_fills: int, now: datetime, exploratory: bool = False,
 ) -> dict[str, Any]:
     cycle = summarize_cycle(run, now=now)
+    if cycle is not None:
+        cycle["selection_scope"] = (run or {}).get("payload", {}).get(
+            "selection_scope", "VALIDATED_AUTOMATIC")
     last = (loop_status or {}).get("last") or {}
     blocked = cycle is not None and cycle["strategy_eligibility"] == "BLOCKED_NO_VALIDATED_STRATEGY"
     return {
@@ -115,9 +118,13 @@ def paper_diagnostics(
         },
         "last_cycle": cycle,
         "ledger": {"orders": ledger_orders, "fills": ledger_fills},
+        "selection_mode": "EXPLORATORY_UNVALIDATED" if exploratory else "VALIDATED_ONLY",
         "automatic_entries": "BLOCKED_NO_VALIDATED_STRATEGY" if blocked else (
             "NO_CYCLE_RECORDED" if cycle is None else "SUBJECT_TO_PER_ORDER_CHECKS"),
         "detail": (
+            "EXPLORATORY PAPER MODE: unvalidated strategies may open PAPER positions through all "
+            "risk gates. Results measure behaviour only; they are not validation evidence."
+            if exploratory else
             "Automatic selection requires an ACTIVE_FOR_PAPER Strategy Lab version with qualified, "
             "unexpired holdout evidence for the instrument; none qualified, so automatic cycles "
             "abstain by design." if blocked else

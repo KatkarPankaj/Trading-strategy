@@ -118,7 +118,8 @@ A market that has not passed its readiness checks must remain unavailable for au
 
 ## 5. Non-negotiable safety and reliability rules
 
-1. **Validated strategies only.** Preserve the `NO_VALIDATED_STRATEGY` gate. If no eligible strategy has been approved, the platform may continue researching and ranking opportunities, but it must not create automatic entries that bypass this gate.
+1. **Validated strategies only.** Preserve the `NO_VALIDATED_STRATEGY` gate. If no eligible strategy has been approved, the platform may continue researching and ranking opportunities, but it must not create automatic entries that bypass this gate.  
+   **Operator-approved exception (paper only):** the opt-in `PAPER_EXPLORATORY_AUTO_ENTRIES=true` mode may let unvalidated strategies open *paper* positions automatically so their behaviour and P&L can be observed. Every other gate (signal, sizing, capital, stop-loss/target, data freshness, session, final risk, exits) still applies; every such cycle is labelled `EXPLORATORY_UNVALIDATED`; and exploratory results never count as validation or qualify a strategy for validated trading. It must never apply to live trading.
 2. **Paper trading first.** No live orders or real-money execution as part of the current development goal.
 3. **Fail closed.** Missing data, stale prices, invalid market readiness, failed risk checks, or unsupported order rules must block execution.
 4. **Risk before opportunity.** No signal may bypass position sizing, capital limits, stop-loss rules, or other risk controls.

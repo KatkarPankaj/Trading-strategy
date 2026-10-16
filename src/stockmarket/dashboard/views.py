@@ -22,7 +22,8 @@ def paper_diagnostics_line(diagnostics: Mapping[str, Any]) -> str:
     """One-line status of the latest paper cycle from /paper/diagnostics."""
     cycle = diagnostics.get("last_cycle")
     ledger = diagnostics.get("ledger") or {}
-    head = f"Market: {diagnostics.get('market')} | Scheduler: {(diagnostics.get('scheduler') or {}).get('state')}"
+    head = (f"Market: {diagnostics.get('market')} | Mode: {diagnostics.get('selection_mode', 'VALIDATED_ONLY')} | "
+            f"Scheduler: {(diagnostics.get('scheduler') or {}).get('state')}")
     if cycle is None:
         return f"{head} | Last cycle: none recorded | Orders/fills: {ledger.get('orders', 0)}/{ledger.get('fills', 0)}"
     freshness = cycle.get("data_freshness") or {}

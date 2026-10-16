@@ -39,6 +39,7 @@ class AutonomousPaperTradingService:
         heartbeat_interval: float = 30.0,
         monitoring_check: Callable[[], dict[str, Any]] | None = None,
         discovery: AdaptiveDiscoverySettings | None = None,
+        exploratory: bool = False,
     ) -> None:
         if execution.trading.mode is not TradingMode.PAPER:
             raise ValueError("autonomous paper cycles require PAPER execution")
@@ -58,6 +59,11 @@ class AutonomousPaperTradingService:
         self.positions = positions
         self.monitoring_check = monitoring_check
         self.discovery = discovery
+        if not isinstance(exploratory, bool):
+            raise ValueError("exploratory must be a bool")
+        # Opt-in: unvalidated strategies may enter PAPER positions; every gate still applies and
+        # every cycle is labelled EXPLORATORY_UNVALIDATED. It never qualifies a strategy.
+        self.exploratory = exploratory
         self.gate = gate
         self.account_id = account_id
         self.max_candidates = max_candidates
@@ -255,6 +261,9 @@ class AutonomousPaperTradingService:
                     history, protected=protected_instruments(payload["position_management"]),
                     now=datetime.fromisoformat(request["as_of"]), settings=self.discovery)
                 self._checkpoint_payload(run_id, payload, "DISCOVERY_PLANNED", owner_token)
+            if "selection_scope" not in payload:
+                payload["selection_scope"] = (
+                    "EXPLORATORY_UNVALIDATED" if self.exploratory else "VALIDATED_AUTOMATIC")
             deprioritized = tuple((payload.get("discovery") or {}).get("deprioritized") or ())
             try:
                 research_result = self.research.run(
@@ -264,7 +273,7 @@ class AutonomousPaperTradingService:
                     mode=TradingMode.PAPER.value,
                     as_of=datetime.fromisoformat(request["as_of"]),
                     top_n=request["top_n"],
-                    validated_selection=True,
+                    validated_selection=payload["selection_scope"] != "EXPLORATORY_UNVALIDATED",
                     **({"deprioritized": deprioritized} if deprioritized else {}),
                 )
             except IdempotencyConflict as exc:
@@ -550,7 +559,9 @@ class AutonomousPaperTradingService:
              "reason": payload.get("error"), "quote": payload.get("execution_quote"),
              "risk_decision": payload.get("execution_risk")},
         ]
+        run = self.repository.get_run(run_id) or {}
         return {
+            "selection_scope": (run.get("payload") or {}).get("selection_scope", "VALIDATED_AUTOMATIC"),
             "candidate_id": candidate_id, "cycle_id": run_id,
             "symbol": signal.get("symbol") or (instrument.symbol if instrument else candidate_id),
             "strategy": strategy, "strategy_version": provenance.get("strategy_version")
