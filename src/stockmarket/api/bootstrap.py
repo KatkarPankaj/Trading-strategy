@@ -77,6 +77,7 @@ from ..core.security import SecurityError, get_secret
 from ..core.settings import AppSettings, ConfigurationError, Environment, load_settings
 from ..core.trading_service import OrderTicket, TradingService
 from ..core.market_stats import MarketStatsProvider, MarketStatsSettings
+from ..core.adaptive_discovery import AdaptiveDiscoverySettings, parse_discovery_settings
 from ..core.paper_loop import PaperLoopSettings, PaperTradingLoop
 from ..core.paper_worker import PaperWorkerLease
 from ..core.india_readiness import IndiaPaperReadiness
@@ -824,6 +825,7 @@ def _build_context(
             gate=gate,
             max_candidates=autonomous_research.settings.max_candidates,
             clock=now,
+            discovery=_discovery_from_env(env),
         )
         if autonomous_research is not None and not personal_research_mode else None
     )
@@ -965,6 +967,33 @@ def _build_context(
                 autonomous_research.settings = replace(
                     autonomous_research.settings, strategy_allowlist=tuple(base_allowlist) + tuple(active))
 
+        candidate_assessment.automatic_evidence_max_age = _evidence_max_age_from_env(env)
+
+        def automatic_qualification(name: str, instrument_id: str) -> str | None:
+            """Automatic selection needs an active, human-approved, evidence-qualified lab version."""
+            if not name.startswith("lab_"):
+                return "NOT_A_QUALIFIED_LAB_VERSION"
+            evidence_max_age = candidate_assessment.automatic_evidence_max_age
+            if evidence_max_age is None:
+                return "AUTOMATIC_EVIDENCE_EXPIRY_UNSET"
+            proposal_id = name[4:]
+            proposal = store.strategy_lab.get(proposal_id)
+            if proposal is None or store.strategy_lab.state(proposal_id)["state"] != "ACTIVE_FOR_PAPER":
+                return "PAPER_STRATEGY_NOT_ACTIVE"
+            if proposal["instrument_id"] != instrument_id:
+                return "PAPER_STRATEGY_INSTRUMENT_MISMATCH"
+            eligibility = strategy_lab.eligibility(proposal_id)
+            if not eligibility["eligible_for_review"]:
+                return "PAPER_STRATEGY_ELIGIBILITY_CHANGED"
+            holdout = next((item for item in store.strategy_lab.evaluations(proposal_id)
+                            if item["evaluation_id"] == eligibility["holdout_evaluation_id"]), None)
+            if holdout is None:
+                return "QUALIFIED_PREREGISTERED_HOLDOUT_REQUIRED"
+            if now() - datetime.fromisoformat(holdout["end"]) > evidence_max_age:
+                return "AUTOMATIC_EVIDENCE_EXPIRED"
+            return None
+
+        candidate_assessment.automatic_qualification = automatic_qualification
         strategy_lab.on_state_change = refresh_paper_strategies
         strategy_lab.open_entry_orders = lambda name: any(
             order.strategy == name and order.trade_intent in {TradeIntent.BUY, TradeIntent.SHORT_SELL}
@@ -1033,6 +1062,27 @@ def _protective_monitor_settings(env: Mapping[str, str], interval: int) -> Prote
         lock_timeout_seconds=float(env.get("PAPER_MONITOR_LOCK_TIMEOUT_SECONDS") or 1),
         quote_timeout_seconds=float(env.get("PAPER_MONITOR_QUOTE_TIMEOUT_SECONDS") or 2),
         max_items=int(env.get("PAPER_MONITOR_MAX_ITEMS") or 100))
+
+
+def _evidence_max_age_from_env(env: Mapping[str, str]) -> timedelta | None:
+    """Operator-chosen evidence expiry; unset means automatic selection stays blocked."""
+    raw = (env.get("AUTOMATIC_EVIDENCE_MAX_AGE_DAYS") or "").strip()
+    if not raw:
+        return None
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 0
+    if not 1 <= days <= 365:
+        raise ConfigurationError(["AUTOMATIC_EVIDENCE_MAX_AGE_DAYS must be an integer between 1 and 365"])
+    return timedelta(days=days)
+
+
+def _discovery_from_env(env: Mapping[str, str]) -> AdaptiveDiscoverySettings | None:
+    try:
+        return parse_discovery_settings(env)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError([f"invalid adaptive discovery setting: {exc}"]) from exc
 
 
 def _paper_loop_from_env(

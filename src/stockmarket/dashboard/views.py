@@ -18,6 +18,25 @@ def mode_banner(health: Mapping[str, Any] | None) -> tuple[str, str]:
     return "MODE UNKNOWN - API UNREACHABLE", "unknown"
 
 
+def paper_diagnostics_line(diagnostics: Mapping[str, Any]) -> str:
+    """One-line status of the latest paper cycle from /paper/diagnostics."""
+    cycle = diagnostics.get("last_cycle")
+    ledger = diagnostics.get("ledger") or {}
+    head = f"Market: {diagnostics.get('market')} | Scheduler: {(diagnostics.get('scheduler') or {}).get('state')}"
+    if cycle is None:
+        return f"{head} | Last cycle: none recorded | Orders/fills: {ledger.get('orders', 0)}/{ledger.get('fills', 0)}"
+    freshness = cycle.get("data_freshness") or {}
+    age = freshness.get("age_seconds")
+    return (
+        f"{head} | Last cycle: {cycle.get('last_cycle_at')} ({cycle.get('status')}) | "
+        f"Data: {freshness.get('latest_bar_timestamp') or 'not evaluated'}"
+        f"{f' ({age:.0f}s old)' if age is not None else ''} | "
+        f"Strategy eligibility: {cycle.get('strategy_eligibility')} | "
+        f"Rejection: {cycle.get('primary_rejection_reason') or 'none'} | "
+        f"Cycle orders/fills: {cycle.get('orders_submitted')}/{cycle.get('orders_with_fills')} | "
+        f"Ledger orders/fills: {ledger.get('orders', 0)}/{ledger.get('fills', 0)}")
+
+
 def frame(rows: Iterable[Mapping[str, Any]] | None) -> pd.DataFrame:
     return pd.DataFrame(list(rows or []))
 
@@ -30,14 +49,38 @@ def _payload(row: Mapping[str, Any]) -> dict[str, Any]:
         return {}
 
 
-def top_signals(signals: list[dict[str, Any]], limit: int = 20) -> pd.DataFrame:
+def _signal_outcome(signal: Mapping[str, Any], decision: Mapping[str, Any] | None) -> tuple[str, str]:
+    """(execution_outcome, reason): why an actionable signal did or did not become a paper order."""
+    if signal.get("side") not in {"BUY", "SELL", "SHORT", "COVER"}:
+        return "ABSTAINED", "HOLD/NO_TRADE is not an entry"
+    if decision is None:
+        return "NOT_RISK_EVALUATED", "No risk decision recorded for this signal"
+    reason = str(decision.get("reason") or "")
+    if decision.get("order_id"):
+        return "ORDER_CREATED", f"order {decision['order_id']}"
+    if decision.get("status") == "APPROVED":
+        return "RISK_APPROVED_NO_ORDER", reason or "approved; see Orders for execution checks"
+    return "BLOCKED_BY_RISK", reason.split(":", 1)[0] or "REJECTED"
+
+
+def top_signals(signals: list[dict[str, Any]], limit: int = 20,
+                decisions: list[dict[str, Any]] | None = None) -> pd.DataFrame:
     df = frame(signals)
     if df.empty:
         return df
     df["regime"] = [_payload(s).get("regime") for s in signals]
     df["intent"] = [_payload(s).get("intent") or "UNSPECIFIED" for s in signals]
-    return df.sort_values("confidence", ascending=False).head(limit)[
-        ["timestamp", "symbol", "strategy", "side", "intent", "confidence", "regime"]]
+    columns = ["timestamp", "symbol", "strategy", "side", "intent", "confidence", "regime"]
+    if decisions is not None:
+        latest: dict[str, Mapping[str, Any]] = {}
+        for row in sorted(decisions, key=lambda item: str(item.get("timestamp") or "")):
+            if row.get("signal_id"):
+                latest[str(row["signal_id"])] = row
+        outcomes = [_signal_outcome(s, latest.get(str(s.get("signal_id")))) for s in signals]
+        df["execution_outcome"] = [item[0] for item in outcomes]
+        df["why"] = [item[1] for item in outcomes]
+        columns += ["execution_outcome", "why"]
+    return df.sort_values(["confidence", "timestamp"], ascending=False, kind="stable").head(limit)[columns]
 
 
 def regime_counts(signals: list[dict[str, Any]]) -> pd.DataFrame:

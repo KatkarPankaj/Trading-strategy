@@ -37,6 +37,7 @@ from ..core.paper_lifecycle import (
     PaperPositionManager,
     PaperProposalExecutionService,
 )
+from ..core.paper_diagnostics import paper_diagnostics
 from ..core.personal_research import PersonalResearchService
 from ..core.autonomous_paper_trading import (
     AutonomousPaperCycleError,
@@ -1180,6 +1181,20 @@ def create_app(ctx: ApiContext) -> FastAPI:
             return {"state": "DISABLED", "trading_mode": TradingMode.PAPER.value,
                     "detail": "set PAPER_AUTO_LOOP=true (PAPER mode only) to enable"}
         return _plain(ctx.paper_loop.status())
+
+    @app.get("/paper/diagnostics", dependencies=[Depends(auth)])
+    def paper_cycle_diagnostics() -> dict[str, Any]:
+        service = ctx.autonomous_paper_trading
+        if service is None:
+            raise HTTPException(503, "autonomous paper trading is not configured")
+        latest = ctx.store.autonomous_paper_cycles.recent(1)
+        loop = ctx.paper_loop.status() if ctx.paper_loop is not None else None
+        return _plain(paper_diagnostics(
+            run=service.get_run(latest[0]["run_id"]) if latest else None,
+            market=(loop or {}).get("market") or ctx.settings.markets[0],
+            loop_status=loop, ledger_orders=len(ctx.store.orders.all()),
+            ledger_fills=len(ctx.store.fills.all()),
+            now=service.clock().astimezone(timezone.utc)))
 
     @app.post("/paper/loop/control", dependencies=[Depends(auth)])
     def paper_loop_control(body: PaperLoopControlBody) -> dict[str, Any]:

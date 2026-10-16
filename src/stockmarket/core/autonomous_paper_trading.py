@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from .adaptive_discovery import (
+    AdaptiveDiscoverySettings, plan_rotation, protected_instruments, record_added)
 from .executors import TradingMode
 from .autonomous_research import IdempotencyConflict
 from .paper_lifecycle import PaperLifecycleError
@@ -36,6 +38,7 @@ class AutonomousPaperTradingService:
         lease_duration: timedelta = timedelta(minutes=15),
         heartbeat_interval: float = 30.0,
         monitoring_check: Callable[[], dict[str, Any]] | None = None,
+        discovery: AdaptiveDiscoverySettings | None = None,
     ) -> None:
         if execution.trading.mode is not TradingMode.PAPER:
             raise ValueError("autonomous paper cycles require PAPER execution")
@@ -54,6 +57,7 @@ class AutonomousPaperTradingService:
         self.execution = execution
         self.positions = positions
         self.monitoring_check = monitoring_check
+        self.discovery = discovery
         self.gate = gate
         self.account_id = account_id
         self.max_candidates = max_candidates
@@ -240,6 +244,18 @@ class AutonomousPaperTradingService:
                 return self._finish(
                     run_id, payload, "PARTIAL", "HALTED", owner_token)
 
+            history: list[dict[str, Any]] = []
+            if self.discovery is not None and "discovery" not in payload:
+                # Planned once and persisted, so recovery reuses the same research request.
+                history = [
+                    {**row, "candidates": self.repository.candidates(row["run_id"])}
+                    for row in self.repository.recent(self.discovery.history_cycles)
+                    if row["run_id"] != run_id]
+                payload["discovery"] = plan_rotation(
+                    history, protected=protected_instruments(payload["position_management"]),
+                    now=datetime.fromisoformat(request["as_of"]), settings=self.discovery)
+                self._checkpoint_payload(run_id, payload, "DISCOVERY_PLANNED", owner_token)
+            deprioritized = tuple((payload.get("discovery") or {}).get("deprioritized") or ())
             try:
                 research_result = self.research.run(
                     request["universe_id"],
@@ -249,6 +265,7 @@ class AutonomousPaperTradingService:
                     as_of=datetime.fromisoformat(request["as_of"]),
                     top_n=request["top_n"],
                     validated_selection=True,
+                    **({"deprioritized": deprioritized} if deprioritized else {}),
                 )
             except IdempotencyConflict as exc:
                 if not recovering:
@@ -273,6 +290,9 @@ class AutonomousPaperTradingService:
                 if candidate.get("stage") == "STRATEGY_SELECTED"
             ][:request["top_n"]]
             selected_ids = {str(item["instrument_id"]) for item in selected}
+            if history and payload.get("discovery") is not None:
+                record_added(payload["discovery"], history,
+                             research_result.get("candidates", []), self._now().isoformat())
             for candidate in research_result.get("candidates", []):
                 candidate_id = str(candidate.get("instrument_id", ""))
                 if not candidate_id:
@@ -404,8 +424,10 @@ class AutonomousPaperTradingService:
         self._save_candidate(
             run_id, candidate_id, status="IN_PROGRESS",
             payload={**outcome, "stage": "RISK_EVALUATION"})
+        # Risk is evaluated after the signal is persisted; reusing the signal's evaluation time
+        # made its own generated_at look future-dated and rejected every actionable signal.
         risk_result = self.proposals.evaluate(
-            research_run_id, candidate_id, evaluation_as_of=as_of)
+            research_run_id, candidate_id, evaluation_as_of=self._now())
         self._assert_lease(run_id, owner_token, lease_lost, lease_error)
         outcome["risk"] = risk_result
         proposal = risk_result.get("trade_proposal")

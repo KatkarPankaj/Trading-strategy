@@ -92,8 +92,9 @@ class PaperEndToEndTests(unittest.TestCase):
         self.ai = AdvisoryAI()
 
     def context(self, *, auto_loop=False, allow_short=False, token_budget=None,
-                experimental_selection=True):
-        env = dict(ENV, PAPER_AUTO_LOOP=str(auto_loop).lower(), PAPER_AUTO_LOOP_TOP_N="1")
+                experimental_selection=True, extra_env=None):
+        env = dict(ENV, PAPER_AUTO_LOOP=str(auto_loop).lower(), PAPER_AUTO_LOOP_TOP_N="1",
+                   **(extra_env or {}))
         ctx = build_context(
             load_settings(env), env, store=self.store,
             market_stats=market_stats, sector_of=lambda _: "TECHNOLOGY",
@@ -121,7 +122,7 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(candidate["status"], "RESEARCH_REJECTED")
         assessment = candidate["payload"]["research_assessment"]
         self.assertEqual(assessment["status"], "NO_VALIDATED_STRATEGY")
-        self.assertIn("AUTOMATIC_VALIDATION_POLICY_UNAPPROVED", assessment["error"])
+        self.assertIn("orb_vwap=NOT_A_QUALIFIED_LAB_VERSION", assessment["error"])
         self.assertIsNone(assessment["recommended_strategy"])
         self.assertEqual(len(self.ai.users), 0)
         self.assertEqual(self.store.orders.all(), [])
@@ -134,6 +135,69 @@ class PaperEndToEndTests(unittest.TestCase):
         restarted = self.context(auto_loop=True, experimental_selection=False)
         self.assertEqual(restarted.paper_loop.tick()["run_id"], result["run_id"])
         self.assertEqual(self.store.orders.all(), [])
+
+    def test_diagnostics_show_validation_block_and_restart_adds_no_cycle(self):
+        ctx = self.context(auto_loop=True, experimental_selection=False)
+        first = ctx.paper_loop.tick()
+        restarted = self.context(auto_loop=True, experimental_selection=False)
+        self.assertEqual(restarted.paper_loop.tick()["run_id"], first["run_id"])
+        report = self.client(restarted).get("/paper/diagnostics", headers=HEADERS).json()
+        cycle = report["last_cycle"]
+        self.assertEqual((report["market"], report["trading_mode"]), ("US", "PAPER"))
+        self.assertEqual(report["automatic_entries"], "BLOCKED_NO_VALIDATED_STRATEGY")
+        self.assertEqual(cycle["run_id"], first["run_id"])
+        self.assertEqual(cycle["strategy_eligibility"], "BLOCKED_NO_VALIDATED_STRATEGY")
+        self.assertEqual(cycle["primary_rejection_reason"], "NO_VALIDATED_STRATEGY")
+        self.assertEqual(cycle["data_freshness"]["status"], "NOT_EVALUATED_NO_STRATEGY_SIGNAL")
+        self.assertEqual((cycle["orders_submitted"], cycle["orders_with_fills"]), (0, 0))
+        self.assertEqual(report["ledger"], {"orders": 0, "fills": 0})
+        self.assertEqual(len(self.store.autonomous_paper_cycles.recent(10)), 1)
+
+    def test_diagnostics_show_complete_cycle_paper_fill(self):
+        # Test-only exploratory selection: demonstrates the order path, not validation approval.
+        ctx = self.context(auto_loop=True)
+        tick = ctx.paper_loop.tick()
+        self.assertEqual((tick["action"], tick.get("status")), ("CYCLE", "COMPLETE"), tick)
+        report = self.client(ctx).get("/paper/diagnostics", headers=HEADERS).json()
+        cycle = report["last_cycle"]
+        self.assertEqual(cycle["strategy_eligibility"], "STRATEGY_SELECTED")
+        self.assertIsNone(cycle["primary_rejection_reason"])
+        self.assertEqual((cycle["orders_submitted"], cycle["orders_with_fills"]), (1, 1))
+        self.assertEqual(report["ledger"], {"orders": 1, "fills": 1})
+        self.assertEqual(cycle["data_freshness"]["status"], "EVALUATED")
+        self.assertGreaterEqual(cycle["data_freshness"]["age_seconds"], 0)
+        self.assertEqual(report["scheduler"]["last_tick_action"], "CYCLE")
+
+    def test_diagnostics_show_strategy_abstention(self):
+        self.data.intraday = ResearchData(breakout=False).intraday
+        self.data.price = 100.0
+        ctx = self.context(auto_loop=True)
+        ctx.paper_loop.tick()
+        cycle = self.client(ctx).get("/paper/diagnostics", headers=HEADERS).json()["last_cycle"]
+        self.assertEqual(cycle["primary_rejection_reason"], "NO_CONFIRMED_BREAKOUT")
+        self.assertEqual(cycle["orders_submitted"], 0)
+        self.assertEqual(self.store.orders.all(), [])
+
+    def test_adaptive_discovery_rotates_but_validation_gate_still_blocks_entries(self):
+        discovery = {"PAPER_DISCOVERY_ENABLED": "true", "PAPER_DISCOVERY_HOLD_MINUTES": "30"}
+        ctx = self.context(auto_loop=True, experimental_selection=False, extra_env=discovery)
+        self.assertEqual(ctx.paper_loop.settings.interval_minutes, 15)
+        ticks = []
+        for minutes in (0, 15, 30):
+            self.clock.at = AS_OF + timedelta(minutes=minutes)
+            ticks.append(ctx.paper_loop.tick())
+        cycle = ctx.autonomous_paper_trading.get_run(ticks[-1]["run_id"])
+        plan = cycle["payload"]["discovery"]
+        self.assertEqual(plan["deprioritized"], [self.instrument_id])
+        rotated = next(item for item in plan["decisions"] if item["action"] == "ROTATED")
+        self.assertEqual((rotated["reason_code"], rotated["hold_code"]),
+                         ("HOLD_THRESHOLD_EXCEEDED", "HOLD_NO_VALIDATED_STRATEGY"))
+        for candidate in cycle["candidates"]:
+            self.assertEqual(candidate["payload"]["research_assessment"]["status"],
+                             "NO_VALIDATED_STRATEGY")
+        self.assertEqual(len(self.ai.users), 0)
+        self.assertEqual(self.store.orders.all(), [])
+        self.assertEqual(self.store.fills.all(), [])
 
     def test_experimental_result_cannot_be_reused_as_validated_selection(self):
         ctx = self.context(experimental_selection=False)

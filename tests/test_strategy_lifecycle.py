@@ -108,6 +108,67 @@ class StrategyLifecycleTests(unittest.TestCase):
         self.assertEqual(self.ctx.store.orders.all(), [])
         return proposal, name
 
+    def _prepare_automatic(self):
+        proposal, name = self.evaluate_and_activate("orb_vwap")
+        clock = self.fixture.clock
+        for attr in ("intraday", "daily"):
+            setattr(self.fixture.data, attr, getattr(ResearchData(), attr).rename(
+                index=lambda at: at + (clock.at.date() - AS_OF.date())))
+        clock.at = clock.at.replace(hour=16, minute=0)
+        self.ctx.candidate_assessment.analyst = AIAnalyst(SelectionAI(name), clock=clock)
+        # The shared fixture forces exploratory selection; restore the real validated path.
+        vars(self.ctx.autonomous_research).pop("run", None)
+        return name, clock
+
+    def test_qualified_active_version_trades_automatically_through_all_gates(self):
+        name, clock = self._prepare_automatic()
+        self.ctx.candidate_assessment.automatic_evidence_max_age = timedelta(days=30)
+        cycle = self.ctx.autonomous_paper_trading.run(
+            "US_ALL", idempotency_key="qualified-automatic", operator="fixture",
+            as_of=clock.at, top_n=1)
+        candidate = cycle["candidates"][0]
+        self.assertEqual(candidate["status"], "COMPLETE", candidate["payload"])
+        trace = candidate["payload"]["decision_trace"]
+        self.assertEqual((trace["final_status"], trace["strategy"]), ("FILLED", name))
+        orders = self.ctx.store.orders.all()
+        self.assertEqual(len(orders), 1)
+        self.assertEqual((orders[0]["strategy"], orders[0]["status"], orders[0]["trade_intent"]),
+                         (name, "FILLED", "BUY"))
+        self.assertEqual(len(self.ctx.store.fills.all()), 1)
+        replay = self.ctx.autonomous_paper_trading.run(
+            "US_ALL", idempotency_key="qualified-automatic", operator="fixture",
+            as_of=clock.at, top_n=1)
+        self.assertEqual(replay["run_id"], cycle["run_id"])
+        self.assertEqual(len(self.ctx.store.orders.all()), 1)
+
+    def test_ai_cannot_choose_an_unqualified_strategy(self):
+        name, clock = self._prepare_automatic()
+        self.ctx.candidate_assessment.automatic_evidence_max_age = timedelta(days=30)
+        self.ctx.candidate_assessment.analyst = AIAnalyst(SelectionAI("orb_vwap"), clock=clock)
+        cycle = self.ctx.autonomous_paper_trading.run(
+            "US_ALL", idempotency_key="unqualified-choice", operator="fixture",
+            as_of=clock.at, top_n=1)
+        candidate = cycle["candidates"][0]
+        self.assertEqual(candidate["status"], "RESEARCH_REJECTED", candidate["payload"])
+        self.assertNotEqual(candidate["payload"]["research_assessment"].get("recommended_strategy"),
+                            "orb_vwap")
+        self.assertEqual(self.ctx.store.orders.all(), [])
+
+    def test_expired_or_unconfigured_evidence_keeps_automatic_entries_blocked(self):
+        name, clock = self._prepare_automatic()
+        for key, max_age, reason in (("unset", None, "AUTOMATIC_EVIDENCE_EXPIRY_UNSET"),
+                                     ("expired", timedelta(hours=1), "AUTOMATIC_EVIDENCE_EXPIRED")):
+            with self.subTest(key=key):
+                self.ctx.candidate_assessment.automatic_evidence_max_age = max_age
+                cycle = self.ctx.autonomous_paper_trading.run(
+                    "US_ALL", idempotency_key=f"blocked-{key}", operator="fixture",
+                    as_of=clock.at, top_n=1)
+                assessment = cycle["candidates"][0]["payload"]["research_assessment"]
+                self.assertEqual(assessment["status"], "NO_VALIDATED_STRATEGY")
+                self.assertIn(f"{name}={reason}", assessment["error"])
+                self.assertIn("orb_vwap=NOT_A_QUALIFIED_LAB_VERSION", assessment["error"])
+        self.assertEqual(self.ctx.store.orders.all(), [])
+
     def test_auth_illegal_transitions_no_trade_and_request_identity(self):
         pid = self.lab.propose().json()["proposal_id"]
         response = self.client.post(f"/strategy-lab/proposals/{pid}/transition", json={
@@ -148,7 +209,7 @@ class StrategyLifecycleTests(unittest.TestCase):
                     as_of=clock.at, top_n=1, validated_selection=True)
                 blocked = automatic["candidates"][0]["opportunity"]["assessment"]
                 self.assertEqual(blocked["status"], "NO_VALIDATED_STRATEGY")
-                self.assertIn("AUTOMATIC_VALIDATION_POLICY_UNAPPROVED", blocked["error"])
+                self.assertIn(f"{name}=AUTOMATIC_EVIDENCE_EXPIRY_UNSET", blocked["error"])
                 self.assertIsNone(blocked["recommended_strategy"])
                 candidate = run.json()["candidates"][0]
                 base = f"/research/autonomous/{run.json()['run_id']}/candidates/{candidate['instrument_id']}"

@@ -581,7 +581,7 @@ when none qualify, while keeping experimental paper research explicitly separate
 from promoted/validated selection. Use the existing lab/ranking/governance
 repositories, never automatic promotion or a weaker risk gate. India data-only
 mapping certification remains a separate prerequisite, not a runtime shortcut.
-
+$env:PYTHONPATH="src;tests"; python -m pytest -q -p no:cacheprovider tests/test_trade_proposals.py tests/test_autonomous_paper_trading.py tests/test_adaptive_discovery.py
 ## 12. Automatic-selection policy guard from c3e5e10
 
 Started at clean `c3e5e10e35d6d55e2dedb468fe087671362f900e`.

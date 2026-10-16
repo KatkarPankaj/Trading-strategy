@@ -541,6 +541,12 @@ startup `ConfigurationError`s. Defaults are off.
 | `PAPER_AUTO_LOOP_UNIVERSE` | `<MARKET>_ALL` | scanner universe |
 | `PAPER_AUTO_LOOP_INTERVAL_MINUTES` | `15` | cadence, aligned to wall-clock slots |
 | `PAPER_AUTO_LOOP_TOP_N` | `3` | capped by the autonomous cycle bound |
+| `AUTOMATIC_EVIDENCE_MAX_AGE_DAYS` | unset | 1-365, operator-chosen. Automatic selection may use only an `ACTIVE_FOR_PAPER` Strategy Lab version for that instrument that still passes `paper-review-v1` and whose holdout ended within this window. Unset keeps every automatic entry blocked (`NO_VALIDATED_STRATEGY`) |
+| `PAPER_DISCOVERY_ENABLED` | `false` | adaptive discovery: rank long-HOLD instruments after fresh scanner candidates; never authorizes an order |
+| `PAPER_DISCOVERY_HOLD_MINUTES` | `30` | 5-1440; continuous HOLD/NO_TRADE time before an instrument is rotated |
+| `PAPER_DISCOVERY_COOLDOWN_MINUTES` | `60` | 5-1440; rotation lifetime before the instrument competes normally again |
+| `PAPER_DISCOVERY_MAX_ROTATED` | `20` | 1-500 rotated instruments (watchlist capacity) |
+| `PAPER_DISCOVERY_HISTORY_CYCLES` | `20` | 2-200 persisted cycles read to compute HOLD streaks |
 | `PAPER_MONITOR_INTERVAL_SECONDS` | `30` | 1-300 seconds; pending orders and protective exits between scans |
 | `PAPER_MONITOR_LATENCY_BUDGET_SECONDS` | `10` | positive finite soft cycle budget, at most 300 seconds |
 | `PAPER_MONITOR_LOCK_TIMEOUT_SECONDS` | `1` | execution-lock admission timeout, no greater than budget |

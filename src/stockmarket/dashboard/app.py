@@ -83,10 +83,19 @@ def main() -> None:
     if activity is not None:
         loop = activity.get("loop")
         if loop is not None:
+            last = loop.get("last") or {}
+            # MONITOR/EXITS_ONLY ticks carry no cycle status; show what the loop actually did.
             st.caption(
                 f"Local paper loop: {loop['state']} | "
-                f"Last cycle: {(loop.get('last') or {}).get('status', 'none')} | "
+                f"Last tick: {last.get('action', 'none')}"
+                f"{' (' + last['status'] + ')' if last.get('status') else ''}"
+                f"{' at ' + last['at'] if last.get('at') else ''} | "
                 "When enabled, the loop may submit simulated orders through deterministic strategy and risk checks.")
+        diagnostics = _safe(client, "/paper/diagnostics") if loop and loop.get("state") != "DISABLED" else None
+        if diagnostics is not None:
+            st.caption(views.paper_diagnostics_line(diagnostics))
+            if diagnostics.get("automatic_entries") == "BLOCKED_NO_VALIDATED_STRATEGY":
+                st.warning(diagnostics["detail"])
 
     tabs = st.tabs(["Research (advisory)", "Opportunities", "Markets & regime",
                     "Signals", "Portfolio", "Orders", "PnL & drawdown",
@@ -610,7 +619,9 @@ def _signals(client: ApiClient) -> None:
     st.subheader("Deterministic signal evaluations (not orders)")
     st.caption("HOLD / NO_TRADE records are abstentions, not actionable BUY/SHORT signals. "
                "A signal is not risk approval or an order; consult actual paper orders and fills.")
-    _table(views.top_signals(_safe(client, "/signals", limit=500) or []))
+    risk = _safe(client, "/risk", limit=1000) or {}
+    _table(views.top_signals(_safe(client, "/signals", limit=500) or [],
+                             decisions=risk.get("recent_decisions")))
 
 
 def _portfolio(client: ApiClient) -> None:

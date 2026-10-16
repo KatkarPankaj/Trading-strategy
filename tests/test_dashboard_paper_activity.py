@@ -205,3 +205,30 @@ class PaperActivityDashboardTests(TestCase):
         client.get.assert_any_call("/intelligence/prospective/decisions/decision-1")
         ui.json.assert_any_call(report)
         client.post.assert_not_called()
+
+
+class SignalOutcomeViewTests(TestCase):
+    def test_each_signal_explains_whether_it_became_an_order(self):
+        rows = [
+            {"signal_id": "s-buy", "timestamp": "2026-10-15T18:15:00+00:00", "symbol": "QQQ",
+             "strategy": "orb_vwap", "side": "BUY", "confidence": 0, "payload": {"intent": "BUY"}},
+            {"signal_id": "s-ok", "timestamp": "2026-10-15T18:20:00+00:00", "symbol": "SPY",
+             "strategy": "orb_vwap", "side": "BUY", "confidence": 0, "payload": {"intent": "BUY"}},
+            {"signal_id": "s-new", "timestamp": "2026-10-15T18:25:00+00:00", "symbol": "AAPL",
+             "strategy": "orb_vwap", "side": "BUY", "confidence": 0, "payload": {"intent": "BUY"}},
+            {"signal_id": "s-hold", "timestamp": "2026-10-15T18:30:00+00:00", "symbol": "MSFT",
+             "strategy": "orb_vwap", "side": "HOLD", "confidence": 0, "payload": {"intent": "NO_TRADE"}},
+        ]
+        decisions = [
+            {"signal_id": "s-buy", "status": "REJECTED", "timestamp": "2026-10-15T18:21:18+00:00",
+             "reason": "FUTURE_DATED_SIGNAL_CONTEXT: persisted signal is later", "order_id": None},
+            {"signal_id": "s-ok", "status": "APPROVED", "timestamp": "2026-10-15T18:21:30+00:00",
+             "reason": None, "order_id": "paper-1"},
+        ]
+        shown = views.top_signals(rows, decisions=decisions).set_index("symbol")
+        self.assertEqual(tuple(shown.loc["QQQ", ["execution_outcome", "why"]]),
+                         ("BLOCKED_BY_RISK", "FUTURE_DATED_SIGNAL_CONTEXT"))
+        self.assertEqual(shown.loc["SPY", "execution_outcome"], "ORDER_CREATED")
+        self.assertEqual(shown.loc["AAPL", "execution_outcome"], "NOT_RISK_EVALUATED")
+        self.assertEqual(shown.loc["MSFT", "execution_outcome"], "ABSTAINED")
+        self.assertNotIn("execution_outcome", views.top_signals(rows).columns)

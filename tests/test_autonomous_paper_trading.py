@@ -293,6 +293,33 @@ class AutonomousPaperTradingTests(TestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(evaluation_times, [NOW + timedelta(seconds=5)])
 
+    def test_risk_is_evaluated_after_the_signal_is_persisted(self):
+        # Regression: risk reused the signal's evaluation time, so the signal's own
+        # generated_at (written later on a real clock) was rejected as FUTURE_DATED.
+        clock_state = {"now": NOW}
+        times = {}
+
+        class SlowSignals(_Signals):
+            def generate(self, run_id, candidate_id, *, evaluation_as_of):
+                times["signal"] = evaluation_as_of
+                clock_state["now"] = NOW + timedelta(seconds=1)
+                times["generated_at"] = clock_state["now"]
+                return super().generate(run_id, candidate_id, evaluation_as_of=evaluation_as_of)
+
+        class RecordingProposals(_Proposals):
+            def evaluate(self, run_id, candidate_id, *, evaluation_as_of):
+                times["risk"] = evaluation_as_of
+                return super().evaluate(run_id, candidate_id, evaluation_as_of=evaluation_as_of)
+
+        service = _service(self.store, signals=SlowSignals(), proposals=RecordingProposals(),
+                           clock=lambda: clock_state["now"])
+        result = service.run("us-equities", idempotency_key="cycle-risk-time",
+                             operator="operator", as_of=NOW, top_n=1)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(times["signal"], NOW)
+        self.assertGreaterEqual(times["risk"], times["generated_at"])
+
     def test_omitted_as_of_uses_current_time_and_preserves_retry_timestamp(self):
         clock_state = {"now": NOW + timedelta(minutes=18)}
         execution = _Execution()

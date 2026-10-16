@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo
 
+from .data.provider import interval_delta
 from .markets import MarketRegistry, SessionPhase, UnknownMarket
 from .models import (
     Instrument,
@@ -361,7 +362,7 @@ class TradeProposalService:
         now_local_day = evaluated_at.astimezone(market_timezone).date()
         risk_context = RiskContext(
             assessed_at=evaluated_at,
-            market_data_timestamp=context["data_timestamp"],
+            market_data_timestamp=context["data_observed_at"],
             market_data_valid=True,
             reference_price=entry_base,
             available_cash=account["available_cash"],
@@ -581,7 +582,15 @@ class TradeProposalService:
         )
         if any(value > evaluated_at for value in timestamps):
             return None, "FUTURE_DATED_SIGNAL_CONTEXT: persisted signal or research input is later than evaluation time."
-        if (evaluated_at - data_timestamp > min(
+        # Bars are stamped at their open; like validate_bars, age is measured from completion.
+        try:
+            bar_interval = interval_delta(str((provenance.get("data_range") or {}).get("interval")))
+        except (TypeError, ValueError):
+            bar_interval = timedelta(0)  # unknown interval: keep the stricter open-time basis
+        if bar_interval >= timedelta(days=1):
+            bar_interval = timedelta(0)  # only intraday bars complete within a session
+        data_observed_at = min(data_timestamp + bar_interval, evaluated_at)
+        if (evaluated_at - data_observed_at > min(
                 self.settings.max_market_data_age,
                 self.risk_engine.limits.max_market_data_age
                 if self.risk_engine.limits is not None
@@ -603,6 +612,7 @@ class TradeProposalService:
             "opportunity_id": opportunity_id,
             "snapshot_id": snapshot_id,
             "data_timestamp": data_timestamp,
+            "data_observed_at": data_observed_at,
             "opportunity_as_of": opportunity_as_of,
             "strategy_version": generation["strategy_version"],
         }, None

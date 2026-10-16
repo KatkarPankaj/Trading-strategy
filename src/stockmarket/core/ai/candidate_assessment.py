@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from math import isfinite
 from typing import Any, Callable, Mapping, Protocol
@@ -271,6 +271,10 @@ class CandidateAssessmentService:
         self.outcome_feedback = outcome_feedback
         self.strategy_ranker: Callable[..., Mapping[str, Any]] | None = None
         self.decision_snapshot: Callable[[AIResearchOpportunity], Mapping[str, Any]] | None = None
+        # (strategy_name, instrument_id) -> None when qualified for automatic selection, else a
+        # reason code. Left unwired, every automatic selection stays blocked.
+        self.automatic_qualification: Callable[[str, str], str | None] | None = None
+        self.automatic_evidence_max_age: timedelta | None = None  # operator-set; None blocks
 
     @property
     def configuration_fingerprint(self) -> str:
@@ -302,6 +306,7 @@ class CandidateAssessmentService:
         snapshot_id: str,
         *,
         strategy_allowlist: tuple[str, ...] | None = None,
+        selectable: tuple[str, ...] | None = None,
     ) -> AIResearchOpportunity:
         if not isinstance(snapshot_id, str) or not snapshot_id.strip():
             raise ValueError("snapshot_id must be a non-empty string")
@@ -316,6 +321,10 @@ class CandidateAssessmentService:
             strategies = {
                 name: self.strategies[name] for name in strategy_allowlist
             }
+        # The context keeps the full catalog for traceability; only ``selectable`` may be chosen.
+        choices = tuple(strategies) if selectable is None else selectable
+        if not choices or any(name not in strategies for name in choices):
+            raise ValueError("selectable strategies must be a non-empty subset of the allowlist")
         row = self.repository.get_snapshot(snapshot_id)
         if row is None:
             raise KeyError(f"unknown research snapshot {snapshot_id!r}")
@@ -414,7 +423,7 @@ class CandidateAssessmentService:
                 },
             }
             selection_request = json.dumps({
-                "available_strategies": tuple(strategies),
+                "available_strategies": choices,
                 "research": selection_context,
             }, sort_keys=True, separators=(",", ":"), default=str)
             if len(selection_request) > self.analyst.max_input_chars:
@@ -424,7 +433,7 @@ class CandidateAssessmentService:
                 selection_result, selection = self.analyst.select_strategies(
                     instrument_id=context.instrument_id,
                     as_of=context.as_of,
-                    available_strategies=tuple(strategies),
+                    available_strategies=choices,
                     research_context=selection_context,
                 )
                 # Selection is a second AI call made after ``assessed_at`` was taken, so
@@ -523,7 +532,7 @@ class CandidateAssessmentService:
             strategy_ranking_evidence=strategy_ranking_evidence,
         )
         ranking = self.rank(
-            assessment, context, strategy_names=frozenset(strategies)
+            assessment, context, strategy_names=frozenset(choices)
         ) if assessment.opportunity_score is not None else None
         return self._persist(self._opportunity(assessment, state, ranking, assessed_at))
 
@@ -539,21 +548,32 @@ class CandidateAssessmentService:
         row = self.repository.get_snapshot(snapshot_id)
         if row is None:
             raise KeyError(f"unknown research snapshot {snapshot_id!r}")
+        instrument_id = str(row.get("instrument_id") or "")
+        blockers = {
+            name: (self.automatic_qualification(name, instrument_id)
+                   if self.automatic_qualification is not None
+                   else "AUTOMATIC_VALIDATION_POLICY_UNAPPROVED")
+            for name in strategy_allowlist}
+        qualified = tuple(name for name, blocker in blockers.items() if blocker is None)
+        if qualified:
+            # Only evidence-qualified, human-approved versions are offered; the AI may still
+            # decline, and signal, risk and execution gates re-validate everything downstream.
+            return self.assess(snapshot_id, strategy_allowlist=strategy_allowlist, selectable=qualified)
         context = self._context(row, {
             name: self.strategies[name] for name in strategy_allowlist})
         now = self._now()
         reason = (
-            "NO_VALIDATED_STRATEGY: AUTOMATIC_VALIDATION_POLICY_UNAPPROVED; "
-            "no approved evidence expiry, chronological OOS qualification and "
-            "holdout-isolated promotion policy is registered. "
-            "Strategy registration, lab activation and paper outcomes are not certification."
-        )
+            "NO_VALIDATED_STRATEGY: no strategy for this instrument passed automatic qualification "
+            "(ACTIVE_FOR_PAPER lab version, paper-review-v1 holdout evidence, unexpired evidence). "
+            + "; ".join(f"{name}={blocker}" for name, blocker in sorted(blockers.items()))
+        )[:2000]
         assessment = self._failed_assessment(
             context, AssessmentStatus.NO_VALIDATED_STRATEGY,
             self.analyst.provider_name, now, reason)
         assessment = replace(
             assessment, outcome="NO_TRADE",
-            rejection_reasons=("AUTOMATIC_VALIDATION_POLICY_UNAPPROVED",),
+            rejection_reasons=tuple(sorted(set(blockers.values())))[:10]
+            or ("AUTOMATIC_VALIDATION_POLICY_UNAPPROVED",),
             explanation=reason)
         return self._persist(self._opportunity(
             assessment, OpportunityState.REJECTED, None, now))

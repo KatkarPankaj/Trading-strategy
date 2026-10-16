@@ -490,6 +490,7 @@ class MarketScanner:
         allowed_markets: Sequence[str] | None = None,
         allowed_asset_classes: Sequence[AssetClass] | None = None,
         max_concurrency: int | None = None,
+        deprioritized: Sequence[str] = (),
     ) -> ScanResult:
         try:
             selected_mode = ScanMode(mode)
@@ -567,7 +568,11 @@ class MarketScanner:
         candidates = self._rank(candidates, accepted)
         accepted_ids = {c.instrument_id for c in accepted}
         accepted = [c for c in candidates if c.instrument_id in accepted_ids]
-        accepted.sort(key=lambda candidate: (-candidate.preliminary_score, candidate.instrument_id))
+        # Deprioritized (long-HOLD) instruments rank after every other accepted candidate but
+        # remain selectable when too few alternatives pass the same deterministic filters.
+        rotated = frozenset(deprioritized)
+        accepted.sort(key=lambda candidate: (
+            candidate.instrument_id in rotated, -candidate.preliminary_score, candidate.instrument_id))
         failed_count = sum(1 for _, failed in outcomes if failed)
         evaluated_count = len(instruments) - failed_count
         status = (

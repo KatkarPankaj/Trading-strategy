@@ -156,11 +156,15 @@ class AutonomousResearchService:
         as_of: datetime | None = None,
         top_n: int | None = None,
         validated_selection: bool = False,
+        deprioritized: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         if mode != "PAPER":
             raise AutonomousResearchError("autonomous opportunity discovery is PAPER-only")
         if not isinstance(validated_selection, bool):
             raise ValueError("validated_selection must be a bool")
+        if not isinstance(deprioritized, tuple) or len(deprioritized) > 500 or any(
+                not isinstance(item, str) or not item.strip() for item in deprioritized):
+            raise ValueError("deprioritized must be a tuple of at most 500 instrument ids")
         if self.strategy_refresh is not None:
             self.strategy_refresh()
         if not isinstance(idempotency_key, str) or not idempotency_key.strip() \
@@ -264,6 +268,9 @@ class AutonomousResearchService:
             "selection_scope": "VALIDATED_AUTOMATIC" if validated_selection else "EXPERIMENTAL_RESEARCH",
             "instrument_scope_fingerprint": instrument_scope_fingerprint,
         }
+        if deprioritized:
+            # Ranking hint only: deprioritized instruments stay eligible and in the universe.
+            request["deprioritized"] = sorted(set(deprioritized))
         request_hash = hashlib.sha256(
             json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -305,6 +312,8 @@ class AutonomousResearchService:
                     allowed_asset_classes=tuple(
                         AssetClass(item) for item in request["asset_classes"]),
                     max_concurrency=self.settings.max_concurrency,
+                    **({"deprioritized": tuple(request["deprioritized"])}
+                       if request.get("deprioritized") else {}),
                 )
                 if result.status.value == "FAILED":
                     raise AutonomousResearchError("research scanner failed")

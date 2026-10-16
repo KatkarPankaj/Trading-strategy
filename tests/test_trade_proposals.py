@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
@@ -385,6 +386,36 @@ class TradeProposalServiceTests(unittest.TestCase):
         self.assertEqual(self.db.query("SELECT * FROM trade_proposals"), [])
         self.assertEqual(self.db.query("SELECT * FROM orders"), [])
         self.assertEqual(self.portfolio.positions(), {})
+
+    def _bar_opened(self, opened_at: datetime, interval: str) -> None:
+        payload = json.loads(self.db.query(
+            "SELECT payload FROM generated_strategy_signals WHERE generation_id = ?",
+            (GENERATION_ID,))[0]["payload"])
+        payload["provenance"]["data_range"] = {"interval": interval}
+        self.db.execute(
+            "UPDATE generated_strategy_signals SET data_timestamp = ?, payload = ? "
+            "WHERE generation_id = ?", (opened_at.isoformat(), json.dumps(payload), GENERATION_ID))
+        self.db.execute("UPDATE signals SET timestamp = ? WHERE signal_id = ?",
+                        (opened_at.isoformat(), str(SIGNAL_ID)))
+
+    def test_intraday_bar_age_is_measured_from_bar_completion(self) -> None:
+        # Regression: a just-completed 5m bar (opened 6m20s ago) was rejected as STALE_SIGNAL.
+        self._bar_opened(EVALUATED_AT - timedelta(minutes=6, seconds=20), "5m")
+        result = self.service.evaluate(RUN_ID, INSTRUMENT.instrument_id)
+        self.assertNotIn("STALE_SIGNAL", result.get("rejection_reason") or "")
+        self.assertEqual(result["status"], "RISK_APPROVED", result.get("rejection_reason"))
+
+    def test_bar_completed_beyond_max_age_is_still_stale(self) -> None:
+        self._bar_opened(EVALUATED_AT - timedelta(minutes=11), "5m")
+        result = self.service.evaluate(RUN_ID, INSTRUMENT.instrument_id)
+        self.assertEqual(result["status"], "RISK_REJECTED")
+        self.assertIn("STALE_SIGNAL", result["rejection_reason"])
+
+    def test_daily_bar_does_not_gain_a_completion_allowance(self) -> None:
+        self._bar_opened(EVALUATED_AT - timedelta(minutes=30), "1d")
+        result = self.service.evaluate(RUN_ID, INSTRUMENT.instrument_id)
+        self.assertEqual(result["status"], "RISK_REJECTED")
+        self.assertIn("STALE_SIGNAL", result["rejection_reason"])
 
     def test_stale_signal_is_rejected_and_hard_stop_is_required(self) -> None:
         self.db.execute(

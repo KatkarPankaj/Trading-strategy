@@ -23,6 +23,7 @@ from .data.quality import completed_intraday_bars, validate_bars
 from .market_session import MarketSession
 from .markets import MarketRegistry, SessionPhase, UnknownMarket
 from .models import Instrument, Signal, SignalSide, TradingStatus
+from .regime import RegimeLabel
 from .strategies.base import Strategy, StrategyMetadata, strategy_parameters_hash
 
 logger = logging.getLogger(__name__)
@@ -858,6 +859,11 @@ class SignalGenerationService:
             )
         signal_id = uuid5(NAMESPACE_URL, f"stockmarket:signal:{idempotency_key}")
         strategy_signal = replace(strategy_signal, signal_id=signal_id)
+        if strategy_signal.regime == "UNKNOWN":
+            # Label for traceability/outcome attribution only; never a risk or entry input.
+            label = _snapshot_regime(snapshot, instrument_id, evaluation_as_of)
+            if label is not None:
+                strategy_signal = replace(strategy_signal, regime=label)
         result = {
             "generation_id": uuid5(
                 NAMESPACE_URL, f"stockmarket:signal-generation:{idempotency_key}").hex,
@@ -1094,3 +1100,18 @@ class SignalGenerationService:
         if isinstance(value, frozenset):
             return sorted(value, key=str)
         raise TypeError(f"cannot serialize {type(value).__name__}")
+
+
+def _snapshot_regime(snapshot: Mapping[str, Any], instrument_id: str, as_of: datetime) -> str | None:
+    """Regime label from the snapshot's own VALID evidence, or None if absent or not point-in-time."""
+    for item in snapshot.get("evidence") or ():
+        if not isinstance(item, Mapping) or item.get("component") != "regime"                 or item.get("instrument_id") != instrument_id or item.get("quality") != "VALID":
+            continue
+        try:
+            observed = datetime.fromisoformat(str(item.get("observed_at")))
+        except ValueError:
+            continue
+        label = (item.get("payload") or {}).get("label")
+        if observed.tzinfo is not None and observed <= as_of                 and label in {member.value for member in RegimeLabel}:
+            return str(label)
+    return None
