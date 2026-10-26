@@ -12,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .audit_trail import AuditContext
 from .brokers import BrokerError
+from .data.provider import interval_delta
 from .executors import TradingMode
 from .models import (
     Instrument,
@@ -193,13 +194,22 @@ class PaperProposalExecutionService:
         generated_at = _parse_aware(
             generation.get("generated_at") if generation else None,
             "signal generation timestamp")
+        # Bars are stamped at their open; as in TradeProposalService, age runs from completion.
+        provenance = ((generation or {}).get("payload") or {}).get("provenance") or {}
+        try:
+            bar_interval = interval_delta(str((provenance.get("data_range") or {}).get("interval")))
+        except (TypeError, ValueError):
+            bar_interval = timedelta(0)
+        if bar_interval >= timedelta(days=1):
+            bar_interval = timedelta(0)
+        signal_observed_at = min(signal.timestamp + bar_interval, now)
         if (
             proposal_at > now
             or generated_at > now
             or signal.timestamp > now
             or now - proposal_at > self.max_age
             or now - generated_at > self.max_age
-            or now - signal.timestamp > self.max_age
+            or now - signal_observed_at > self.max_age
         ):
             raise PaperLifecycleError("proposal is stale and must be regenerated", code="PROPOSAL_STALE")
         if not self.markets.is_regular_session(instrument.market, now):

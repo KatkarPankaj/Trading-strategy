@@ -251,6 +251,36 @@ class PaperProposalExecutionTests(TestCase):
         self.trading.submit_signal.assert_not_called()
         self.assertEqual(self.store.proposal_submissions.records, {})
 
+    def _signal_on_bar(self, bar_open, interval):
+        self.store.signals.get.return_value["timestamp"] = bar_open.isoformat()
+        generation = self.store.signal_generations.get_by_signal.return_value
+        generation["generated_at"] = NOW.isoformat()
+        generation["payload"] = (
+            {} if interval is None
+            else {"provenance": {"data_range": {"interval": interval}}})
+
+    def test_completed_bar_signal_is_aged_from_bar_close_not_open(self):
+        # Regression: 5m bar opened 6m15s ago closed 1m15s ago; it is fresh at submission.
+        self._signal_on_bar(NOW - timedelta(minutes=6, seconds=15), "5m")
+        result = self.service.submit(
+            "proposal-1", operator="operator", sizing_mode="MANUAL_OVERRIDE", quantity=5)
+        self.assertEqual(result["execution"], "PAPER_ORDER_CREATED")
+        self.trading.submit_signal.assert_called_once()
+
+    def test_bar_closed_beyond_max_age_or_unknown_interval_stays_stale(self):
+        for bar_open, interval in (
+                (NOW - timedelta(minutes=10, seconds=1), "5m"),
+                (NOW - timedelta(minutes=6, seconds=15), None),
+                (NOW - timedelta(minutes=6, seconds=15), "1d")):
+            with self.subTest(interval=interval, bar_open=bar_open):
+                self._signal_on_bar(bar_open, interval)
+                with self.assertRaisesRegex(PaperLifecycleError, "stale"):
+                    self.service.submit(
+                        "proposal-1", operator="operator",
+                        sizing_mode="MANUAL_OVERRIDE", quantity=5)
+        self.trading.submit_signal.assert_not_called()
+        self.assertEqual(self.store.proposal_submissions.records, {})
+
     def test_replay_returns_restored_order_without_second_submission(self):
         self.store.proposal_submissions.records["proposal-1"] = {
             "client_order_id": "proposal-" + uuid5(
