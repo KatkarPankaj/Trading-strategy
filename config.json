@@ -1,8 +1,11 @@
 {
     "symbol": "RELIANCE.NS",
     "interval": "5m",
-    "period": "5d",
+    "period": "30d",
     "market_timezone": "Asia/Kolkata",
+    "market_open_time": "09:15",
+    "market_close_time": "15:30",
+    "late_entry_start_time": "12:00",
     "opening_range_minutes": 15,
     "entry_cutoff_time": "13:30",
     "square_off_time": "15:15",
@@ -16,5 +19,6 @@
     "slippage_pct": 0.0005,
     "allow_short": false,
     "volume_ma_window": 20,
-    "volume_spike_threshold": 1.2
+    "volume_spike_threshold": 1.2,
+    "vwap_price_source": "typical"
 }

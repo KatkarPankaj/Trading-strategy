@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -16,6 +16,16 @@ from ..core.research import ResearchEvidence
 from ..core.risk import OrderIntent
 
 _ID = r"^[A-Za-z0-9:._\-^=&]+$"
+
+
+class PaperExperimentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    experiment_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    start_date: date
+    duration_days: int = Field(default=30, ge=1, le=366, strict=True)
+    benchmark_instrument_id: str = Field(min_length=1, max_length=128, pattern=_ID)
+    operator: str = Field(min_length=1, max_length=64)
+    acceptance_policy_ref: str = Field(min_length=1, max_length=256)
 
 
 class WatchInstrumentBody(BaseModel):

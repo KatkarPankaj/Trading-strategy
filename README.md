@@ -1,5 +1,28 @@
 # Global Market Research and Paper-Trading Platform
 
+## Quick start: current US PAPER dashboard (Windows / VS Code)
+
+1. Open this repository in VS Code and use **Python: Select Interpreter** to
+   select the environment with the project dependencies installed.
+2. Check that ports 8000 and 8501 are not already serving this application;
+   reuse existing services rather than starting a second API worker.
+3. Verify the existing US paper database and local API/provider secret files.
+   Do not reset the account or apply migrations just to start the dashboard.
+4. Open the command palette (**Ctrl+Shift+P**), select **Tasks: Run Task**, then
+   **Start US Paper Auto-Loop API**. Wait for application startup on port 8000.
+5. Select **Tasks: Run Task** again, then **Start platform PAPER dashboard**.
+6. Open **<http://127.0.0.1:8501/>**. Confirm **PAPER**, **US**, recovery status,
+   protective-monitor health and entry-gate diagnostics before expecting orders.
+
+**Safety:** the existing US task enables automatic **exploratory/unvalidated
+paper** trading when all independent gates permit it. Starting services does not
+override a pause, failed recovery, stale data or risk rejection. A `PARTIAL`
+recovery keeps new entries blocked and requires investigation, not bypassing.
+The task currently uses OpenAI, not Ollama.
+
+See [the complete startup procedure](#windows-start-the-current-us-paper-trading-dashboard)
+for credential checks, port checks, database precautions and API health commands.
+
 The API-backed dashboard includes a dedicated **Market Watch** workspace for
 US/India canonical-instrument search, a persisted shared watchlist and explicit,
 timestamped quote refresh. Enable both observation markets with `MARKETS=US,IN`;
@@ -163,6 +186,70 @@ The API's separate market-intelligence service exposes `POST /intelligence/oppor
 Authenticated `POST /paper/cycles` manually runs a bounded PAPER-only research-to-order cycle with durable idempotency and per-candidate checkpoints; cycle status and explicit recovery are available through `/paper/cycles` routes and the `paper-cycle*` CLI commands. Paper executor orders/attempts and fill sequence are persisted for restart reconciliation (migrations V13/V14), and retry is authorized only when durable executor state proves the stable client order was not accepted. `POST /paper/positions/manage` evaluates fresh quotes against persisted entry stops/targets and routes exits through the same boundary. Cycles and exit monitoring are scheduled only by the opt-in in-process loop (`PAPER_AUTO_LOOP=true`, PAPER mode, single market, one API worker); otherwise they are manual. Automatic selection may choose only an `ACTIVE_FOR_PAPER` Strategy Lab version for the instrument that still passes `paper-review-v1` (preregistered holdout, cost-adjusted lower 95% expectancy bound > 0, drawdown <= 10%, explicit human approval) and whose holdout ended within the operator-set `AUTOMATIC_EVIDENCE_MAX_AGE_DAYS`; otherwise the cycle abstains with `NO_VALIDATED_STRATEGY`, records the per-strategy reason and places no orders. Unset expiry keeps every automatic entry blocked. `GET /paper/diagnostics` (also shown on the dashboard) reports the last cycle time, market, bar freshness, strategy eligibility, primary rejection reason and order/fill counts. None of this establishes unattended operation or production readiness. Both legacy Streamlit dashboard order mutators fail closed before changing their separate local paper state; see [docs/EXECUTION_BOUNDARY.md](docs/EXECUTION_BOUNDARY.md). Active-order reservation remains process-local, so only one API worker is supported.
 
 Platform API setup, secret handling, migration, backup, restore, health checks, and current operational limitations are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+### Windows: start the current US paper-trading dashboard
+
+Use the API-backed [dashboard_app.py](dashboard_app.py), not the legacy
+[dashboard.py](dashboard.py). The launch configuration is maintained in
+[.vscode/tasks.json](.vscode/tasks.json).
+
+1. Open this repository folder in VS Code. Run **Python: Select Interpreter**
+   and select the Python environment where `requirements.txt` is installed
+   (see Setup above).
+2. Before starting, check whether the services already exist:
+   ```powershell
+   Get-NetTCPConnection -State Listen -LocalPort 8000,8501 -ErrorAction SilentlyContinue |
+       Select-Object LocalPort,OwningProcess
+   ```
+   Reuse existing services; do not launch a second API worker. Do not stop an
+   existing worker during a cycle merely to refresh the dashboard.
+3. Verify the existing local secret files without printing their contents:
+   ```powershell
+   'secrets\local_dashboard.secret','secrets\twelvedata_api_key.txt',
+   'secrets\ai_api_key.txt','secrets\finhub-api-key' |
+       ForEach-Object { [pscustomobject]@{Path=$_; Exists=(Test-Path -LiteralPath $_)} }
+   ```
+   These supply API authentication, Twelve Data, OpenAI and Finnhub respectively.
+   Obtain missing credentials through your approved secret-handling process;
+   never commit them.
+4. Confirm that the existing `outputs\paper_auto_us.db` is the intended US/USD
+   paper account and has the required schema. The task sets `AUTO_MIGRATE=false`.
+   If startup reports missing migrations, stop and follow the separately approved
+   backup/migration procedure in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+   Do not delete, reset, fund or replace the database to fix startup.
+5. For an explicitly authorized automatic US paper session, run **Tasks: Run
+   Task** from the command palette and choose **Start US Paper Auto-Loop API**.
+   Wait for Uvicorn's application-startup confirmation on port 8000.
+   Use the VS Code task itself: copying only its command omits `options.env`,
+   including research sessions and news settings.
+6. Run **Tasks: Run Task** again and choose **Start platform PAPER dashboard**.
+   Open <http://127.0.0.1:8501/>. The API is <http://127.0.0.1:8000/>.
+7. Verify the running configuration and gates:
+   ```powershell
+   $headers = @{
+       Authorization = 'Bearer ' + (Get-Content -LiteralPath 'secrets\local_dashboard.secret' -Raw).Trim()
+   }
+   Invoke-RestMethod http://127.0.0.1:8000/health
+   Invoke-RestMethod http://127.0.0.1:8000/paper/loop -Headers $headers |
+       ConvertTo-Json -Depth 6
+   Invoke-RestMethod http://127.0.0.1:8000/paper/diagnostics -Headers $headers |
+       ConvertTo-Json -Depth 6
+   Remove-Variable headers
+   ```
+   Confirm PAPER mode, US market, recovery completion, monitor health and entry
+   controls. Review session/calendar, feed freshness, strategy and rejection
+   diagnostics before expecting orders. `RUNNING` alone does not mean entries
+   are permitted. Do not clear leases, bypass recovery or resume paused entries
+   just to obtain an order.
+
+The current US task opts into a 10-minute automatic cycle and
+`PAPER_EXPLORATORY_AUTO_ENTRIES=true`: exploratory strategies are **not validated
+performance certifications**. This task is not a dashboard-only/read-only launch.
+Risk, quote, session, instrument and paper-execution gates still apply; starting
+the task neither guarantees an order nor overrides persisted safety controls.
+It uses OpenAI `gpt-4.1-mini`, not local Ollama. The earlier Ollama connectivity
+test did not switch the application to `qwen3:8b`. India execution remains a
+separate readiness task.
 
 ## Launch legacy research dashboard
 The dashboard can still display:

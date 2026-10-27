@@ -300,6 +300,56 @@ class ProtectiveMonitorTests(TestCase):
         self.assertEqual(len(loop.status()["recovery_failures"]), 1)
         self.assertEqual(self.f.store.orders.all(), [])
 
+    def test_pre_research_monitor_failure_recovers_without_replaying_entries(self):
+        self.monitor.enable()
+        self.assertEqual(self.monitor.run_once()["status"], "HEALTHY")
+        self.assertFalse(self.monitor.status()["entry_ready"])
+        cycles = self.ctx.autonomous_paper_trading
+        loop = self.ctx.paper_loop
+        with patch.object(cycles.research, "run") as research, \
+                patch.object(cycles.execution, "submit") as submit:
+            failed = cycles.run(
+                "US_ALL", idempotency_key="startup-monitor-failure", operator="fixture")
+            self.assertEqual((failed["status"], failed["stage"]),
+                             ("PARTIAL", "MONITORING_FAILED"))
+            with patch.object(loop, "tick"), \
+                    patch.object(loop._stop, "wait", side_effect=lambda _: loop._stop.set()):
+                loop._run()
+            recovered = cycles.get_run(failed["run_id"])
+            self.assertEqual((recovered["status"], recovered["stage"]),
+                             ("FAILED", "RECOVERY_OBSOLETE"))
+            self.assertEqual(recovered["payload"]["recovery_disposition"]["reason"],
+                             "MONITORING_FAILED_BEFORE_RESEARCH")
+            self.assertFalse(recovered["payload"]["recovery_disposition"]["entries_retried"])
+            self.assertEqual(recovered["payload"]["failure"], failed["payload"]["failure"])
+            research.assert_not_called()
+            submit.assert_not_called()
+        self.assertTrue(self.monitor.recovery_complete)
+        self.assertEqual(loop.status()["recovery_failures"], [])
+        self.assertEqual(self.f.store.autonomous_paper_cycles.unfinished(), [])
+        self.assertEqual(self.f.store.orders.all(), [])
+        self.assertTrue(self.monitor.status()["entry_ready"])
+        self.mono.now += 41
+        self.assertFalse(self.monitor.status()["entry_ready"])
+
+    def test_monitor_failure_with_candidate_work_is_not_discarded_on_recovery(self):
+        self.monitor.enable()
+        self.monitor.run_once()
+        cycles = self.ctx.autonomous_paper_trading
+        failed = cycles.run(
+            "US_ALL", idempotency_key="monitor-with-work", operator="fixture")
+        with patch.object(cycles.repository, "candidates",
+                          return_value=[{"candidate_id": "XNAS:AAPL"}]), \
+                patch.object(cycles.research, "run") as research, \
+                patch.object(cycles.execution, "submit") as submit:
+            recovered = cycles.recover(failed["run_id"])
+        self.assertEqual((recovered["status"], recovered["stage"]),
+                         ("PARTIAL", "MONITORING_FAILED"))
+        self.assertNotIn("recovery_disposition", recovered["payload"])
+        self.assertFalse(self.monitor.status()["entry_ready"])
+        research.assert_not_called()
+        submit.assert_not_called()
+
     def test_reconciliation_failure_and_recovery_pending_block_scan_and_final_submission(self):
         proposal = self.f.propose(self.client)
         self.monitor.enable()

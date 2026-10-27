@@ -4,6 +4,38 @@ Date: 2026-10-15. Baseline: `310b406`. Scope: local source, existing persisted
 decisions, read-only loop/health/recovery endpoints, and isolated offline tests.
 This is not deployment, exchange-feed certification or a profitability claim.
 
+## 2026-10-26: pre-research recovery deadlock
+
+Read-only API inspection of cycle `c4a3ee2638e15933aecab8651461c3ad`
+confirmed `PARTIAL / MONITORING_FAILED`, zero candidates, no research run and
+`PROTECTIVE_MONITOR_NOT_READY`. Startup recovery calls the cycle monitoring
+check before the loop marks protective-monitor recovery complete; repeating
+this pre-research cycle therefore cannot resolve the blocker.
+
+`AutonomousPaperTradingService._execute` now retires only a recovering
+`MONITORING_FAILED` cycle with no linked research run and no candidate work as
+`FAILED / RECOVERY_OBSOLETE`. It retains the original failure, records
+`MONITORING_FAILED_BEFORE_RESEARCH` and `entries_retried=false`, and uses the
+existing lease-protected finish/event mechanism. It never reruns historical
+research or creates an entry during this disposition. Cycles with candidate
+work are not discarded. Protective monitoring and final entry admission remain
+independent: failed recovery, unhealthy/stale monitoring and existing risk and
+operator controls still block entries.
+
+Files: `src/stockmarket/core/autonomous_paper_trading.py` and
+`tests/test_protective_monitor.py`. Executed focused validation:
+`PYTHONPATH=src;tests`, `python -m unittest test_protective_monitor
+test_autonomous_paper_trading test_paper_loop test_paper_end_to_end`:
+86 tests passed. Full validation: `PYTHONPATH=src`,
+`python -m unittest discover -s tests`: 781 tests ran in 385.142 seconds,
+OK with 5 skipped. Editor diagnostics reported no errors in the two changed
+Python files; `git diff --check` passed. Fixtures include real cycle persistence and startup-loop
+recovery, no replayed research/orders, retained failures, candidate-work
+protection, stale-monitor rejection and existing failed-recovery rejection.
+No operator database repair, restart, funding or control change was performed.
+The running API needs a separately approved restart to load this change; new
+entries remain subject to all runtime gates.
+
 ## 1. Prioritized root-cause report
 
 | Priority | Finding and evidence | Disposition |

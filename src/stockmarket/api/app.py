@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Mapping
@@ -38,6 +38,8 @@ from ..core.paper_lifecycle import (
     PaperProposalExecutionService,
 )
 from ..core.paper_diagnostics import paper_diagnostics
+from ..core.paper_experiment import PaperExperimentService
+from ..core.strategies.base import strategy_parameters, strategy_parameters_hash
 from ..core.personal_research import PersonalResearchService
 from ..core.autonomous_paper_trading import (
     AutonomousPaperCycleError,
@@ -68,6 +70,7 @@ from ..core.trading_service import (
     summarize_trades,
 )
 from .schemas import (
+    PaperExperimentBody,
     WatchInstrumentBody,
     StrategyLabProposalBody,
     StrategyLabEvaluationBody,
@@ -1159,6 +1162,67 @@ def create_app(ctx: ApiContext) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/paper/experiments", dependencies=[Depends(auth)])
+    def register_paper_experiment(body: PaperExperimentBody) -> dict[str, Any]:
+        if ctx.mode != "PAPER" or ctx.settings.execution.mode is not TradingMode.PAPER:
+            raise HTTPException(403, "experiments require PAPER mode")
+        if ctx.paper_loop is None or ctx.scanner is None or ctx.candidate_assessment is None:
+            raise HTTPException(409, "configured single-market paper loop and research are required")
+        loop = ctx.paper_loop
+        market = ctx.markets.get(loop.settings.market)
+        benchmark = ctx.instruments.get(body.benchmark_instrument_id)
+        if benchmark is None or benchmark.market != market.code \
+                or benchmark.currency != ctx.settings.base_currency or not benchmark.tradable:
+            raise HTTPException(422, "benchmark must be a tradable canonical instrument in the account market/currency")
+        definition, instruments = ctx.scanner.get_universe(loop.settings.universe_id)
+        if tuple(definition.markets) != (market.code,) or not instruments \
+                or any(i.market != market.code or i.currency != ctx.settings.base_currency for i in instruments):
+            raise HTTPException(409, "experiment requires a nonempty single-market account-currency universe")
+        catalog = {
+            name: {"version": strategy.version, "parameters": strategy_parameters(strategy),
+                   "parameters_hash": strategy_parameters_hash(strategy)}
+            for name, strategy in ctx.candidate_assessment.strategies.items()
+        }
+        if not catalog or any(v["parameters_hash"] is None for v in catalog.values()):
+            raise HTTPException(409, "experiment requires versioned strategy configuration fingerprints")
+        runtime = _plain({
+            "mode": "PAPER", "single_market": True, "market": market.code,
+            "timezone": market.timezone, "currency": ctx.settings.base_currency,
+            "universe": definition, "instrument_ids": sorted(i.instrument_id for i in instruments),
+            "benchmark": benchmark, "strategy_baselines": catalog,
+            "loop": asdict(loop.settings), "risk": asdict(ctx.settings.risk),
+            "selection_mode": "EXPLORATORY_UNVALIDATED" if loop.cycles.exploratory else "VALIDATED_AUTOMATIC",
+            "market_data_provider": ctx.settings.data_provider,
+            "market_data_routes": ctx.settings.data_provider_routes,
+            "ai_model_version": ctx.candidate_assessment.model_version,
+            "ai_provider": ctx.candidate_assessment.analyst.provider_name,
+            "cost_policy_status": "NOT_INDEPENDENTLY_CERTIFIED",
+        })
+        try:
+            return PaperExperimentService(
+                ctx.store, mode=TradingMode.PAPER, clock=loop.clock,
+            ).register(
+                experiment_id=body.experiment_id, start_date=body.start_date,
+                duration_days=body.duration_days, operator=body.operator,
+                acceptance_policy_ref=body.acceptance_policy_ref, runtime=runtime)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/paper/experiments/{experiment_id}", dependencies=[Depends(auth)])
+    def paper_experiment_status(experiment_id: str) -> dict[str, Any]:
+        if ctx.mode != "PAPER":
+            raise HTTPException(403, "experiments require PAPER mode")
+        try:
+            return PaperExperimentService(
+                ctx.store, mode=TradingMode.PAPER,
+                clock=ctx.paper_loop.clock if ctx.paper_loop is not None else
+                lambda: datetime.now(timezone.utc),
+            ).status(experiment_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/paper/cycles", dependencies=[Depends(auth)])
     def paper_cycles(

@@ -2182,6 +2182,11 @@ class ProspectiveRepository(_Repository):
                    (manifest_id, payload_hash, payload, created_at)
                    VALUES (?, ?, ?, ?) ON CONFLICT(manifest_id) DO NOTHING""",
                 "SELECT payload FROM prospective_datasets WHERE manifest_id = ?"),
+            "prospective_experiments": (
+                """INSERT INTO prospective_experiments
+                   (experiment_id, payload_hash, payload, created_at)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(experiment_id) DO NOTHING""",
+                "SELECT payload FROM prospective_experiments WHERE experiment_id = ?"),
         }[table]
         with self._db.transaction():
             self._db.execute(insert, (identity, self.digest(payload), body, *extra.values()))
@@ -2204,6 +2209,16 @@ class ProspectiveRepository(_Repository):
     def save_decision(self, payload: Mapping[str, Any]) -> None:
         self._save("prospective_decisions", payload["decision_id"], payload,
                    {"opportunity_id": payload["opportunity_id"], "decision_at": payload["decision_at"]})
+
+    def save_experiment(self, payload: Mapping[str, Any]) -> None:
+        self._save("prospective_experiments", payload["experiment_id"], payload,
+                   {"created_at": payload["created_at"]})
+
+    def experiment(self, identity: str) -> dict[str, Any] | None:
+        rows = self._read(
+            "SELECT payload_hash, payload FROM prospective_experiments WHERE experiment_id = ?",
+            (identity,))
+        return rows[0] if rows else None
 
     def decisions(self) -> list[dict[str, Any]]:
         return bounded_rows(self._read(

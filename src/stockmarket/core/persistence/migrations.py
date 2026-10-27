@@ -444,6 +444,12 @@ _SQLITE_HISTORY_TRIGGERS = [
     for event in ("INSERT", "UPDATE", "DELETE")
 ]
 
+_V27 = [
+    """CREATE TABLE prospective_experiments (
+        experiment_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL,
+        payload TEXT NOT NULL, created_at TEXT NOT NULL)""",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -467,7 +473,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (23, "immutable_prospective_evidence", _V23),
     (24, "bounded_execution_history_access", _V24),
     (25, "shared_market_watchlist", _V25),
-    (26, "durable_execution_history_revision", _V26)]
+    (26, "durable_execution_history_revision", _V26),
+    (27, "preregistered_paper_experiments", _V27)]
 
 
 def applied_versions(db: Database) -> set[int]:

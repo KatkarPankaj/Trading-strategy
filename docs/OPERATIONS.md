@@ -1338,3 +1338,63 @@ research-country switch. Optional `RESEARCH_SESSIONS` overrides policy only;
 calendar validation remains mandatory. Migration
 V15 persists advisory runs; existing execution/recovery workflows below apply
 only when personal mode is disabled and instrument metadata has been verified.
+# Preregistering a calendar-day PAPER experiment
+
+This increment adds protocol registration, **not a complete experiment runner**.
+Do not count earlier trades as a preregistered experiment or treat registration
+as permission to trade. Existing scanner, research, strategy eligibility, risk,
+execution and protective-monitor controls remain authoritative.
+
+Migration **V27** adds `prospective_experiments`, using the existing prospective
+repository's immutable identity and checksummed-read pattern. It does not backfill
+history. Apply it only to an isolated development database first. Updating an
+operator database and restarting its worker require separate approval and the
+existing backup/migration procedure; `AUTO_MIGRATE=false` startup will refuse a
+database without V27. No running operator database was migrated for this increment.
+
+After approved migration/source alignment:
+
+1. Review a written protocol defining benchmark, strategy baselines, costs,
+   model/prediction scoring and acceptance criteria. No arbitrary profitability
+   thresholds or automatic model promotions are provided.
+2. Choose a **future market-local date**. The authenticated request below defaults
+   to 30 calendar days, including weekends/holidays, from local midnight through
+   the exclusive midnight after day 30. DST is handled in the market timezone.
+   Supply a real benchmark instrument already in the canonical runtime master,
+   in the same market/account currency; no symbol substitution or implicit FX.
+3. `POST /paper/experiments` with a JSON body such as:
+   ```json
+   {
+     "experiment_id": "us-paper-reviewed-001",
+     "start_date": "<future YYYY-MM-DD>",
+     "duration_days": 30,
+     "benchmark_instrument_id": "<canonical benchmark instrument ID>",
+     "operator": "<operator>",
+     "acceptance_policy_ref": "<reviewed protocol document/version>"
+   }
+   ```
+   Use the same bearer authentication as other paper API calls. Registration
+   requires the configured single-market paper loop and research services. It
+   freezes universe definition/membership, benchmark metadata, registered strategy
+   versions/configuration fingerprints, advisory AI provider/model identifier,
+   risk settings, cadence, selection mode and data-provider configuration.
+   An operator-supplied policy reference is **not independently verified approval**.
+4. `GET /paper/experiments/{experiment_id}` reads the saved protocol without
+   running research or placing orders. Repeating identical registration is
+   idempotent; changing a registered protocol under the same ID is rejected.
+   Protocol contents are immutable through this API and checksummed on reads,
+   but are not proof against privileged database tampering.
+5. Status is `SCHEDULED`, `OBSERVATION_WINDOW`, or `EVALUATION_DUE`, derived from
+   the clock. These are **calendar phases**, not worker/collection readiness.
+   End-of-window is never mislabeled completed evaluation.
+
+**Still blocked for a certified 30-day experiment:** binding each scheduled
+cycle/decision to the registered protocol and rejecting configuration drift;
+explicit existing-position/cash baseline; verified cost/fill assumptions;
+daily atomic financial/equity/exposure snapshots; matched benchmark prices and
+strategy-baseline returns; daily/final reports and separate prediction-quality
+metrics. Registration does not start/stop the worker or enforce its end date.
+Missing quotes and market closures must remain explicit missing observations,
+not forward-filled performance. Existing prospective decisions/attachments,
+order/fill history, outcome episodes and immutable datasets must be reused for
+these next phases rather than copied into a competing ledger.

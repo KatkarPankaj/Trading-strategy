@@ -1,5 +1,56 @@
 # Architecture Audit (Phase 0)
 
+## 2026-10-26 increment: autonomous PAPER experiment foundation
+
+Source inspected: HEAD `dcd80f0`, with existing uncommitted README/configuration
+and tested pre-research recovery fixes preserved. This is a source increment,
+not an operator migration, new experiment launch or production-readiness verdict.
+
+Verified reusable path: `MarketScanner` -> persisted `CandidateResearchService`
+and AI assessment/ranking -> `AutonomousResearchService` (Phase 2C-1) ->
+`SignalGenerationService` -> `TradeProposalService` ->
+`PaperProposalExecutionService` -> `TradingService`/RiskEngine/OrderManager ->
+paper broker/fills -> `PaperPositionManager` -> `OutcomeFeedbackService` ->
+`ProspectiveEvidenceService`. `PaperTradingLoop` schedules this path;
+`ProtectiveMonitor` independently polls exits. Existing Strategy Lab, frozen
+comparisons, configuration fingerprints, chronological windows, reserved final
+holdouts and prospective feature/label manifests must not be replaced.
+
+| Phase | Existing work / gap | Acceptance |
+| --- | --- | --- |
+| 1: preregister experiment (implemented here) | Missing calendar-day protocol registry; V27 reuses the checksummed prospective repository. Authenticated API freezes actual universe, canonical benchmark, advisory AI identifier, strategy/configuration baseline, risk and schedule. | Future-only registration; immutable/idempotent identity; 30 calendar days across DST/weekends; PAPER/single-market binding; restart persistence; no order/control side effects. |
+| 2: bind observations and report (next) | Existing decisions, orders/fills/outcomes are persisted, but not bound to an experiment; no certified daily/final portfolio-versus-benchmark report exists. | Bind cycle/decision IDs to the frozen protocol, reject drift; capture account baseline and atomic dated financial checkpoints; quote/provenance-valid benchmark snapshots; replay-idempotent daily/final metrics, including costs/exposure and explicit missing observations. |
+| 3: reproducible historical/model evaluation | Historical bars, walk-forward backtests, comparisons and prospective datasets exist. Verified 1-5 year point-in-time coverage, trained predictive artifacts and model-specific evaluation are not established. | Entitled, versioned historical data and leakage-safe features/labels; chronological train/validation/test and untouched final holdout; persist model/config/data hashes and prediction metrics separately from portfolio returns; reviewed champion/challenger acceptance, never automatic promotion. |
+
+Dependencies: current configured research uses Twelve Data, Finnhub and an
+OpenAI-compatible analyst; provider credentials, actual entitlement/rate limits,
+corporate-action/vintage quality and historical coverage require verification.
+Do not assume 1-5 years of execution-quality intraday data or complete news
+history from an installed adapter. Existing India funding, mapping and reviewed
+calendar gates remain prerequisites; Germany is deferred. No new provider,
+training dependency or AI framework is introduced.
+
+Changed files: `core/paper_experiment.py`, `core/persistence/migrations.py`,
+`core/persistence/repositories.py`, `api/schemas.py`, `api/app.py`,
+`tests/test_paper_experiment.py`, this audit and `OPERATIONS.md`.
+V27 creates only `prospective_experiments`; no operator database was changed.
+API endpoints: `POST /paper/experiments`, `GET /paper/experiments/{id}`.
+Calendar status deliberately reports `EVALUATION_DUE`, not completed performance.
+Policy references and cost certification remain explicitly unverified;
+registration cannot promote strategies, clear gates or start/stop trading.
+
+Executed on Python 3.11.6:
+`PYTHONPATH=src;tests`, `python -m unittest test_paper_experiment
+test_prospective_evidence test_paper_end_to_end test_protective_monitor`:
+74 passed. Full suite once, `PYTHONPATH=src`,
+`python -m unittest discover -s tests`: 790 ran in 353.442 seconds,
+OK with 5 disposable PostgreSQL integration tests skipped (no test DSN).
+Editor diagnostics found no errors in changed Python files; no repository-wide
+static-analysis certification is claimed. No network/broker calls were needed
+for these tests. No real 30-day experiment, benchmark performance or predictive
+model certification has been demonstrated. Verdict: PARTIAL toward the end-state;
+the preregistration foundation passes its isolated acceptance tests.
+
 Date: 2026-10-05  
 Repository: KatkarPankaj/Trading-strategy  
 Scope: Non-destructive audit of the legacy implementation (baseline). Revised after verification: sections 16-18 add the required topic coverage, an evidence inventory and a status-since-baseline table.

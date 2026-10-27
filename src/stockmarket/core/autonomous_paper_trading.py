@@ -230,6 +230,17 @@ class AutonomousPaperTradingService:
                 raise AutonomousPaperCycleError("paper cycle disappeared")
             payload = dict(run["payload"])
             request = payload["request"]
+            if recovering and run["stage"] == "MONITORING_FAILED" \
+                    and payload.get("research_run_id") is None \
+                    and not self.repository.candidates(run_id):
+                # No candidate work exists to replay; never restart old research during recovery.
+                payload["recovery_disposition"] = {
+                    "reason": "MONITORING_FAILED_BEFORE_RESEARCH",
+                    "at": self._now().isoformat(),
+                    "entries_retried": False,
+                }
+                return self._finish(
+                    run_id, payload, "FAILED", "RECOVERY_OBSOLETE", owner_token)
             self.repository.update_run(
                 run_id, status="RECOVERING" if recovering else "RUNNING",
                 stage="MANAGING_POSITIONS", payload=payload,
