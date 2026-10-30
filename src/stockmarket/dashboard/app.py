@@ -860,6 +860,15 @@ def _health(health: Any, activity: dict[str, Any] | None = None,
     if loop is not None:
         st.subheader("Paper loop and startup recovery")
         st.json(loop)
+        capacity = loop.get("monitoring_capacity")
+        if capacity is not None:
+            st.subheader("US paper data and monitoring capacity")
+            st.json(capacity)
+            if not capacity.get("monitoring_capacity_verified"):
+                st.error("US monitoring capacity is not verified. Automatic entries are blocked; "
+                         "stop-loss protection is not assured by a running monitor alone.")
+            if loop.get("entry_pause_reason"):
+                st.warning(f"Automatic entry pause: {loop['entry_pause_reason']}")
         protective = loop.get("protective_monitor")
         if protective is not None:
             st.subheader("Independent protective monitoring")
@@ -876,7 +885,8 @@ def _health(health: Any, activity: dict[str, Any] | None = None,
         if client is not None and loop.get("state") != "DISABLED":
             with st.form("paper_loop_control"):
                 st.caption("Pause/resume automatic entries only. Stop/target monitoring and "
-                           "end-of-day exits remain enabled. Resuming never clears a kill switch.")
+                           "end-of-day exits remain enabled. Resuming never clears a kill switch "
+                           "or overrides monitoring capacity, quote freshness or risk checks.")
                 enabled = st.checkbox("Allow automatic PAPER entries",
                                       value=loop.get("operator_entries_enabled", True))
                 operator = st.text_input("Paper session operator")

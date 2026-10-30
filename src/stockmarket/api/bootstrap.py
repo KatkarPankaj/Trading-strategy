@@ -59,6 +59,9 @@ from ..core.market_watch import MarketWatch
 from ..core.data.factory import market_provider_env
 from ..core.data import DataPolicy, ResilientProvider, create_market_data_provider, quote_source
 from ..core.data.provider import MarketDataProvider
+from ..core.data.routing import RoutedMarketDataProvider
+from ..core.data.twelvedata import TwelveDataProvider
+from ..core.data.twelvedata_monitoring import USMonitoringFeed, USMonitoringSettings
 from ..core.scanner import (
     MarketScanner,
     RegistryUniverseProvider,
@@ -605,6 +608,24 @@ def _build_context(
     raw_market_data = market_data_provider or create_market_data_provider(
         settings.data_provider, instruments, markets=registry, env=env,
         routes=dict(settings.data_provider_routes))
+    us_monitoring = None
+    us_raw = (raw_market_data.provider_for("US")
+              if isinstance(raw_market_data, RoutedMarketDataProvider) else raw_market_data)
+    if execution_market == "US" and not personal_research_mode \
+            and (env.get("PAPER_AUTO_LOOP") or "false").strip().lower() == "true" \
+            and isinstance(us_raw, TwelveDataProvider):
+        try:
+            scoped = market_provider_env(env, "US")
+            us_monitoring = USMonitoringFeed(
+                raw_market_data, instruments, markets=registry,
+                settings=USMonitoringSettings.from_env(scoped),
+                max_age=timedelta(seconds=settings.max_market_data_age_seconds),
+                interval_seconds=_protective_monitor_settings(
+                    env, int(env.get("PAPER_MONITOR_INTERVAL_SECONDS") or 30)).interval_seconds,
+                clock=now)
+            raw_market_data = us_monitoring
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError([f"invalid US data-capacity setting: {exc}"]) from exc
     execution_quote_policy = None
     if (env.get("PAPER_AUTO_LOOP") or "false").strip().lower() == "true":
         try:
@@ -902,6 +923,22 @@ def _build_context(
         if definition.markets != (execution_market,) or any(
                 instrument.market != execution_market for instrument in members):
             raise ConfigurationError(["paper loop universe must contain only the execution market"])
+        if us_monitoring is not None:
+            us_monitoring.required = lambda: paper.monitoring_instrument_ids("US")
+            us_monitoring.universe_size = lambda: len(
+                universe_provider.get_universe(paper_loop.settings.universe_id)[1])
+            us_monitoring.watched_size = lambda: sum(
+                1 for row in store.watchlist.list()
+                if row["instrument_id"] in instruments
+                and instruments[row["instrument_id"]].market == "US")
+            us_monitoring.max_positions = limits.max_open_positions
+            us_monitoring.max_trades = limits.max_trades_per_day
+            us_monitoring.candidate_limit = (
+                paper_loop.settings.top_n or autonomous_paper_trading.max_candidates)
+            us_monitoring.research_interval_minutes = paper_loop.settings.interval_minutes
+            us_monitoring.alerts = alerts
+            us_monitoring.monitor_status = paper_loop.protective_monitor.status
+            paper_loop.monitoring_capacity = us_monitoring
     if paper_loop is not None:
         previous_control = store.audit.latest(("PAPER_LOOP_ENTRIES_PAUSED", "PAPER_LOOP_ENTRIES_RESUMED"))
         paper_loop.set_entries_enabled(
@@ -915,10 +952,21 @@ def _build_context(
                 {"reason": reason, "at": now(), "exits_remain_enabled": True})
 
         paper_loop.record_control = record_loop_control
-        monitor = paper_loop.protective_monitor
-        if monitor is not None:
-            paper.entry_admission = monitor.entry_blocker
-            autonomous_paper_trading.monitoring_check = monitor.scan_check
+        protective_monitor = paper_loop.protective_monitor
+        if protective_monitor is not None:
+            def paper_entry_blocker() -> str | None:
+                return ((us_monitoring.entry_blocker() if us_monitoring is not None else None)
+                        or protective_monitor.entry_blocker())
+
+            def paper_monitoring_check() -> dict[str, Any]:
+                reason = paper_entry_blocker()
+                if reason and us_monitoring is not None:
+                    return {"incomplete": True, "positions": [
+                        {"status": "MONITOR_FAILED", "error": reason}]}
+                return protective_monitor.scan_check()
+
+            paper.entry_admission = paper_entry_blocker
+            autonomous_paper_trading.monitoring_check = paper_monitoring_check
     # A polling paper loop has no continuous feed between ticks, so the feed-staleness trigger would
     # always fire; per-order quote freshness is still enforced by quote validation and RiskEngine.
     monitor = AutoTriggerMonitor(
@@ -1017,8 +1065,9 @@ def _build_context(
         for code in settings.markets:
             scoped = market_provider_env(env, code)
             provider_name = dict(settings.data_provider_routes).get(code, settings.data_provider)
-            raw = market_data_provider or create_market_data_provider(
-                provider_name, instruments, markets=registry, env=scoped)
+            raw = (us_monitoring if code == "US" and us_monitoring is not None else
+                   market_data_provider or create_market_data_provider(
+                       provider_name, instruments, markets=registry, env=scoped))
             watch_ages[code] = timedelta(seconds=int(
                 env.get(f"MARKET_WATCH_MAX_AGE_SECONDS_{code}")
                 or settings.max_market_data_age_seconds))
@@ -1055,6 +1104,7 @@ def _build_context(
                       personal_research_mode=personal_research_mode,
                       instrument_discovery=discovery,
                       paper_loop=paper_loop,
+                      monitoring_capacity=us_monitoring if paper_loop is not None else None,
                       india_readiness=india_readiness,
                       auto_monitor_interval=auto_monitor_interval,
                       outcome_feedback=outcome_feedback,

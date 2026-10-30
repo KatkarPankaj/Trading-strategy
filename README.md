@@ -382,8 +382,10 @@ for this configuration change.
 #### Capacity planning for the staged US expansion
 
 Planning assumptions: a normal 390-minute US session, 39 ten-minute cycles,
-all 30 instruments eligible, one scanner bar read, one candidate-research bar
-read and one deterministic-signal bar read per instrument per cycle. Five
+all 30 instruments eligible, one scanner bar read AND one PAPER scanner quote,
+one candidate-research bar read and one deterministic-signal bar read per
+instrument per cycle. This corrects the earlier estimate that omitted PAPER
+scanner quotes. Five
 positions held throughout the session require up to 3,900 scheduled monitoring
 quotes at the unchanged 30-second cadence. The adapter uses Twelve Data
 `time_series` for both bars and quotes; its published weight is one credit per
@@ -392,28 +394,31 @@ symbol for this endpoint.
 | Workload | Illustrative credits/session |
 | --- | ---: |
 | Scanner bars: 30 x 39 | 1,170 |
+| PAPER scanner quotes: 30 x 39 | 1,170 |
 | Candidate research bars: 30 x 39 | 1,170 |
 | Deterministic signal bars: 30 x 39 | 1,170 |
 | Protective quotes: 5 x 2/minute x 390 | 3,900 |
 | Cached daily risk-stat bars: 30 symbols | 30 |
 | Entry quote allowance: illustrative two reads x 50 entries | 100 |
-| Planning baseline | 7,540 |
-| Baseline plus 30% headroom | 9,802 |
+| Planning baseline | 8,710 |
+| Baseline plus 30% headroom | 11,323 |
 
-Use **at least 10,000 credits per US session, preferably no daily cap**, as an
+Use **at least 11,323 credits per US session, preferably no daily cap**, as an
 initial budget target, not a proven upper bound. Rejected proposals, repeated
 final validation, pending orders, exits, retries, restarts, manual research,
 Market Watch and shared India usage can add requests. The 50-trade cap does not
 cap rejected attempts or provider traffic. News/Finnhub and AI have separate
 quotas and costs.
 
-The baseline averages about 19.3 credits/minute, but research runs in bursts.
-For plan evaluation, target **144 credits/minute or more** with verified
+The baseline averages about 22.3 credits/minute, but research runs in bursts.
+The earlier procurement scenario targeted **144 credits/minute or more** with verified
 real-time US equity **and ETF** entitlement and permitted application usage.
 This is a procurement/planning target, not a measured safe configuration:
 even 144/minute can be exhausted by clustered research and risk validation.
-The current shared limiter has no protective request reservation. Confirm
-priority/reservation or demonstrate sufficient headroom under full-universe
+The new US capacity layer reserves credits for existing positions/pending
+orders before admitting research and shares one REST cache/ledger with Market
+Watch. It forecasts sustained load plus monitoring/entry burst headroom; that
+forecast is not a measured latency guarantee. Confirm headroom under full-universe
 research plus five-position monitoring before activation; do not simply raise
 `TWELVEDATA_REQUESTS_PER_MINUTE` or infer safety from the average.
 
@@ -434,6 +439,20 @@ for research plus protection. Health reads do not refresh quotes; a flat,
 entry-paused worker can report no execution data after restart without the
 provider itself being unavailable. Entries remain paused; no allowance was
 increased and no timestamps were rewritten.
+
+The [US monitoring-capacity procedure](docs/OPERATIONS.md#us-twelve-data-monitoring-capacity)
+documents the new authenticated `/paper/monitoring-capacity` status, local
+credit ledger, evidence requirements and failure handling. `/health` and the
+dashboard Health tab also expose the gate and per-position source ages.
+Default client limits are not entitlement evidence. Unconfirmed allocation
+blocks nonessential US reads and automatic entries, while existing-position
+monitoring still attempts bounded, validated REST reads. Neither a checkbox,
+two observed updates nor a healthy flat-account monitor can override an
+insufficient quota forecast. No supported WebSocket transport or account
+entitlement was found; `websocket` configuration reports unavailable and blocks
+entries rather than silently pretending to stream. These changes have only
+static validation, have not been loaded into the running worker, and do not
+activate the staged universe or clear the operator pause.
 
 ## Launch legacy research dashboard
 The dashboard can still display:

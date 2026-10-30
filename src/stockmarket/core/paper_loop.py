@@ -79,6 +79,7 @@ class PaperTradingLoop:
         self.reconcile_evidence = reconcile_evidence
         self.record_control = record_control
         self.protective_monitor = protective_monitor
+        self.monitoring_capacity: Any = None
         self._entries_enabled = entries_enabled
         self._last_scan_key: str | None = None
         self._last_scan_run: str | None = None
@@ -118,7 +119,7 @@ class PaperTradingLoop:
 
     def _recover_unfinished(self) -> list[str]:
         recovered: list[str] = []
-        if not self._entries_enabled:
+        if not self._entries_enabled or self._capacity_blocker():
             if self.reconcile_evidence is not None:
                 self._last_evidence = self.reconcile_evidence()
             return recovered
@@ -159,17 +160,19 @@ class PaperTradingLoop:
                     key = self.idempotency_key(self.bucket(now))
                     if now >= self._close_at(now) - timedelta(minutes=self.settings.eod_flatten_minutes):
                         result = {"action": "END_OF_DAY_FLATTEN", "supervisor": monitor.status()}
-                    elif monitor.entry_blocker() or self.gate.halted or not self._entries_enabled \
+                    elif monitor.entry_blocker() or self._capacity_blocker() \
+                            or self.gate.halted or not self._entries_enabled \
                             or self._state == "STOPPED_AFTER_FAILURES":
-                        result = {"action": "EXITS_ONLY", "supervisor": monitor.status()}
+                        result = {"action": "EXITS_ONLY", "supervisor": monitor.status(),
+                                  "reason": self._entry_pause_reason()}
                     elif key == self._last_scan_key:
                         result = {"action": "MONITOR", "run_id": self._last_scan_run,
                                   "supervisor": monitor.status()}
                     else:
                         if self.reconcile_evidence is not None:
                             self._last_evidence = self.reconcile_evidence()
-                        if monitor.entry_blocker():
-                            raise RuntimeError("PROTECTIVE_MONITOR_NOT_READY")
+                        if monitor.entry_blocker() or self._capacity_blocker():
+                            raise RuntimeError(self._entry_pause_reason())
                         self._last_scan_key = key
                         run = self.cycles.run(
                             self.settings.universe_id, idempotency_key=key,
@@ -183,13 +186,11 @@ class PaperTradingLoop:
                     result = {"action": "END_OF_DAY_FLATTEN",
                               "result": self.positions.flatten(market=market)}
                     self._check_positions(result["result"])
-                elif self.gate.halted or not self._entries_enabled \
+                elif self.gate.halted or not self._entries_enabled or self._capacity_blocker() \
                         or self._state == "STOPPED_AFTER_FAILURES":
                     # entries are blocked; keep stop/target exits running
                     result = {"action": "EXITS_ONLY",
-                              "reason": self.gate.blocked_reason() or (
-                                  "STOPPED_AFTER_FAILURES" if self._state == "STOPPED_AFTER_FAILURES"
-                                  else "OPERATOR_PAUSED_ENTRIES"),
+                              "reason": self._entry_pause_reason(),
                               "result": self.positions.manage()}
                     self._check_positions(result["result"])
                 else:
@@ -250,6 +251,23 @@ class PaperTradingLoop:
                 self._entries_enabled = enabled
             return self.status()
 
+    def _capacity_blocker(self) -> str | None:
+        return (self.monitoring_capacity.entry_blocker()
+                if self.monitoring_capacity is not None else None)
+
+    def _entry_pause_reason(self, capacity: dict[str, Any] | None = None) -> str | None:
+        if not self._entries_enabled:
+            return "OPERATOR_PAUSED_ENTRIES"
+        if self._state == "STOPPED_AFTER_FAILURES":
+            return "STOPPED_AFTER_FAILURES"
+        capacity_reason = ("US_MONITORING_CAPACITY: " + "; ".join(capacity["blockers"])
+                           if capacity is not None and capacity["blockers"] else None)
+        if capacity is None:
+            capacity_reason = self._capacity_blocker()
+        return (self.gate.blocked_reason() or capacity_reason
+                or (self.protective_monitor.entry_blocker()
+                    if self.protective_monitor is not None else None))
+
     # --- background thread ------------------------------------------------------------
     def seconds_until_next(self, now: datetime) -> float:
         nxt = self.bucket(now) + timedelta(minutes=self.settings.interval_minutes)
@@ -303,6 +321,7 @@ class PaperTradingLoop:
                                 self.seconds_until_next(self.clock())))
 
     def status(self) -> dict[str, Any]:
+        capacity = self.monitoring_capacity.status() if self.monitoring_capacity is not None else None
         return {
             "state": self._state,
             "trading_mode": TradingMode.PAPER.value,
@@ -315,9 +334,13 @@ class PaperTradingLoop:
             "monitor_interval_seconds": self.settings.monitor_interval_seconds,
             "entries_enabled": self._entries_enabled and not self._stop.is_set()
                                and self._state != "STOPPED_AFTER_FAILURES"
+                               and not self.gate.halted
+                               and (capacity is None or capacity["monitoring_capacity_verified"])
                                and (self.protective_monitor is None
                                     or self.protective_monitor.entry_blocker() is None),
             "operator_entries_enabled": self._entries_enabled,
+            "entry_pause_reason": self._entry_pause_reason(capacity),
+            "monitoring_capacity": capacity,
             "evidence_collection": self._last_evidence,
             "protective_monitor": (
                 self.protective_monitor.status() if self.protective_monitor is not None else None),

@@ -1,5 +1,60 @@
 # Architecture Audit (Phase 0)
 
+## 2026-10-30 increment: US capacity controls, static validation only
+
+Inspected commit `225867c7b112dadba049f4c4ef508e474218a57a` and the provider,
+scanner, candidate/signal research, risk-stat cache, protective supervisor,
+position manager, entry admission and Market Watch wiring. Preserved the
+commit's universe, ten/day conservative versus staged fifty/day tasks, AI fix
+and other user work. No tests were added or run and no external provider calls,
+runtime restart, entry resume, order, subscription, purchase or commit occurred.
+
+The PAPER scanner reads a quote in addition to bars. The old 30-member planning
+baseline omitted these 1,170 credits/session. The corrected uncached scenario
+is 8,710 credits, 11,323 with 30% headroom; it still excludes arbitrary extra
+manual work/retries, which now consume the hard local budget. Five positions
+at the unchanged 30-second cadence alone need 3,900 credits/session and
+ten/minute, already beyond the previously observed Basic allowance.
+
+New US-only automatic-loop composition shares a timestamp-preserving,
+bounded/single-flight REST quote and exact-window bar cache with Market Watch,
+eliminating its separate US limiter. A durable, atomic sidecar counts rolling
+minute and UTC-day attempted credits across restarts without changing the
+trading schema. Research cannot spend the reserved current-position/pending-
+order monitoring headroom. Unknown allocation blocks nonessential US reads;
+existing-position monitoring continues bounded best-effort valid-quote reads.
+India readiness/routing and all existing strategy, risk, freshness, exit and
+paper/live boundaries remain unchanged.
+
+New read-only operational status appears in health, loop, an authenticated
+capacity endpoint and dashboard Health. Entries require a current dated
+operator-attested isolated allocation/usage baseline, sufficient future-slot/
+research/reserve capacity, observed advancing source updates and healthy
+protective cycles. The final TradingService admission and cycle/recovery paths
+enforce it independently of the operator intent checkbox. It does not treat
+a successful quote or flat-account healthy loop as capacity verification.
+Account entitlements are not queried or certified by configuration. The shared
+key's separate India/external usage is not automatically visible; an isolated
+allocation must exclude it. Evidence expires on UTC date rollover.
+
+No streaming transport or confirmed WebSocket capability was present; none
+was activated or speculatively implemented. Configuring websocket explicitly
+blocks entries and reports unsupported/unknown quota rather than opening
+duplicate/unentitled connections or claiming stream protection. REST cache
+reads preserve source age; stale/invalid/regressing quotes and feed/ledger/
+monitor failures fail closed. Existing alerts expose unverified protection;
+no stale-price exit or fabricated price is introduced.
+
+Pylance syntax checks passed for all eight changed Python files. Pylance
+diagnostics returned no errors/warnings; eight existing informational hints
+remain in TradingService (context-manager annotations and unused names), outside
+the new snapshot method. `git diff --check` passed. These static checks are the
+only acceptance evidence for this increment. The running service has not loaded this code. No runtime or
+account capacity certification is claimed; authorized tests, load/rollover/
+contention/recovery validation and a controlled restart remain necessary.
+Existing protective-continuity, learning-evidence and daily-PnL audit gaps are
+not solved by a quota ledger. See [operations](OPERATIONS.md#us-twelve-data-monitoring-capacity).
+
 ## 2026-10-30 increment: provider blockers verified directly
 
 The configured Twelve Data `api_usage` endpoint reported Basic capacity of

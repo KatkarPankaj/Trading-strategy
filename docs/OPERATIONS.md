@@ -471,6 +471,134 @@ submitting a proposal it checks that `/health` reports `PAPER`; the API
 independently enforces PAPER mode, proposal freshness, and RiskEngine approval.
 The legacy dashboards and their local files are not changed by this UI.
 
+### US Twelve Data monitoring capacity
+
+The US automatic PAPER worker shares one Twelve Data REST cache and credit
+allocation across research, entries, position/pending-order monitoring and
+Market Watch refreshes. India routing/readiness, strategies, risk limits,
+30-second default protective cadence and execution freshness are unchanged.
+There is no streaming interface/transport or confirmed WebSocket entitlement
+in the existing configuration. `TWELVEDATA_MONITORING_MODE_US=websocket`
+therefore reports unavailable and blocks new entries. It opens no connection
+and does not claim a REST fallback establishes streaming readiness. Protection
+continues best-effort REST monitoring, never simulated stream ticks.
+
+Quotes are reused for at most `min(monitor interval, 30 seconds, execution
+maximum age)`, and their original source timestamp and full quality/tick/
+identity checks apply on every read. No failed read returns a stale fallback.
+Per-symbol single-flight locks bound contention to 250 ms, rather than launch
+duplicate requests; concurrent callers can receive an explicit timeout.
+Identical OHLCV windows share a 30-second bounded cache (256 entries), with
+copies preventing caller mutation. A one-second quote-failure cache prevents
+immediate duplicate failed attempts. Existing caller freshness checks remain.
+This does not make one-minute bar closes a continuous/execution-grade feed.
+
+The private SQLite sidecar `TWELVEDATA_CREDIT_LEDGER_US` defaults to
+`outputs/twelvedata_us_credits.db`. It is independent of the trading schema:
+no trading database migration or reset is required. Each physical request is
+atomically charged **before** transport, including failures/timeouts/retries.
+Minute usage is a rolling 60-second window; daily counters use UTC dates and
+survive restarts. Preserve/back up the ledger; never delete it to reclaim
+credits. Ledger corruption, lock failure or backward clock movement is an
+explicit unavailable condition, not an empty budget. Health/status reads use
+read-only ledger transactions and do not call the provider or refresh prices.
+All participating US workers must use the same persistent sidecar path.
+
+Existing-position/pending-order quotes have priority. Other reads must leave
+the current protected symbols' remaining-session and rolling-minute demand
+plus at least 30% headroom untouched. Requests are still bounded by the overall
+daily/minute caps; protection cannot invent quota once the account is exhausted.
+Research and monitoring use separate resilience lanes/locks but the same
+underlying allocation. Single-symbol `time_series` is the supported adapter
+operation; no batch transport was introduced. Batching would still cost each
+symbol's endpoint credits and would not solve the Basic-plan capacity deficit.
+
+Status is exposed in `/health`, authenticated `GET /paper/monitoring-capacity`,
+`GET /paper/loop` and the dashboard Health tab. It includes mode/connectivity,
+quota provenance, local counters, forecast, blockers, monitor timing/readiness,
+and last valid source time/age/error for every protected symbol. Open positions
+and pending orders are read coherently under a bounded execution lock.
+Unsupported streaming reports zero connections/subscriptions/reconnects,
+required unique symbol slots and unknown account subscription weights/limits.
+No unrestricted WebSocket access or credit savings are assumed.
+
+Forecast notation: `N` is current distinct open/pending symbols; `M` is
+`max(configured position limit, N)`; `U` is the configured universe; `C` is its
+candidate limit (respecting loop top-N/max-candidates); `W` is watched symbols;
+`I` is the actual protective interval in seconds; `D` is the session length
+from the US calendar (including early closes); `J` is the research interval
+in minutes; `c` is endpoint credits **per symbol**; `T` is the daily trade cap.
+With reserve multiplier `s = 1 + reserve_pct/100`:
+
+- Current monitoring: `N * ceil(D/I) * c`; configured monitoring substitutes `M`.
+- Each cycle: `(2*U + 2*C) * c`: scanner bars/quotes, candidate bars, one
+  selected deterministic strategy's bars. Failed filters can reduce actual use.
+- Incidental daily scenario `A = (U + W*watch_refreshes + 2*T) * c` includes
+  daily risk-stat bars and entry quote allowance. Watch refreshes are manual;
+  their configured rounds are a planning scenario, not an automatic schedule.
+- Daily forecast: `ceil(s * (M*ceil(D/I)*c + ceil(D/(60*J))*cycle_cost + A))`.
+  Admission compares the equivalent remaining-session forecast against the
+  daily limit minus the operator baseline and all local ledger charges.
+- Minute forecast is the larger of the rounded sustained demand
+  `s*(M*ceil(60/I)*c + cycle_cost/J + A/(D/60))` and the monitoring/entry
+  burst `s*(M*ceil(60/I)*c + 2*c)`. Current-minute headroom is checked too.
+  Research bursts defer/reject at the limiter; exits never wait for research.
+
+These are conservative uncached planning scenarios, not a bound on all possible
+manual work or rejected entries. Additional work/retries are charged and can
+block entries, not consume reserved protective headroom. For 390 minutes,
+30-second monitoring, 10-minute full-universe cycles and no watch refreshes:
+10 instruments/10 daily trades/five slots forecast **7,137 credits/day**;
+30 instruments/50 daily trades/five slots forecast **11,323 credits/day**.
+Five-position monitoring alone is 3,900 credits/day, ten/minute before reserve.
+The previously observed Basic 8/minute/800/day allowance cannot meet this.
+
+Before any controlled activation:
+
+1. Independently confirm the provider's US equity/ETF entitlement, endpoint
+   weights, UTC quota/reset behavior and an isolated US credit allocation.
+   The configured key is also used by a separate India process; neither the
+   sidecar nor this gate observes that old process or other external clients.
+   Deduct/reserve their usage from the US allocation first. Do not mark the
+   allocation confirmed if shared-key demand is unbounded or unknown.
+2. Set `TWELVEDATA_REQUESTS_PER_MINUTE` (or its existing `_US` override),
+   `TWELVEDATA_DAILY_CREDITS_US`, observed `TWELVEDATA_DAILY_USED_BASELINE_US`,
+   timezone-aware `TWELVEDATA_QUOTA_EVIDENCE_AT_US` from the current UTC date,
+   and only then `TWELVEDATA_US_ALLOCATION_CONFIRMED=true`. These are operator
+   attestations, **not automatically verified account facts**. The baseline
+   is added to all local charges, even if this conservatively double-counts
+   earlier US activity. Evidence expires at UTC date rollover; never lower a
+   baseline, change ledger paths or reset history to force readiness.
+3. Keep the durable operator entry pause during an authorized controlled
+   restart. Use the existing-account task, not the staged expansion task.
+   No service was restarted or externally queried for this implementation.
+4. With an adequately budgeted allocation, obtain explicit fresh observations
+   through the supported watch refresh or existing-position monitoring path.
+   Require at least two advancing valid source timestamps (per protected
+   symbol, or a fresh observed symbol when flat), two consecutive successful monitor cycles, healthy
+   recovery/monitor latency and a regular US session. A stale gap resets the
+   source-update evidence. A single AAPL quote never establishes capacity.
+5. Review the gate and explicitly resume the operator control only when all
+   blockers are resolved. It records intent, not authorization: the capacity
+   gate is rechecked before cycles/recovery admission and final paper entry
+   submission, along with existing strategy, freshness, sizing and RiskEngine
+   checks. It does not clear kill switches or grant risk approval.
+
+On missing/stale/invalid/regressing quotes, connection failure or insufficient
+capacity, entries are blocked and existing alert/logging surfaces expose the
+problem. The monitor continues its existing safe failure behavior: no fabricated
+price, stale-price liquidation or assumed protected stop. `protection_assured`
+remains false; polling is best effort, not a guaranteed stop-loss execution
+service. Restored valid data does not clear an operator pause. Live execution
+remains disabled. Protective continuity, prospective-learning evidence and
+historical daily-PnL reconciliation remain separate unresolved audit items.
+
+Validation for this change is static only, as requested: no tests added/run,
+provider calls, order submissions, subscriptions, purchases, restart, commit or
+push. Runtime contention, counter rollover, recovery and combined research/
+monitoring behavior still need explicitly authorized deterministic tests and
+controlled operational validation before relying on this new layer.
+
 The [paper-order audit and India readiness plan](PAPER_ORDER_AUDIT.md) records
 the 2026-10-15 non-order samples, source fixes and offline acceptance evidence.
 Prepared migration 26 replaces broad SQLite `data_version` replay invalidation

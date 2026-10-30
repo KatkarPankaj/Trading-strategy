@@ -128,6 +128,7 @@ class ApiContext:
     personal_research_mode: bool = False
     instrument_discovery: Mapping[str, Any] = field(default_factory=dict)
     paper_loop: Any = None
+    monitoring_capacity: Any = None
     outcome_feedback: OutcomeFeedbackService | None = None
     strategy_lab: StrategyLabService | None = None
     strategy_ranking: StrategyRankingService | None = None
@@ -279,7 +280,11 @@ def create_app(ctx: ApiContext) -> FastAPI:
         } if ctx.markets is not None else {}
         worker = ctx.india_readiness.status() if ctx.india_readiness is not None else None
         report["paper_worker"] = worker
+        capacity = ctx.monitoring_capacity.status() if ctx.monitoring_capacity is not None else None
+        report["monitoring_capacity"] = capacity
         blockers = []
+        if capacity is not None:
+            blockers.extend(capacity["blockers"])
         execution_market = worker["execution_market"] if worker else (
             ctx.paper_loop.settings.market if ctx.paper_loop is not None else ctx.settings.markets[0])
         if worker and execution_market == "IN" and worker["india_status"] == "BLOCKED":
@@ -326,6 +331,12 @@ def create_app(ctx: ApiContext) -> FastAPI:
                       "validated quote, sizing and final RiskEngine approval.",
         }
         return JSONResponse(report, status_code=200 if report["status"] != "DOWN" else 503)
+
+    @app.get("/paper/monitoring-capacity", dependencies=[Depends(auth)])
+    def monitoring_capacity() -> Any:
+        if ctx.monitoring_capacity is None:
+            raise HTTPException(503, "US Twelve Data monitoring-capacity gate is not configured")
+        return _plain(ctx.monitoring_capacity.status())
 
     @app.get("/paper/market-readiness", dependencies=[Depends(auth)])
     def market_readiness() -> Any:

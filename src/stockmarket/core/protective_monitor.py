@@ -76,6 +76,7 @@ class ProtectiveMonitor:
         self._misses = 0
         self._miss_recorded = False
         self._failures = 0
+        self._consecutive_successes = 0
         self._cycles = 0
         self._error: str | None = None
         self._result: dict[str, Any] | None = None
@@ -91,6 +92,7 @@ class ProtectiveMonitor:
             self.recovery_complete = False
             self._success = None
             self._success_mono = None
+            self._consecutive_successes = 0
             self._error = None
             self._stop.clear()
 
@@ -186,8 +188,10 @@ class ProtectiveMonitor:
                 self._state = "FAILED" if error else "HEALTHY"
                 if error:
                     self._failures += 1
+                    self._consecutive_successes = 0
                 else:
                     self._failures = 0
+                    self._consecutive_successes += 1
                     self._success = self._ended
                     self._success_mono = ended
             _log.info("protective monitoring completed", extra={
@@ -227,6 +231,7 @@ class ProtectiveMonitor:
                 "maximum_duration_seconds": max(self._maximum, active_age or 0.),
                 "recent_durations_seconds": list(self._recent), "active_seconds": active_age,
                 "deadline_misses": self._misses, "consecutive_failures": self._failures,
+                "consecutive_successes": self._consecutive_successes,
                 "cycles": self._cycles, "last_error": "MONITORING_STALLED" if stalled else (
                     "MONITORING_STALE" if stale and self._success is not None else self._error),
                 "positions_checked": len(result.get("positions", [])),

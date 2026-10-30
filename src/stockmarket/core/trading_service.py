@@ -219,6 +219,18 @@ class TradingService:
         """Called within the execution boundary; includes positions, pending orders and revision."""
         return self._preparation_state()
 
+    def monitoring_instrument_ids(self, market: str) -> set[str]:
+        """Bounded, coherent read of instruments needing protection or reconciliation."""
+        if not self._submit_lock.acquire(timeout=0.25):
+            raise TimeoutError("monitoring instrument snapshot is busy")
+        try:
+            ids = set(self.portfolio.positions())
+            ids.update(order.instrument_id for order in self.order_manager.open_orders())
+            return {iid for iid in ids if iid in self.instruments
+                    and self.instruments[iid].market == market}
+        finally:
+            self._submit_lock.release()
+
     def monitoring_result(self, problem: str | None) -> None:
         """Execution-lock owned, process-local admission barrier; restart still requires recovery."""
         self._monitoring_problem = problem
