@@ -80,6 +80,19 @@ def make_store() -> Store:
 
 
 class PaperEndToEndTests(unittest.TestCase):
+    def test_full_universe_is_the_default_with_optional_explicit_research_ceiling(self):
+        ctx = self.context(auto_loop=True)
+        self.assertIsNone(ctx.autonomous_research.settings.max_candidates)
+        self.assertIsNone(ctx.autonomous_paper_trading.max_candidates)
+        self.assertIsNone(ctx.paper_loop.settings.top_n)
+        capped = self.context(auto_loop=True, extra_env={
+            "PAPER_AUTO_LOOP_TOP_N": "25",
+            "AUTONOMOUS_RESEARCH_SETTINGS": '{"max_candidates":25}',
+        })
+        self.assertEqual(capped.autonomous_research.settings.max_candidates, 25)
+        self.assertEqual(capped.autonomous_paper_trading.max_candidates, 25)
+        self.assertEqual(capped.paper_loop.settings.top_n, 25)
+
     def setUp(self):
         self.store = make_store()
         self.addCleanup(self.store.db.close)
@@ -93,8 +106,8 @@ class PaperEndToEndTests(unittest.TestCase):
 
     def context(self, *, auto_loop=False, allow_short=False, token_budget=None,
                 experimental_selection=True, extra_env=None):
-        env = dict(ENV, PAPER_AUTO_LOOP=str(auto_loop).lower(), PAPER_AUTO_LOOP_TOP_N="1",
-                   **(extra_env or {}))
+        env = dict(ENV, PAPER_AUTO_LOOP=str(auto_loop).lower(), PAPER_AUTO_LOOP_TOP_N="1")
+        env.update(extra_env or {})
         ctx = build_context(
             load_settings(env), env, store=self.store,
             market_stats=market_stats, sector_of=lambda _: "TECHNOLOGY",

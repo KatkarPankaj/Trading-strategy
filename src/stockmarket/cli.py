@@ -217,7 +217,7 @@ def _build_parser() -> argparse.ArgumentParser:
     research_parser = subparsers.add_parser(
         "research", help="Create timestamped research snapshots for a scanner run")
     research_parser.add_argument("--scan-id", required=True)
-    research_parser.add_argument("--limit", type=int, default=50)
+    research_parser.add_argument("--limit", type=int, default=None)
     research_parser.add_argument("--as-of", type=_aware_datetime, default=None)
 
     research_show_parser = subparsers.add_parser(
@@ -238,12 +238,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     autonomous_parser = subparsers.add_parser(
         "research-autonomous",
-        help="Run or resume the bounded PAPER-only opportunity orchestrator")
+        help="Run or resume the PAPER-only opportunity orchestrator")
     autonomous_parser.add_argument("--universe", required=True)
     autonomous_parser.add_argument("--idempotency-key", required=True)
     autonomous_parser.add_argument("--mode", choices=["PAPER", "LIVE"], default="PAPER")
     autonomous_parser.add_argument("--as-of", type=_aware_datetime, default=None)
-    autonomous_parser.add_argument("--top", type=int, choices=range(1, 11), default=None)
+    autonomous_parser.add_argument("--top", type=int, default=None)
 
     autonomous_show_parser = subparsers.add_parser(
         "research-autonomous-show", help="Inspect a persisted autonomous research run")
@@ -273,13 +273,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     paper_cycle_parser = subparsers.add_parser(
         "paper-cycle",
-        help="Run one bounded, restart-safe PAPER research and execution cycle",
+        help="Run one restart-safe PAPER research and execution cycle",
     )
     paper_cycle_parser.add_argument("--universe", required=True)
     paper_cycle_parser.add_argument("--idempotency-key", required=True)
     paper_cycle_parser.add_argument("--operator", required=True)
     paper_cycle_parser.add_argument("--as-of", type=_aware_datetime, default=None)
-    paper_cycle_parser.add_argument("--top", type=int, choices=range(1, 11), default=None)
+    paper_cycle_parser.add_argument("--top", type=int, default=None)
 
     paper_cycle_show_parser = subparsers.add_parser(
         "paper-cycle-show", help="Inspect a persisted PAPER cycle")

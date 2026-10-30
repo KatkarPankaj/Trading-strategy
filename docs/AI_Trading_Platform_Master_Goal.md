@@ -41,6 +41,13 @@ The goal is to build a reliable, continuously improving trading system—not jus
 - Rank opportunities using measurable evidence, not arbitrary AI confidence scores.
 - Explain why each candidate was added, retained, rejected, or deprioritized.
 - Avoid duplicate candidates and excessive API calls.
+- Research all eligible instruments in the verified canonical universe rather
+  than applying an arbitrary shortlist count. This is a research-coverage
+  objective, not a minimum trade count or a requirement for simultaneous
+  positions. Qualifying signals must still pass strategy, data, session and
+  portfolio risk gates. Universe expansion requires verified instruments and
+  measured provider/AI budgets that preserve independent protective-monitor
+  capacity.
 
 **Important:** If every instrument is showing `HOLD` for approximately 30 minutes, that should trigger a fresh opportunity-discovery cycle—not force a trade or automatically discard existing instruments.
 

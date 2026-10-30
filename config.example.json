@@ -14,10 +14,10 @@
     "take_profit_pct": 0.008,
     "risk_per_trade_pct": 0.005,
     "starting_capital": 200000,
-    "max_trades_per_day": 1,
+    "max_trades_per_day": 20,
     "commission_pct": 0.0003,
     "slippage_pct": 0.0005,
-    "allow_short": false,
+    "allow_short": true,
     "volume_ma_window": 20,
     "volume_spike_threshold": 1.2,
     "vwap_price_source": "typical"

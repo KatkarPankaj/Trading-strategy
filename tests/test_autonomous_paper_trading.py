@@ -106,6 +106,39 @@ class AutonomousPaperTradingTests(TestCase):
         self.store = Store(self.database)
         self.addCleanup(self.database.close)
 
+    def test_twenty_five_no_trade_candidates_never_force_orders_or_duplicate_replay(self):
+        class ShortlistResearch(_Research):
+            def run(self, *args, **kwargs):
+                result = super().run(*args, **kwargs)
+                result["candidates"] = [
+                    {"instrument_id": f"XNAS:FIXTURE{i}", "stage": "STRATEGY_SELECTED"}
+                    for i in range(25)]
+                return result
+
+        class HoldSignals:
+            def generate(self, *args, **kwargs):
+                return {"status": "SIGNAL_GENERATED",
+                        "reason": "NO_CONFIRMED_BREAKOUT",
+                        "signal": {"side": "HOLD", "intent": "NO_TRADE",
+                                   "reasons": ["NO_CONFIRMED_BREAKOUT"]}}
+
+        class HoldProposals:
+            def evaluate(self, *args, **kwargs):
+                return {"status": "NON_ACTIONABLE", "reason": "HOLD/NO_TRADE is not an entry"}
+
+        execution = _Execution()
+        service = _service(
+            self.store, research=ShortlistResearch(), signals=HoldSignals(),
+            proposals=HoldProposals(), execution=execution)
+        service.max_candidates = 25
+        result = service.run("US_ALL", idempotency_key="shortlist-25", operator="fixture", top_n=25)
+        replay = service.run("US_ALL", idempotency_key="shortlist-25", operator="fixture", top_n=25)
+        self.assertEqual(len(result["candidates"]), 25)
+        self.assertEqual(replay["run_id"], result["run_id"])
+        self.assertEqual(execution.calls, [])
+        self.assertTrue(all(c["payload"]["decision_trace"]["final_status"] == "NO_TRADE"
+                            for c in result["candidates"]))
+
     def test_cycle_is_paper_only_bounded_and_idempotent(self):
         execution = _Execution()
         service = _service(self.store, execution=execution)

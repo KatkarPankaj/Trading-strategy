@@ -40,13 +40,41 @@ def _table(df: Any, empty: str = "No data yet.") -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Trading Monitor", layout="wide")
-    client = ApiClient.from_env()
+    clients = ApiClient.worker_clients_from_env()
+    worker = "DEFAULT"
+    if len(clients) > 1:
+        st.subheader("Choose market")
+        worker = st.selectbox(
+            "Market",
+            list(clients),
+            format_func=lambda market: (
+                "India — research only (execution disabled)" if market == "IN"
+                else "United States — paper trading"),
+            key="market_api_context",
+            help=(
+                "Choose India for morning research or the US for evening paper trading. "
+                "This switches dashboard API context only; it does not change a worker's "
+                "execution market or enable India execution."),
+        )
+    elif len(clients) == 1:
+        worker = next(iter(clients))
+        if worker != "DEFAULT":
+            st.caption(
+                "Market context: India — research only (execution disabled)"
+                if worker == "IN" else f"Market context: {worker} paper API")
+    client = clients[worker]
 
     try:
         health = client.get("/health")
     except ApiError as exc:
         health = None
         st.error(str(exc))
+    if health is not None and worker != "DEFAULT":
+        mismatch = ApiClient.worker_market_problem(worker, health)
+        if mismatch is not None:
+            st.error(mismatch)
+            st.json(health)
+            return
     label, level = views.mode_banner(health)
     _banner(label, level)
     problem = dashboard_compatibility_problem(health)

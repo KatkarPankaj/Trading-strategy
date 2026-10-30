@@ -64,6 +64,21 @@ def calendar_fixture(directory, mic="XNSE"):
 
 
 class IndiaCalendarSafetyTests(TestCase):
+    def test_bundled_bse_equity_seed_has_sixteen_holidays_but_no_execution_approval(self):
+        india = default_markets().get("IN")
+        calendar = india.exchange_calendars["XBOM"]
+        self.assertEqual(len(calendar.holidays), 16)
+        for day in (date(2026, 1, 15), date(2026, 1, 26),
+                    date(2026, 11, 10), date(2026, 12, 25)):
+            self.assertIn(day, calendar.holidays)
+            self.assertFalse(calendar.is_trading_day(day))
+        self.assertTrue(calendar.review_required)
+        self.assertFalse(calendar.is_covered(date(2026, 10, 30)))
+        self.assertFalse(calendar.is_covered(date(2027, 1, 4)))
+        self.assertEqual(calendar.special_sessions, {})
+        self.assertFalse(calendar.is_trading_day(date(2026, 11, 8)))
+        self.assertFalse(india.exchange_calendars["XNSE"].is_covered(date(2026, 10, 30)))
+
     def test_reviewed_fixture_regular_holiday_weekend_and_special_intervals(self):
         with tempfile.TemporaryDirectory() as directory:
             target, _ = calendar_fixture(directory)

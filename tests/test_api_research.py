@@ -243,6 +243,26 @@ class ResearchApiTests(unittest.TestCase):
         )
         self.assertEqual(invalid_mode.status_code, 422)
 
+    def test_candidate_request_limits_accept_large_subsets_and_reject_invalid_values(self):
+        from pydantic import ValidationError
+        from stockmarket.api.schemas import AutonomousPaperCycleBody, AutonomousResearchRunBody
+        from stockmarket.cli import _build_parser
+
+        base = {"universe_id": "US_ALL", "idempotency_key": "coverage-limit"}
+        for schema, extra in ((AutonomousResearchRunBody, {}),
+                              (AutonomousPaperCycleBody, {"operator": "fixture"})):
+            self.assertEqual(schema(**base, **extra, top_n=25).top_n, 25)
+            self.assertEqual(schema(**base, **extra, top_n=1000).top_n, 1000)
+            for bad in (True, 0):
+                with self.subTest(schema=schema.__name__, top_n=bad), self.assertRaises(ValidationError):
+                    schema(**base, **extra, top_n=bad)
+        parser = _build_parser()
+        for command, extra in (("research-autonomous", []), ("paper-cycle", ["--operator", "fixture"])):
+            args = parser.parse_args([
+                command, "--universe", "US_ALL", "--idempotency-key", "coverage-limit",
+                "--top", "25", *extra])
+            self.assertEqual(args.top, 25)
+
     def test_proposal_submission_does_not_accept_ephemeral_research_proposals(self):
         context, provider = make_context()
         self.addCleanup(provider.close)

@@ -42,6 +42,44 @@ class ApiClient:
             raise ApiError(str(exc)) from exc
         return cls(env.get("API_BASE_URL", "http://127.0.0.1:8000"), token)
 
+    @classmethod
+    def worker_clients_from_env(
+        cls, env: Mapping[str, str] | None = None,
+    ) -> dict[str, "ApiClient"]:
+        """Build explicit market-scoped API clients; never infer execution from Market Watch."""
+        env = os.environ if env is None else env
+        urls = {
+            market: (env.get(f"API_BASE_URL_{market}") or "").strip()
+            for market in ("IN", "US")
+        }
+        configured = {market: url for market, url in urls.items() if url}
+        if not configured:
+            return {"DEFAULT": cls.from_env(env)}
+        try:
+            token = get_secret("API_TOKEN", env, required=False)
+        except SecurityError as exc:
+            raise ApiError(str(exc)) from exc
+        clients = {market: cls(url, token) for market, url in configured.items()}
+        bases = [client._base for client in clients.values()]
+        if len(set(bases)) != len(bases):
+            raise ApiError("each paper market must use a distinct API worker endpoint")
+        return clients
+
+    @staticmethod
+    def worker_market_problem(expected_market: str, health: Mapping[str, Any]) -> str | None:
+        worker = health.get("paper_worker")
+        worker_readiness = health.get("paper_readiness")
+        actual_market = (
+            worker.get("execution_market") if isinstance(worker, Mapping) else
+            worker_readiness.get("execution_market")
+            if isinstance(worker_readiness, Mapping) else None
+        )
+        if actual_market != expected_market:
+            return (
+                f"Configured {expected_market} dashboard endpoint reports execution market "
+                f"{actual_market or 'UNKNOWN'}; refusing to show its controls.")
+        return None
+
     def get(self, path: str, **params: Any) -> Any:
         try:
             response = requests.get(

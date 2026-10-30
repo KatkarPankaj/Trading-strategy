@@ -167,13 +167,13 @@ def create_app(ctx: ApiContext) -> FastAPI:
         if ctx.worker_lease is not None:
             ctx.worker_lease.close()
 
-    app.add_event_handler("shutdown", shutdown_paper_services)
+    app.router.add_event_handler("shutdown", shutdown_paper_services)
     if ctx.auto_monitor_interval is not None:
-        app.add_event_handler("startup", lambda: ctx.monitor.start(ctx.auto_monitor_interval))
+        app.router.add_event_handler("startup", lambda: ctx.monitor.start(ctx.auto_monitor_interval))
     if ctx.paper_loop is not None:
         if ctx.mode != TradingMode.PAPER.value or ctx.live is not None:
             raise RuntimeError("the paper loop may only run with PAPER execution")
-        app.add_event_handler("startup", ctx.paper_loop.start)
+        app.router.add_event_handler("startup", ctx.paper_loop.start)
 
     @app.middleware("http")
     async def show_mode(request: Request, call_next):  # the trading mode is never hidden

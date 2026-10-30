@@ -1,4 +1,6 @@
 from datetime import date, datetime, time, timezone
+from pathlib import Path
+import tempfile
 import unittest
 
 from stockmarket.core.markets import MarketDefinition, SessionPhase, default_markets
@@ -95,6 +97,39 @@ class MarketPhaseCalendarTests(unittest.TestCase):
             market.phase(datetime(2026, 10, 5, 13, 0, tzinfo=timezone.utc)),
             SessionPhase.REGULAR,
         )
+
+
+class IndiaExchangeCalendarTests(unittest.TestCase):
+    def test_bse_and_nse_observations_are_separate_and_unreviewed(self):
+        markets = default_markets()
+        india = markets.get("IN")
+        nse = india.exchange_calendars["XNSE"]
+        bse = india.exchange_calendars["XBOM"]
+
+        self.assertIsNot(nse, bse)
+        self.assertEqual(nse.covered_years, frozenset({2026}))
+        self.assertEqual(bse.covered_years, frozenset({2026}))
+        self.assertEqual(len(nse.holidays), 16)
+        self.assertEqual(len(bse.holidays), 16)
+        self.assertEqual(nse.holidays, bse.holidays)
+        for calendar in (nse, bse):
+            self.assertTrue(calendar.review_required)
+            self.assertFalse(calendar.is_covered(date(2026, 10, 30)))
+            self.assertFalse(calendar.is_trading_day(date(2026, 10, 30)))
+            self.assertEqual(
+                calendar.special_sessions,
+                {},
+                "Do not infer Muhurat timings from an announcement without hours.",
+            )
+
+    def test_missing_nse_calendar_keeps_india_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            market = default_markets(Path(directory)).get("IN")
+            weekday = datetime(2026, 10, 30, 5, 0, tzinfo=timezone.utc)
+
+            self.assertFalse(market.is_covered(weekday.date()))
+            self.assertFalse(market.exchange_calendars["XNSE"].is_covered(weekday.date()))
+            self.assertEqual(market.phase(weekday, mic="XNSE"), SessionPhase.CLOSED)
 
 
 if __name__ == "__main__":

@@ -814,6 +814,12 @@ def _build_context(
         evaluation_repository=store.position_exit_evaluations,
         clock=now,
     )
+    paper_cycle_limits = tuple(
+        limit for limit in (
+            autonomous_research.settings.max_candidates,
+            candidate_research.settings.max_candidates,
+        ) if limit is not None
+    ) if autonomous_research is not None else ()
     autonomous_paper_trading = (
         AutonomousPaperTradingService(
             repository=store.autonomous_paper_cycles,
@@ -823,7 +829,7 @@ def _build_context(
             execution=paper_proposal_execution,
             positions=paper_position_manager,
             gate=gate,
-            max_candidates=autonomous_research.settings.max_candidates,
+            max_candidates=min(paper_cycle_limits) if paper_cycle_limits else None,
             clock=now,
             discovery=_discovery_from_env(env),
             exploratory=_exploratory_from_env(env),
@@ -1125,11 +1131,19 @@ def _paper_loop_from_env(
     if errors:
         raise ConfigurationError(errors)
     try:
+        raw_top_n = (env.get("PAPER_AUTO_LOOP_TOP_N") or "").strip()
+        top_n = int(raw_top_n) if raw_top_n else None
+        if top_n is not None and (
+                top_n < 1 or cycles.max_candidates is not None
+                and top_n > cycles.max_candidates):
+            raise ValueError(
+                "PAPER_AUTO_LOOP_TOP_N must be positive and cannot exceed "
+                "configured max_candidates")
         loop_settings = PaperLoopSettings(
             universe_id=(env.get("PAPER_AUTO_LOOP_UNIVERSE") or f"{market}_ALL").strip(),
             market=market,
             interval_minutes=int(env.get("PAPER_AUTO_LOOP_INTERVAL_MINUTES") or 15),
-            top_n=min(int(env.get("PAPER_AUTO_LOOP_TOP_N") or 3), cycles.max_candidates),
+            top_n=top_n,
             eod_flatten_minutes=int(env.get("PAPER_EOD_FLATTEN_MINUTES") or 10),
             monitor_interval_seconds=int(env.get("PAPER_MONITOR_INTERVAL_SECONDS") or 30),
         )

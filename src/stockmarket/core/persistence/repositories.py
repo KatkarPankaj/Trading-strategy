@@ -2289,6 +2289,97 @@ class MarketWatchlistRepository(_Repository):
         self._db.execute("DELETE FROM market_watchlist WHERE instrument_id = ?", (instrument_id,))
 
 
+class KiteUsageRepository(_Repository):
+    """Durable request-attempt ledger and atomic rolling-window budget admission."""
+
+    def reserve(
+        self, *, request_id: str, requested_at: datetime, category: str, method: str,
+        endpoint: str, purpose: str, essential: bool, rolling_since: datetime,
+        request_budget: int, nonessential_limit: int,
+    ) -> tuple[int, bool]:
+        with self._db.transaction():
+            if self._db.dialect == "sqlite":
+                self._db.execute(
+                    "UPDATE kite_usage_budget_lock SET singleton = singleton WHERE singleton = 1")
+            elif self._db.dialect == "postgresql":
+                self._db.query(
+                    "SELECT singleton FROM kite_usage_budget_lock WHERE singleton = 1 FOR UPDATE")
+            else:
+                raise ValueError("KITE_USAGE_UNSUPPORTED_DATABASE_DIALECT")
+            used = self._db.query(
+                "SELECT COUNT(*) AS count FROM kite_rest_usage WHERE requested_at >= ?",
+                (ts(rolling_since),))[0]["count"]
+            if used >= request_budget:
+                return used, False
+            if not essential and used >= nonessential_limit:
+                return used, False
+            self._db.execute(
+                """INSERT INTO kite_rest_usage
+                   (request_id, requested_at, category, method, endpoint, purpose, essential,
+                    response_status, outcome, completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'STARTED', NULL)""",
+                (request_id, ts(requested_at), category, method, endpoint, purpose,
+                 int(essential)))
+            return used + 1, True
+
+    def complete(
+        self, request_id: str, *, response_status: int | None,
+        outcome: str, completed_at: datetime,
+    ) -> None:
+        if outcome not in {
+            "HTTP_RESPONSE", "HTTP_ERROR", "TIMEOUT", "CONNECTION_ERROR",
+            "AUTHENTICATION_ERROR", "PERMISSION_ERROR", "INVALID_REQUEST",
+            "PROVIDER_ERROR",
+        }:
+            raise ValueError("KITE_USAGE_INVALID_OUTCOME")
+        if response_status is not None and (
+            isinstance(response_status, bool) or not isinstance(response_status, int)
+            or not 100 <= response_status <= 599
+        ):
+            raise ValueError("KITE_USAGE_INVALID_RESPONSE_STATUS")
+        with self._db.transaction():
+            row = self._db.query(
+                "SELECT outcome FROM kite_rest_usage WHERE request_id = ?",
+                (request_id,))
+            if not row:
+                raise ValueError("KITE_USAGE_REQUEST_NOT_FOUND")
+            if row[0]["outcome"] != "STARTED":
+                raise ValueError("KITE_USAGE_REQUEST_ALREADY_COMPLETED")
+            self._db.execute(
+                """UPDATE kite_rest_usage
+                   SET response_status = ?, outcome = ?, completed_at = ?
+                   WHERE request_id = ? AND outcome = 'STARTED'""",
+                (response_status, outcome, ts(completed_at), request_id))
+            completed = self._db.query(
+                "SELECT outcome FROM kite_rest_usage WHERE request_id = ?",
+                (request_id,))
+            if not completed or completed[0]["outcome"] != outcome:
+                raise RuntimeError("KITE_USAGE_COMPLETION_NOT_PERSISTED")
+
+    def snapshot(self, *, rolling_since: datetime) -> dict[str, Any]:
+        rows = self._db.query(
+            """SELECT COUNT(*) AS request_count,
+                      SUM(CASE WHEN essential = 1 THEN 1 ELSE 0 END) AS essential_count,
+                      SUM(CASE WHEN essential = 0 THEN 1 ELSE 0 END) AS nonessential_count,
+                      SUM(CASE WHEN outcome = 'STARTED' THEN 1 ELSE 0 END) AS in_flight_count
+               FROM kite_rest_usage WHERE requested_at >= ?""",
+            (ts(rolling_since),))
+        latest_error = self._db.query(
+            """SELECT requested_at, category, endpoint, response_status, outcome
+               FROM kite_rest_usage
+               WHERE requested_at >= ? AND outcome NOT IN ('STARTED', 'HTTP_RESPONSE')
+               ORDER BY requested_at DESC LIMIT 1""",
+            (ts(rolling_since),))
+        row = rows[0]
+        return {
+            "tracked_rest_requests": row["request_count"] or 0,
+            "essential_requests": row["essential_count"] or 0,
+            "nonessential_requests": row["nonessential_count"] or 0,
+            "in_flight_requests": row["in_flight_count"] or 0,
+            "last_api_error": latest_error[0] if latest_error else None,
+        }
+
+
 class Store:
     """One handle to every repository; migrations must already have been applied."""
 
@@ -2326,3 +2417,4 @@ class Store:
         self.paper_outcomes = PaperOutcomeRepository(db)
         self.strategy_lab = StrategyLabRepository(db)
         self.prospective = ProspectiveRepository(db)
+        self.kite_usage = KiteUsageRepository(db)

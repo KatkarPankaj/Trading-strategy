@@ -1,0 +1,36 @@
+{
+  "years": [2026],
+  "holidays": [
+    "2026-01-15",
+    "2026-01-26",
+    "2026-03-03",
+    "2026-03-26",
+    "2026-03-31",
+    "2026-04-03",
+    "2026-04-14",
+    "2026-05-01",
+    "2026-05-28",
+    "2026-06-26",
+    "2026-09-14",
+    "2026-10-02",
+    "2026-10-20",
+    "2026-11-10",
+    "2026-11-24",
+    "2026-12-25"
+  ],
+  "early_closes": {},
+  "special_sessions": {},
+  "source": {
+    "url": "https://www.nseindia.com/resources/exchange-communication-holidays",
+    "section": "Holidays for the calendar year 2026 - Equities",
+    "observed_at": "2026-10-30T05:20:27Z",
+    "status": "UNREVIEWED_OBSERVATION_ONLY",
+    "pending_special_session_date": "2026-11-08",
+    "special_session_timing_status": "NOTIFIED_SUBSEQUENTLY_PER_SOURCE",
+    "limitations": [
+      "No independent review or execution authorization.",
+      "No BSE or 2027 calendar coverage is inferred.",
+      "Special-session hours must be verified against a separate cash-equity publication."
+    ]
+  }
+}

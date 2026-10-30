@@ -28,7 +28,7 @@ class PaperLoopSettings:
     universe_id: str
     market: str
     interval_minutes: int = 15
-    top_n: int = 3
+    top_n: int | None = None
     eod_flatten_minutes: int = 10
     max_consecutive_failures: int = 3
     operator: str = "paper-loop"
@@ -37,13 +37,17 @@ class PaperLoopSettings:
     def __post_init__(self) -> None:
         if not self.universe_id.strip() or not self.market.strip():
             raise ValueError("paper loop needs a universe_id and a market")
-        for name, low, high in (("interval_minutes", 1, 240), ("top_n", 1, 100),
+        for name, low, high in (("interval_minutes", 1, 240),
                                 ("eod_flatten_minutes", 1, 120),
                                 ("max_consecutive_failures", 1, 100),
                                 ("monitor_interval_seconds", 1, 300)):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer between {low} and {high}")
+        if self.top_n is not None and (
+                isinstance(self.top_n, bool) or not isinstance(self.top_n, int)
+                or self.top_n < 1):
+            raise ValueError("top_n must be a positive integer or null")
         if not self.operator.strip():
             raise ValueError("operator must be non-empty")
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from stockmarket.core.autonomous_research import (
     AutonomousResearchError,
@@ -50,12 +53,23 @@ class _Scanner:
         self.modes = []
         self.max_concurrency = 4
         self.configuration_fingerprint = "scanner-config"
+        self.universe_instruments = (self._instrument("US:ABC"),)
 
     def get_universe(self, universe_id):
         return type("Definition", (), {
             "markets": ("US",),
             "asset_classes": (AssetClass.EQUITY,),
-        })(), ()
+        })(), self.universe_instruments
+
+    @staticmethod
+    def _instrument(identity):
+        return SimpleNamespace(
+            instrument_id=identity, exchange="XNAS", market="US",
+            asset_class=AssetClass.EQUITY, currency="USD", timezone="UTC",
+            tick_size=0.01, lot_size=1,
+            trading_status=SimpleNamespace(value="ACTIVE"),
+            active=True, tradable=True,
+        )
 
     def scan(self, universe_id, mode, **kwargs):
         self.calls += 1
@@ -84,7 +98,8 @@ class _ResearchRepository:
 class _Research:
     def __init__(self):
         self.research_runs = _ResearchRepository()
-        self.settings = type("Settings", (), {"max_concurrency": 4})()
+        self.settings = type("Settings", (), {
+            "max_concurrency": 4, "max_candidates": None})()
         self.calls = 0
         self.configuration_fingerprint = "research-config"
 
@@ -219,6 +234,56 @@ class AutonomousResearchTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AutonomousResearchError, "PAPER-only"):
             service.run("universe", idempotency_key="live-attempt", mode="LIVE")
+
+    def test_all_eligible_candidates_use_existing_pipeline_without_fabricated_members(self):
+        for size in (10, 40):
+            with self.subTest(universe_size=size):
+                service, scanner, research, assessment, repository = self.make_service()
+                ids = [f"US:FIXTURE{i}" for i in range(size)]
+                scanner.universe_instruments = tuple(
+                    scanner._instrument(identity) for identity in ids)
+                scanner.repository.candidates = Mock(return_value=[
+                    {"instrument_id": identity} for identity in ids])
+                original_scan = scanner.scan
+                scanner.scan = Mock(side_effect=original_scan)
+
+                def research_scan(scan_id, **kwargs):
+                    research.calls += 1
+                    run_id = kwargs["run_id"]
+                    research.research_runs.run = {
+                        "run_id": run_id, "payload": {
+                            "configuration_fingerprint": research.configuration_fingerprint}}
+                    research.research_runs.rows = {
+                        f"snapshot-{i}": {"instrument_id": identity,
+                                         "payload": {"snapshot_id": f"snapshot-{i}"}}
+                        for i, identity in enumerate(ids)}
+                    return research.research_runs.run, ()
+
+                research.run_scan = Mock(side_effect=research_scan)
+                result = service.run(
+                    "universe", idempotency_key=f"coverage-{size}", as_of=AS_OF)
+                replay = service.run(
+                    "universe", idempotency_key=f"coverage-{size}", as_of=AS_OF)
+                self.assertEqual(result["status"], "COMPLETE")
+                self.assertEqual(len(result["candidates"]), size)
+                self.assertEqual(assessment.calls, size)
+                self.assertEqual(replay["run_id"], result["run_id"])
+                self.assertEqual(scanner.scan.call_args.kwargs["top_n"], size)
+                self.assertEqual(research.run_scan.call_args.kwargs["limit"], size)
+                self.assertEqual(result["execution"], "NOT_SUBMITTED")
+                self.assertEqual(len(repository.candidates(result["run_id"])), size)
+                with self.assertRaises(ValueError):
+                    service.run(
+                        "universe", idempotency_key="too-many", as_of=AS_OF,
+                        top_n=size + 1)
+
+    def test_candidate_capacity_is_unbounded_by_default_and_optional_ceiling_is_validated(self):
+        service, *_ = self.make_service()
+        self.assertIsNone(service.settings.max_candidates)
+        self.assertEqual(replace(service.settings, max_candidates=25).max_candidates, 25)
+        for value in (0, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replace(service.settings, max_candidates=value)
 
     def test_idempotency_key_cannot_be_reused_for_different_request(self):
         service, *_ = self.make_service()

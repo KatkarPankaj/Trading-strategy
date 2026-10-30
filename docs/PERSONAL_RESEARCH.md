@@ -276,11 +276,12 @@ Yahoo is research-only, not an authoritative master or execution feed.
 ## Market data provider: Yahoo or Twelve Data
 
 Yahoo needs no key but is unofficial and frequently returns `Too Many Requests`.
-`DATA_PROVIDER=twelvedata` is a research-only alternative that requests bars by
+`DATA_PROVIDER=twelvedata` is a research-only provider that requests bars by
 symbol plus MIC (`XNYS`, `XNAS`, `ARCX`, `XNSE`, `XBOM`, `XETR`) in UTC. Save the key
-on one line in the gitignored `secrets\twelvedata_api_key.txt`; the VS Code task
-**Start Personal Research API** then uses Twelve Data automatically, otherwise
-Yahoo. The adapter paces requests client-side (`TWELVEDATA_REQUESTS_PER_MINUTE`,
+on one line in the gitignored `secrets\twelvedata_api_key.txt`. The VS Code task
+**Start Personal Research API** explicitly uses Twelve Data for India and fails
+at startup if that key file is missing; it no longer silently falls back to Yahoo.
+The adapter paces requests client-side (`TWELVEDATA_REQUESTS_PER_MINUTE`,
 default 8, roughly the free-tier limit) and maps HTTP/JSON errors to
 `RATE_LIMITED`/`UNAVAILABLE` without exposing the key. Which exchanges and
 intervals are available, and whether bars are real time or delayed, depends on

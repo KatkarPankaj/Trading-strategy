@@ -22,7 +22,6 @@ from .scanner import MarketScanner, ScanMode
 
 logger = logging.getLogger(__name__)
 
-MAX_AUTONOMOUS_CANDIDATES = 10
 MAX_AUTONOMOUS_CONCURRENCY = 4
 
 
@@ -36,16 +35,18 @@ class IdempotencyConflict(AutonomousResearchError):
 
 @dataclass(frozen=True, slots=True)
 class AutonomousResearchSettings:
-    max_candidates: int = 10
+    max_candidates: int | None = None
     max_concurrency: int = 4
     allowed_markets: tuple[str, ...] = ()
     allowed_asset_classes: tuple[AssetClass, ...] = ()
     strategy_allowlist: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if isinstance(self.max_candidates, bool) or not isinstance(
-                self.max_candidates, int) or not 1 <= self.max_candidates <= MAX_AUTONOMOUS_CANDIDATES:
-            raise ValueError("max_candidates must be between 1 and 10")
+        if self.max_candidates is not None and (
+                isinstance(self.max_candidates, bool)
+                or not isinstance(self.max_candidates, int)
+                or self.max_candidates < 1):
+            raise ValueError("max_candidates must be a positive integer or null")
         if isinstance(self.max_concurrency, bool) or not isinstance(
                 self.max_concurrency, int) or not 1 <= self.max_concurrency <= MAX_AUTONOMOUS_CONCURRENCY:
             raise ValueError("max_concurrency must be between 1 and 4")
@@ -183,12 +184,6 @@ class AutonomousResearchService:
         if timestamp > now:
             raise ValueError("as_of cannot be in the future")
         timestamp = timestamp.astimezone(timezone.utc)
-        count = self.settings.max_candidates if top_n is None else top_n
-        if isinstance(count, bool) or not isinstance(count, int) \
-                or not 1 <= count <= self.settings.max_candidates:
-            raise ValueError(
-                f"top_n must be between 1 and {self.settings.max_candidates}")
-
         definition, universe_instruments = self.scanner.get_universe(universe_id)
         requested_markets = {item.upper() for item in self.settings.allowed_markets}
         universe_markets = {item.upper() for item in definition.markets}
@@ -220,6 +215,27 @@ class AutonomousResearchService:
             for instrument in universe_instruments
             if instrument.market.upper() in active_markets
             and instrument.asset_class in active_asset_classes)
+        if not scoped_instrument_ids:
+            raise AutonomousResearchError(
+                "universe has no instruments in the configured market and asset-class scope")
+        configured_limits = tuple(
+            limit for limit in (
+                self.settings.max_candidates,
+                self.candidate_research.settings.max_candidates,
+            ) if limit is not None)
+        count = (
+            min(len(scoped_instrument_ids), *configured_limits)
+            if top_n is None and configured_limits
+            else len(scoped_instrument_ids) if top_n is None else top_n
+        )
+        if isinstance(count, bool) or not isinstance(count, int) \
+                or not 1 <= count <= len(scoped_instrument_ids):
+            raise ValueError(
+                f"top_n must be between 1 and the scoped universe size "
+                f"({len(scoped_instrument_ids)})")
+        if any(count > limit for limit in configured_limits):
+            raise ValueError(
+                "top_n exceeds a configured max_candidates ceiling")
         instrument_scope_fingerprint = hashlib.sha256(
             json.dumps(scoped_instrument_ids, separators=(",", ":")).encode()
         ).hexdigest()
@@ -324,8 +340,15 @@ class AutonomousResearchService:
             payload["scan_status"] = scan_status
             self._update(run_id, "RUNNING", "SCAN_COMPLETE", payload)
 
-            selected_candidates = self.scanner.repository.candidates(
-                scan_id, selected_only=True, limit=int(request["top_n"]))
+            selected_candidates = []
+            offset = 0
+            while True:
+                page = self.scanner.repository.candidates(
+                    scan_id, selected_only=True, limit=1000, offset=offset)
+                selected_candidates.extend(page)
+                if len(page) < 1000:
+                    break
+                offset += len(page)
             if not selected_candidates:
                 payload["candidates"] = []
                 payload["completion_reason"] = "NO_ELIGIBLE_CANDIDATES"

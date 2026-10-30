@@ -1,5 +1,102 @@
 # Platform operations
 
+## Research the full verified universe
+
+The autonomous research and paper-cycle APIs, CLI, and US worker now default to
+all eligible instruments in the configured universe. `PAPER_AUTO_LOOP_TOP_N`
+and `--top` remain optional ways to request a smaller research subset. Do not
+set `AUTONOMOUS_RESEARCH_SETTINGS.max_candidates` or
+`CANDIDATE_RESEARCH_SETTINGS.max_candidates` unless an intentional research
+ceiling is required. Research concurrency remains bounded by existing settings;
+the number of simultaneous positions, order sizing, cash, exposure, and all
+other risk controls are unchanged.
+
+The US universe currently contains ten verified members, so this change does
+not add stocks. Expand the canonical instrument master only after reviewing
+instrument identity/eligibility and provider request budgets. Researching more
+members can increase market-data, news, and AI requests; do not assume provider
+capacity or cost is unlimited. Never alter `MAX_POSITION_QUANTITY` to change
+research coverage; it is a per-order share limit.
+
+Before increasing runtime throughput, review provider credits/rate limits, AI
+budgets, cycle duration and the previously observed protective-monitoring gaps.
+Keep protective quote capacity reserved. No cadence, concurrency, strategy
+threshold, portfolio limit, provider entitlement or operator runtime control is
+changed by installing this source update. A separately approved worker restart
+is needed to activate source/configuration changes.
+
+## India cash-equity calendar observations (2026, unreviewed)
+
+`src/stockmarket/core/calendars/XBOM.json` and `XNSE.json` contain the 16
+weekday dates separately observed in the official BSE and NSE 2026 equity
+holiday tables on October 30, 2026:
+[BSE](https://www.bseindia.com/static/markets/marketinfo/listholi) and
+[NSE](https://www.nseindia.com/resources/exchange-communication-holidays).
+The observed date sets match; that does not make the exchange calendars
+interchangeable. Each calendar remains a separate unreviewed observation, and
+its `source` metadata is informational, **not** the loader's `review`
+authorization contract.
+
+Both pages announce November 8 Muhurat trading but say timings will be notified
+separately. No hours are inferred or copied from other segments. No independent
+review, verified special-session schedule or 2027 coverage is claimed. Without
+the required reviewed evidence artifacts/report for each exchange, both
+calendars remain closed even on ordinary weekdays. India funding, feed, mapping,
+risk and single-market worker gates remain unchanged.
+
+### Kite REST usage guard (Phase B)
+
+The Phase-B ledger/controller records application-tracked REST request attempts
+in the `kite_rest_usage` table. It does not claim that a tracked request equals
+a Zerodha billing credit: the account-specific meaning of the reported
+"500 credits" remains unverified. `KITE_MONTHLY_CREDIT_BUDGET` is therefore an
+application cap, not an estimate of remaining provider credits. The default
+policy is 300 tracked requests in a rolling 30-day window, warnings at 50%, 70%
+and 85%, and a nonessential-request stop at the lower of the configured hard
+stop and the reserve boundary. The reserved capacity is limited to essential
+authentication/recovery calls. The window rolls by request timestamp; it does
+not reset on a calendar-month boundary.
+
+Configure `KITE_WARNING_THRESHOLDS`, `KITE_HARD_STOP_PERCENT`,
+`KITE_RESERVE_PERCENT`, and `KITE_USAGE_TRACKING_ENABLED` as shown in
+[`.env.example`](../.env.example). If tracking is disabled, guarded requests are
+rejected. Only the read-only market-data endpoints and the authentication
+session endpoint are admissible through the controller; order routes are
+rejected. The ledger records endpoint path and purpose, but never credentials,
+query strings, response bodies, or raw exception text.
+
+This phase adds the ledger and admission controller only. It does not create a
+Kite client, make API requests, enable India execution, or wire provider calls
+through the controller. Migration 28 must be explicitly applied before using
+the repository; do not apply it to a running account without the normal backup
+and migration review. WebSocket, instrument-master, historical-data, and
+dashboard integration remain future phases.
+
+### Kite authentication and instrument-master cache (Phase C)
+
+The local Kite client is dormant until explicitly constructed and called. Set
+`KITE_API_KEY_FILE` to the local API-key file (the `.env.example` points to the
+existing `secrets/zerodhasecret.txt` file) and set `KITE_API_SECRET_FILE` to a
+separate file containing the API secret. The API key and API secret are distinct
+credentials; do not put either value in `.env` or source control. The client
+can return the browser-login URL, exchange a user-supplied request token once,
+and atomically save the resulting access token to `KITE_ACCESS_TOKEN_FILE`.
+Keep the `secrets/` directory restricted to the local user; the token is not
+stored in the database or emitted in logs.
+Authentication and instrument downloads each pass through the persistent
+request guard. There are no retries or background login requests.
+
+The full instrument CSV and a checksum/timestamp sidecar are cached under
+`outputs/kite/`. A cache is reused for 24 hours; an expired or absent cache
+causes one guarded master request when explicitly requested. Unreadable,
+partial, mismatched, or future-dated cache metadata fails closed. NSE and BSE
+rows retain Kite's exchange, trading symbol, token, segment, expiry, lot size,
+tick size, and instrument type. The cache is provider reference data only: it
+does not validate an instrument mapping, map tokens into the canonical
+execution master, certify exchange entitlement, or enable India orders.
+Current calendar, provider, mapping, and research-only readiness gates remain
+unchanged. No access-token exchange or instrument download occurs at startup.
+
 The October platform is paper-trading software, not a live execution service or a
 production-readiness claim. Keep `TRADING_MODE=paper` and
 `ENABLE_LIVE_TRADING=false`. The checked-in Compose stack pins those values.
@@ -235,6 +332,9 @@ BSE `.BO` often requires an explicit verified vendor code, for example a numeric
 listing code rather than an NSE symbol. Twelve Data includes venue identity and
 validates response metadata. These sources remain research-only; plan entitlement,
 exchange coverage, quote delay and listing validity require independent checks.
+The India personal-research launch task explicitly selects Twelve Data and stops
+if its configured key file is missing; this provider choice does not imply NSE/BSE
+entitlement, verified instrument mappings, or permission to execute paper orders.
 Optional `TWELVEDATA_API_KEY[_FILE]_IN` / `_US` and
 `TWELVEDATA_REQUESTS_PER_MINUTE_IN` / `_US` scope credentials and local pacing.
 Scoped key files do not inherit a global inline key. No credentials are returned.
@@ -540,7 +640,7 @@ startup `ConfigurationError`s. Defaults are off.
 | `PAPER_AUTO_LOOP_MARKET` | first of `MARKETS` | must be an enabled market |
 | `PAPER_AUTO_LOOP_UNIVERSE` | `<MARKET>_ALL` | scanner universe |
 | `PAPER_AUTO_LOOP_INTERVAL_MINUTES` | `15` | cadence, aligned to wall-clock slots |
-| `PAPER_AUTO_LOOP_TOP_N` | `3` | capped by the autonomous cycle bound |
+| `PAPER_AUTO_LOOP_TOP_N` | unset | all eligible instruments; optionally set a positive research subset |
 | `PAPER_EXPLORATORY_AUTO_ENTRIES` | `false` | `true` lets unvalidated strategies open PAPER positions automatically to observe P&L; all strategy, sizing, freshness, session, risk and exit gates still apply; cycles/decisions are labelled `EXPLORATORY_UNVALIDATED` and never count as validation (goal rule 5.1 exception) |
 | `AUTOMATIC_EVIDENCE_MAX_AGE_DAYS` | unset | 1-365, operator-chosen. Automatic selection may use only an `ACTIVE_FOR_PAPER` Strategy Lab version for that instrument that still passes `paper-review-v1` and whose holdout ended within this window. Unset keeps every automatic entry blocked (`NO_VALIDATED_STRATEGY`) |
 | `PAPER_DISCOVERY_ENABLED` | `false` | adaptive discovery: rank long-HOLD instruments after fresh scanner candidates; never authorizes an order |

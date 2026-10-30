@@ -20,6 +20,38 @@ class ApiClientTests(unittest.TestCase):
         response.json.return_value = payload if payload is not None else {"ok": True}
         return response
 
+    def test_worker_clients_use_explicit_distinct_market_endpoints(self):
+        clients = ApiClient.worker_clients_from_env({
+            "API_BASE_URL_IN": "http://127.0.0.1:8001",
+            "API_BASE_URL_US": "http://127.0.0.1:8000",
+        })
+        self.assertEqual(set(clients), {"IN", "US"})
+        self.assertEqual(clients["IN"]._base, "http://127.0.0.1:8001")
+        self.assertEqual(clients["US"]._base, "http://127.0.0.1:8000")
+
+    def test_worker_clients_preserve_single_api_environment_compatibility(self):
+        clients = ApiClient.worker_clients_from_env({
+            "API_BASE_URL": "http://127.0.0.1:8123",
+        })
+        self.assertEqual(set(clients), {"DEFAULT"})
+        self.assertEqual(clients["DEFAULT"]._base, "http://127.0.0.1:8123")
+
+    def test_worker_clients_reject_duplicate_market_endpoints(self):
+        with self.assertRaisesRegex(ApiError, "distinct API worker endpoint"):
+            ApiClient.worker_clients_from_env({
+                "API_BASE_URL_IN": "http://127.0.0.1:8000/",
+                "API_BASE_URL_US": "http://127.0.0.1:8000",
+            })
+
+    def test_worker_identity_mismatch_fails_closed(self):
+        problem = ApiClient.worker_market_problem("IN", {
+            "paper_worker": {"execution_market": "US"},
+        })
+        self.assertIn("refusing to show its controls", problem)
+        self.assertIsNone(ApiClient.worker_market_problem("US", {
+            "paper_readiness": {"execution_market": "US"},
+        }))
+
     @patch("stockmarket.dashboard.client.requests.get")
     def test_get_sends_bearer_token(self, get):
         get.return_value = self.response()

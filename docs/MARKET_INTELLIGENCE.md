@@ -54,7 +54,7 @@ python -m stockmarket research-autonomous --universe <universe-id> --idempotency
 python -m stockmarket research-autonomous-show --run-id <run-id>
 ```
 
-`AUTONOMOUS_RESEARCH_SETTINGS` optionally bounds `max_candidates` (1–10), `max_concurrency` (1–4 and no greater than scanner/research limits), `allowed_markets`, `allowed_asset_classes`, and `strategy_allowlist`. Defaults inherit enabled markets, supported asset classes, and registered research strategies. This feature requires configured AI assessment and is not an order automation path.
+`AUTONOMOUS_RESEARCH_SETTINGS` may optionally set a smaller `max_candidates` ceiling; when omitted or `null`, autonomous research selects all instruments in the eligible configured-universe scope. `max_concurrency` remains bounded (1–4 and no greater than scanner/research limits), along with `allowed_markets`, `allowed_asset_classes`, and `strategy_allowlist`. Defaults inherit enabled markets, supported asset classes, and registered research strategies. This feature requires configured AI assessment and is not an order automation path.
 
 ## Phase 2C-2: deterministic signal generation
 

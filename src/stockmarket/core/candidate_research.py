@@ -132,7 +132,7 @@ class CandidateResearchSettings:
     news_max_age: timedelta = timedelta(hours=72)
     news_current_window: timedelta = timedelta(minutes=5)
     max_concurrency: int = 4
-    max_candidates: int = 50
+    max_candidates: int | None = None
     cache_ttl_seconds: float = 30.0
     cache_capacity: int = 256
     news_max_items: int = 20
@@ -146,10 +146,15 @@ class CandidateResearchSettings:
                 or not isinstance(self.regime_lookback_bars, int) \
                 or not 2 <= self.regime_lookback_bars <= 500:
             raise ValueError("regime_lookback_bars must be between 2 and 500")
-        for name in ("lookback_days", "max_concurrency", "max_candidates", "cache_capacity"):
+        for name in ("lookback_days", "max_concurrency", "cache_capacity"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.max_candidates is not None and (
+                isinstance(self.max_candidates, bool)
+                or not isinstance(self.max_candidates, int)
+                or self.max_candidates <= 0):
+            raise ValueError("max_candidates must be a positive integer or null")
         for name in (
             "regime_max_bar_age", "fundamental_max_age", "sector_max_age",
             "news_max_age", "news_current_window",
@@ -162,7 +167,7 @@ class CandidateResearchSettings:
                 or not isfinite(self.cache_ttl_seconds) or self.cache_ttl_seconds < 0:
             raise ValueError("cache_ttl_seconds must be finite and non-negative")
         if self.max_concurrency > 32 or self.lookback_days > 3650 \
-                or self.max_candidates > 50 or self.cache_capacity > 4096:
+                or self.cache_capacity > 4096:
             raise ValueError("candidate research settings exceed safe resource limits")
 
 
@@ -232,17 +237,23 @@ class CandidateResearchService:
         scan_id: str,
         *,
         as_of: datetime | None = None,
-        limit: int = 50,
+        limit: int | None = None,
         run_id: str | None = None,
         max_concurrency: int | None = None,
         strategy_signals: Mapping[str, Signal] | None = None,
     ) -> tuple[CandidateResearchRun, tuple[ResearchSnapshot, ...]]:
         if not isinstance(scan_id, str) or not scan_id.strip():
             raise ValueError("scan_id must be a non-empty string")
-        if isinstance(limit, bool) or not isinstance(limit, int) \
-                or not 1 <= limit <= self.settings.max_candidates:
-            raise ValueError(
-                f"limit must be between 1 and {self.settings.max_candidates}")
+        if limit is not None and (
+                isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValueError("limit must be a positive integer or null")
+        if self.settings.max_candidates is not None:
+            if limit is None:
+                limit = self.settings.max_candidates
+            elif limit > self.settings.max_candidates:
+                raise ValueError(
+                    f"limit exceeds configured max_candidates "
+                    f"({self.settings.max_candidates})")
         if run_id is not None and (
             not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 64
             or any(not (ch.isascii() and (ch.isalnum() or ch in "_-"))
@@ -271,8 +282,17 @@ class CandidateResearchService:
         self._validate_aware(scan_timestamp, "scanner as_of")
         if timestamp < scan_timestamp:
             raise ValueError("research as_of cannot precede the scanner run as_of")
-        rows = self.scanner_runs.candidates(
-            scan_id, accepted_only=True, selected_only=True, limit=limit, offset=0)
+        rows = []
+        offset = 0
+        while limit is None or offset < limit:
+            page_limit = 1000 if limit is None else min(1000, limit - offset)
+            page = self.scanner_runs.candidates(
+                scan_id, accepted_only=True, selected_only=True,
+                limit=page_limit, offset=offset)
+            rows.extend(page)
+            if len(page) < page_limit:
+                break
+            offset += len(page)
         if not rows:
             raise ValueError("scanner run has no selected Top-N candidates")
         candidates = [
@@ -287,22 +307,25 @@ class CandidateResearchService:
             for row in rows if row["instrument_id"] not in self.instruments
         ]
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(
-                    self._research_one, instrument, timestamp, run_id, rank, score
-                ): instrument
-                for instrument, score, rank in candidates
-            }
-            for future in as_completed(futures):
-                instrument = futures[future]
-                try:
-                    snapshots.append(future.result())
-                except Exception as exc:
-                    logger.exception(
-                        "candidate research failed",
-                        extra={"instrument_id": instrument.instrument_id, "run_id": run_id})
-                    failures.append(
-                        f"{instrument.instrument_id}:{type(exc).__name__}")
+            batch_size = workers * 4
+            for offset in range(0, len(candidates), batch_size):
+                batch = candidates[offset:offset + batch_size]
+                futures = {
+                    pool.submit(
+                        self._research_one, instrument, timestamp, run_id, rank, score
+                    ): instrument
+                    for instrument, score, rank in batch
+                }
+                for future in as_completed(futures):
+                    instrument = futures[future]
+                    try:
+                        snapshots.append(future.result())
+                    except Exception as exc:
+                        logger.exception(
+                            "candidate research failed",
+                            extra={"instrument_id": instrument.instrument_id, "run_id": run_id})
+                        failures.append(
+                            f"{instrument.instrument_id}:{type(exc).__name__}")
         snapshots.sort(key=lambda item: item.scanner_rank)
         if strategy_signals:
             enriched = []

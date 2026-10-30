@@ -38,6 +38,65 @@ entries remain subject to all runtime gates.
 
 ## 1. Prioritized root-cause report
 
+### 2026-10-30 runtime review: coverage, losses and protective continuity
+
+Read-only local API/SQLite inspection found three fully closed LONG paper
+episodes, not one. All timestamps below are UTC. No orders, controls or funding
+were changed by this review.
+
+| Instrument | Entry (20 shares each) | Exit | Reason | Recorded net USD |
+| --- | --- | --- | --- | --- |
+| SPY | Oct 26 19:21, 765.57 | Oct 26 19:50, 765.36 | END_OF_DAY_FLATTEN | -4.20 |
+| QQQ | Oct 27 15:31, 720.16 | Oct 29 14:14, 714.53 | STOP_LOSS | -112.60 |
+| AMZN | Oct 27 17:52, 253.80 | Oct 28 14:49, 252.78 | STOP_LOSS | -20.40 |
+
+Six filled orders/six fills, no current positions, cash/equity USD 99,862.80
+and realized net loss USD 137.20 reconcile arithmetically. Recorded fees and
+slippage are zero; these are not transaction-cost-qualified results.
+Portfolio daily PnL reported -165.00 versus monthly/closed-episode -137.20;
+the daily mark-to-market baseline must be reconciled separately before treating
+it as a per-day closed-trade statistic.
+
+Protective continuity is not certified: QQQ/AMZN evaluations recorded on
+Oct 27 end at 18:22:40, before the 19:50 scheduled flatten. The next observed
+evaluation is Oct 28 13:47:17. QQQ ultimately exits below its planned 717.27
+stop at 714.53. A stop threshold is not a guaranteed fill price, especially
+across gaps. Process existence alone does not establish monitoring continuity;
+OS suspension, provider failures and scheduler health need timestamped evidence.
+Do not increase entry throughput before investigating this operational gap.
+
+Coverage mismatch at investigation time: `US_ALL` contained ten instruments
+and the running/task loop selected two research candidates per cycle.
+`AUTONOMOUS_RESEARCH_SETTINGS.max_candidates` also has a ten-candidate hard
+ceiling. `MAX_POSITION_QUANTITY=20` means shares, not number of stocks;
+`news_max_items=25` means news items, not candidate count. Actual candidate
+traces include NO_CONFIRMED_BREAKOUT, PRICE_OFF_TICK, RESEARCH_NO_TRADE,
+AI_INVALID and OUTSIDE_ENTRY_WINDOW. Discovery cooldown/rotation codes must not
+be counted as execution rejections. Enlarging the shortlist is distinct from
+weakening these gates or requiring trades.
+
+Update 2026-10-30: the subsequent implementation removes the arbitrary research
+shortlist ceiling and defaults the worker to all eligible instruments in its
+configured verified universe. This supersedes the earlier 20-25 shortlist
+proposal; it does not enlarge the current ten-instrument master or change
+position/order risk limits. See `ARCHITECTURE_AUDIT.md` for the implementation
+scope. Next priorities remain protective-monitor continuity and daily PnL
+baseline reconciliation, followed by provider-capacity review before adding
+instruments.
+
+India calendar request: the existing reviewed XNSE/XBOM loader already supports
+holidays, early closes, explicit special sessions, artifact checksums and
+per-date official evidence. Official NSE page/API fetches timed out and the BSE
+page returned an application shell. Supplied official circular
+`https://nsearchives.nseindia.com/content/circulars/COM76978.pdf`
+(SHA256 `8b18836cf3dffd6ed38e68cd2511e222ad0033d11123939b03cf3f8184956796`,
+page 1) is NSE/COM/76978 dated October 19, 2026, for **commodity derivatives**.
+It is not cash-equity calendar authority. Do not import its special-session
+hours into XNSE/XBOM stock calendars. Requested 2026/2027 cash-equity coverage
+remains blocked pending the correct official annual and special-session
+circulars and independent review. No holiday dates, reviewer approval or
+calendar activation were fabricated.
+
 | Priority | Finding and evidence | Disposition |
 | --- | --- | --- |
 | P0: expected abstention, not an execution defect | Operator history contains 26 generated signals, all HOLD/confidence 0. Twenty most recent generated records have NO_TRADE; reasons across all 26: 22 NO_CONFIRMED_BREAKOUT, 4 PRICE_OFF_TICK. There are zero orders, fills and positions. | Do not force entries, round off-tick prices to manufacture signals, or weaken breakout/volume filters. |

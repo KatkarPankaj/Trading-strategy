@@ -231,7 +231,7 @@ class CandidateResearchRunBody(BaseModel):
 
     scan_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     as_of: datetime | None = None
-    limit: int = Field(default=50, ge=1, le=50, strict=True)
+    limit: int | None = Field(default=None, ge=1, strict=True)
 
     @field_validator("as_of")
     @classmethod
@@ -249,7 +249,7 @@ class AutonomousResearchRunBody(BaseModel):
         min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     mode: Literal["PAPER", "LIVE"] = "PAPER"
     as_of: datetime | None = None
-    top_n: int | None = Field(default=None, ge=1, le=10, strict=True)
+    top_n: int | None = Field(default=None, ge=1, strict=True)
 
     @field_validator("as_of")
     @classmethod
@@ -268,7 +268,7 @@ class AutonomousPaperCycleBody(BaseModel):
         min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     operator: str = Field(min_length=1, max_length=64)
     as_of: datetime | None = None
-    top_n: int | None = Field(default=None, ge=1, le=10, strict=True)
+    top_n: int | None = Field(default=None, ge=1, strict=True)
 
     @field_validator("operator")
     @classmethod
@@ -347,7 +347,7 @@ class ScannerRunBody(BaseModel):
 
     universe_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     mode: Literal["RESEARCH", "PAPER"] = "RESEARCH"
-    top_n: int | None = Field(default=None, ge=1, le=1000, strict=True)
+    top_n: int | None = Field(default=None, ge=1, strict=True)
     as_of: datetime | None = None
 
     @field_validator("as_of")

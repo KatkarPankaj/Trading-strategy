@@ -33,7 +33,7 @@ class AutonomousPaperTradingService:
         positions: Any,
         gate: Any,
         account_id: str = "PAPER",
-        max_candidates: int = 10,
+        max_candidates: int | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_duration: timedelta = timedelta(minutes=15),
         heartbeat_interval: float = 30.0,
@@ -43,9 +43,10 @@ class AutonomousPaperTradingService:
     ) -> None:
         if execution.trading.mode is not TradingMode.PAPER:
             raise ValueError("autonomous paper cycles require PAPER execution")
-        if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) \
-                or not 1 <= max_candidates <= 100:
-            raise ValueError("max_candidates must be between 1 and 100")
+        if max_candidates is not None and (
+                isinstance(max_candidates, bool)
+                or not isinstance(max_candidates, int) or max_candidates < 1):
+            raise ValueError("max_candidates must be a positive integer or null")
         if not account_id.strip():
             raise ValueError("account_id must be non-empty")
         if lease_duration <= timedelta(0) or heartbeat_interval <= 0:
@@ -87,11 +88,14 @@ class AutonomousPaperTradingService:
         self._validate_identifier(idempotency_key, "idempotency_key")
         if not isinstance(operator, str) or not operator.strip():
             raise ValueError("operator must be non-empty")
-        count = self.max_candidates if top_n is None else top_n
-        if isinstance(count, bool) or not isinstance(count, int) \
-                or not 1 <= count <= self.max_candidates:
+        if top_n is not None and (
+                isinstance(top_n, bool) or not isinstance(top_n, int) or top_n < 1):
+            raise ValueError("top_n must be a positive integer or null")
+        if self.max_candidates is not None and top_n is not None \
+                and top_n > self.max_candidates:
             raise ValueError(
-                f"top_n must be between 1 and {self.max_candidates}")
+                f"top_n exceeds configured max_candidates ({self.max_candidates})")
+        count = top_n if top_n is not None else self.max_candidates
         prior = self.repository.get_by_key(idempotency_key)
         now = self._now()
         timestamp = self._aware(
@@ -308,7 +312,9 @@ class AutonomousPaperTradingService:
             selected = [
                 candidate for candidate in research_result.get("candidates", [])
                 if candidate.get("stage") == "STRATEGY_SELECTED"
-            ][:request["top_n"]]
+            ]
+            if request["top_n"] is not None:
+                selected = selected[:request["top_n"]]
             selected_ids = {str(item["instrument_id"]) for item in selected}
             if history and payload.get("discovery") is not None:
                 record_added(payload["discovery"], history,

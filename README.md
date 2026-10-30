@@ -18,10 +18,24 @@
 paper** trading when all independent gates permit it. Starting services does not
 override a pause, failed recovery, stale data or risk rejection. A `PARTIAL`
 recovery keeps new entries blocked and requires investigation, not bypassing.
-The task currently uses OpenAI, not Ollama.
+The task currently uses OpenAI, not Ollama. The dashboard can connect to separate
+US and India API endpoints; its **Market API context** selector selects an API
+endpoint, not the Market Watch market. India remains personal research only and
+cannot execute paper orders.
 
 See [the complete startup procedure](#windows-start-the-current-us-paper-trading-dashboard)
 for credential checks, port checks, database precautions and API health commands.
+
+### Optional India research connection
+
+The shared dashboard has an India endpoint configured on port 8001, separate
+from the US paper worker on port 8000. To display India research, run **Start
+Personal Research API** from **Tasks: Run Task**, then select **IN research
+API (execution disabled)** in the dashboard's **Market API context** selector.
+This uses the separate `outputs/paper_india.db`; it does not enable India
+orders. India execution continues to require reviewed exchange calendars and
+validated provider and instrument-mapping evidence. The two workers must remain
+on distinct API endpoints and databases.
 
 The API-backed dashboard includes a dedicated **Market Watch** workspace for
 US/India canonical-instrument search, a persisted shared watchlist and explicit,
@@ -195,7 +209,16 @@ Use the API-backed [dashboard_app.py](dashboard_app.py), not the legacy
 
 1. Open this repository folder in VS Code. Run **Python: Select Interpreter**
    and select the Python environment where `requirements.txt` is installed
-   (see Setup above).
+   (see Setup above). Use **File > Open Folder**, select the repository, and
+   open **Terminal > New Terminal** with PowerShell. All commands below run
+   from the repository root, not from `src` or `docs`:
+   ```powershell
+   Get-Location
+   Test-Path -LiteralPath '.vscode\tasks.json'
+   ```
+   The last command must return `True`. On a new installation only, follow
+   Setup to create `.venv` and install dependencies, then select that interpreter.
+   Do not reinstall packages or overwrite `config.json` for routine startup.
 2. Before starting, check whether the services already exist:
    ```powershell
    Get-NetTCPConnection -State Listen -LocalPort 8000,8501 -ErrorAction SilentlyContinue |
@@ -217,11 +240,19 @@ Use the API-backed [dashboard_app.py](dashboard_app.py), not the legacy
    If startup reports missing migrations, stop and follow the separately approved
    backup/migration procedure in [docs/OPERATIONS.md](docs/OPERATIONS.md).
    Do not delete, reset, fund or replace the database to fix startup.
+   **Known source/database alignment requirement:** experiment preregistration
+   adds V27. An API error containing `pending migrations [27]` means the backend
+   has not started, even if Streamlit opens. Request approval for a WAL-safe
+   backup, integrity/account-history verification and the supported migration
+   procedure. Do not set `AUTO_MIGRATE=true` as a workaround.
 5. For an explicitly authorized automatic US paper session, run **Tasks: Run
    Task** from the command palette and choose **Start US Paper Auto-Loop API**.
    Wait for Uvicorn's application-startup confirmation on port 8000.
    Use the VS Code task itself: copying only its command omits `options.env`,
    including research sessions and news settings.
+   To inspect progress, use **Terminal > Run Task** or **Ctrl+Shift+P > Tasks:
+   Show Running Tasks**, then select its terminal. A traceback or
+   `terminated with exit code: 1` is a failed startup, not a running backend.
 6. Run **Tasks: Run Task** again and choose **Start platform PAPER dashboard**.
    Open <http://127.0.0.1:8501/>. The API is <http://127.0.0.1:8000/>.
 7. Verify the running configuration and gates:
@@ -241,6 +272,44 @@ Use the API-backed [dashboard_app.py](dashboard_app.py), not the legacy
    diagnostics before expecting orders. `RUNNING` alone does not mean entries
    are permitted. Do not clear leases, bypass recovery or resume paused entries
    just to obtain an order.
+8. Check the separate kill switch without resetting it:
+   ```powershell
+   $headers = @{
+       Authorization = 'Bearer ' + (Get-Content -LiteralPath 'secrets\local_dashboard.secret' -Raw).Trim()
+   }
+   Invoke-RestMethod http://127.0.0.1:8000/kill-switch -Headers $headers |
+       ConvertTo-Json -Depth 6
+   Remove-Variable headers
+   Invoke-RestMethod http://127.0.0.1:8501/_stcore/health
+   ```
+   Streamlit should return `ok`. The API must report PAPER/US, completed recovery
+   and a healthy monitor; a restored kill switch or durable entry pause requires
+   separate review/authorization, not an automatic reset.
+9. In the browser, click **Refresh** and select the newest paper cycle in the
+   sidebar. During an eligible US session the configured research cadence is
+   10 minutes plus provider/AI processing time. Market closure or blocked gates
+   can leave the last session's research visible; waiting cannot repair failed
+   recovery or a kill switch. Review **Orders**, **Portfolio**, **Strategies**
+   (completed paper outcomes) and **System health** rather than treating research
+   rows as orders.
+10. Keep both task terminals running while using the app. Refreshing or closing
+    the browser does not stop the API. For an intentional shutdown, first review
+    open positions/orders and arrange continued protection or approved closure;
+    do not stop the sole protective worker with unmanaged positions. Use
+    **Ctrl+C** in the API terminal and wait for shutdown to finish before starting
+    another worker; stop the Streamlit terminal separately with **Ctrl+C**.
+    Never delete a lock or database file to make a restart succeed.
+
+Troubleshooting:
+
+| Symptom | Action |
+| --- | --- |
+| Browser opens but API is unavailable | Inspect the API task terminal; dashboard health alone does not verify the backend. |
+| `pending migrations [27]` | Stop startup attempts and obtain approval for backup/verification/migration; preserve existing cash and history. |
+| `RESEARCH_SESSIONS` missing/invalid | Launch the complete VS Code task, including `options.env`, not a copied partial command. |
+| Python interpreter placeholder or module not found | Select the correct interpreter; verify dependencies in that environment. |
+| Address/worker ownership already in use | Inspect the existing PID and reuse the service; do not start a second worker or kill an unknown process. |
+| `PARTIAL`, `EXITS_ONLY`, active kill switch or stale feed | Read the exact diagnostics and resolve the cause; do not bypass the gate to obtain trades. |
 
 The current US task opts into a 10-minute automatic cycle and
 `PAPER_EXPLORATORY_AUTO_ENTRIES=true`: exploratory strategies are **not validated

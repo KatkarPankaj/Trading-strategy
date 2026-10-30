@@ -1,5 +1,76 @@
 # Architecture Audit (Phase 0)
 
+## 2026-10-30 increment: full eligible-universe research
+
+The user clarified that stock-count expansion means researching the entire
+verified configured universe, not removing simultaneous-position, order-size
+or portfolio risk limits. The autonomous research/cycle services now use the
+eligible universe size when no explicit `top_n` is provided. Repository reads
+for scanner candidates are paginated; research concurrency limits remain in
+place. The US worker no longer requests only two candidates per cycle. The
+current ten-member instrument master remains unchanged.
+
+`max_candidates` remains an optional intentional research ceiling; unset or
+`null` means no shortlist ceiling. Actual coverage can still be lower because
+instruments fail eligibility, data-quality, session, research or strategy
+checks. No trades are forced. No order/portfolio risk caps were changed.
+Researching a substantially larger master may increase provider/AI requests
+and cycle duration; verify budgets and protective-monitor capacity before
+expanding instruments. Services were not restarted. Tests were not run as
+requested.
+
+## 2026-10-30 increment: shortlist capacity and BSE observation seed
+
+Confirmed runtime before changes: ten US universe members, two selected candidates
+per 10-minute cycle. Existing autonomous research capped requests at ten and the
+loop bootstrap silently reduced requests above its configured capacity.
+This increment raises the supported research ceiling to 25, reuses that constant
+for API and CLI admission, and rejects inconsistent loop configuration explicitly.
+Research defaults and running task settings remain unchanged. No stocks, prices,
+strategy approvals, trades or risk thresholds are manufactured to fill a quota.
+Fixtures exercise 25 selected candidates, a ten-member smaller universe,
+idempotent replay, 25 HOLD candidates with zero orders, production bootstrap
+capacity and strict API/CLI bounds. Existing execution/risk regressions remain.
+
+Rendered browser inspection of the official BSE holiday page now exposes all 16
+2026 equity holiday dates. `calendars/XBOM.json` stores those factual dates with
+unreviewed source metadata. The existing per-exchange review gate continues to
+deny authorization; no synthetic reviewer, source artifact or Muhurat times were
+created. The published page defers November 8 special-session timings.
+NSE and 2027 coverage remain absent. See the operational setup notes for details.
+
+This is not certification of 25-instrument provider capacity or resolution of
+the recorded overnight protective-monitoring gaps. A larger instrument master,
+capacity review and separately approved runtime activation remain required.
+
+Goal alignment was checked against `AI_Trading_Platform_Master_Goal.md`,
+`ARCHITECTURE.md` and `EXECUTION_BOUNDARY.md`; no `.docx` files were found in
+the repository. Read older roadmap/inventory descriptions as historical where
+they conflict with the current independent protective-monitor implementation.
+
+| Master goal | Alignment / remaining acceptance gate |
+| --- | --- |
+| Reliable trading foundation first | Overnight protective-evaluation gaps and daily PnL-baseline reconciliation remain higher priority than activating broader scans. No reliability certification is claimed. |
+| Adaptive opportunity discovery | Supports 25 candidates through existing scanner/research/paper orchestration, not a second scanner. Ten current universe members remain ten; no invented instruments or mandatory orders. |
+| Evidence-based strategy selection | No changes to deterministic strategy rules, approved evidence requirements or explicit exploratory-paper labeling. AI recommendations do not approve risk. |
+| Cost-efficient AI and independent protection | Default limits, concurrency and cadence unchanged. Larger runtime coverage requires measured provider/AI budgets and retained protective capacity. |
+| Verified international readiness | BSE dates are an unreviewed observation seed, not authorization. NSE, 2027, special sessions, feed entitlement, INR funding and worker ownership remain separate gates. |
+| Measured learning and 30-day evaluation | Existing outcomes/prospective evidence are reused. No training, strategy promotion, benchmark certification or completed experiment is implied by candidate capacity. |
+
+Validation executed before the subsequent request to review the documentation:
+focused suite `python -m unittest test_autonomous_research
+test_autonomous_paper_trading test_paper_end_to_end test_api_research
+test_india_readiness` passed 94 tests (before adding one final settings-boundary
+test). Full suite once with `PYTHONPATH=src;tests`,
+`python -m unittest discover -s tests`: 796 tests in 415.132 seconds,
+OK with 5 skipped; exit code 0. Existing AnyIO ResourceWarnings were emitted.
+Editor diagnostics reported no errors in changed Python files.
+`git diff --check` passed with line-ending notices on existing task/goal files.
+No further validation commands were run after reading the master goal's
+manual-validation workflow. Future commands for operator-run verification are
+the focused and full commands above; they do not authorize a runtime restart,
+operator migration or control reset.
+
 ## 2026-10-26 increment: autonomous PAPER experiment foundation
 
 Source inspected: HEAD `dcd80f0`, with existing uncommitted README/configuration

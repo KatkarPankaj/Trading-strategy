@@ -450,6 +450,19 @@ _V27 = [
         payload TEXT NOT NULL, created_at TEXT NOT NULL)""",
 ]
 
+_V28 = [
+    """CREATE TABLE kite_usage_budget_lock (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1))""",
+    "INSERT INTO kite_usage_budget_lock (singleton) VALUES (1)",
+    """CREATE TABLE kite_rest_usage (
+        request_id TEXT PRIMARY KEY, requested_at TEXT NOT NULL,
+        category TEXT NOT NULL, method TEXT NOT NULL, endpoint TEXT NOT NULL, purpose TEXT NOT NULL,
+        essential INTEGER NOT NULL CHECK (essential IN (0, 1)),
+        response_status INTEGER, outcome TEXT NOT NULL,
+        completed_at TEXT)""",
+    "CREATE INDEX idx_kite_rest_usage_requested_at ON kite_rest_usage (requested_at)",
+]
+
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "initial_schema", _V1), (2, "strategy_configs",
                                  _V2), (3, "execution_records", _V3),
@@ -474,7 +487,8 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (24, "bounded_execution_history_access", _V24),
     (25, "shared_market_watchlist", _V25),
     (26, "durable_execution_history_revision", _V26),
-    (27, "preregistered_paper_experiments", _V27)]
+    (27, "preregistered_paper_experiments", _V27),
+    (28, "kite_rest_request_usage_ledger", _V28)]
 
 
 def applied_versions(db: Database) -> set[int]:

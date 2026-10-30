@@ -505,8 +505,8 @@ class MarketScanner:
         if selected_mode is ScanMode.PAPER and scan_at < now - self._settings.maximum_quote_age:
             raise ValueError("PAPER scans require a current as_of timestamp")
         limit = self._settings.top_n if top_n is None else top_n
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
-            raise ValueError("top_n must be between 1 and 1000")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("top_n must be a positive integer")
         definition, instruments = self._universes.get_universe(universe_id)
         selected_markets = definition.markets
         if scan_id is not None and (
