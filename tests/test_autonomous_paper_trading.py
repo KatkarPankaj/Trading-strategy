@@ -106,13 +106,13 @@ class AutonomousPaperTradingTests(TestCase):
         self.store = Store(self.database)
         self.addCleanup(self.database.close)
 
-    def test_twenty_five_no_trade_candidates_never_force_orders_or_duplicate_replay(self):
+    def test_thirty_no_trade_candidates_never_force_orders_or_duplicate_replay(self):
         class ShortlistResearch(_Research):
             def run(self, *args, **kwargs):
                 result = super().run(*args, **kwargs)
                 result["candidates"] = [
                     {"instrument_id": f"XNAS:FIXTURE{i}", "stage": "STRATEGY_SELECTED"}
-                    for i in range(25)]
+                    for i in range(30)]
                 return result
 
         class HoldSignals:
@@ -130,10 +130,10 @@ class AutonomousPaperTradingTests(TestCase):
         service = _service(
             self.store, research=ShortlistResearch(), signals=HoldSignals(),
             proposals=HoldProposals(), execution=execution)
-        service.max_candidates = 25
-        result = service.run("US_ALL", idempotency_key="shortlist-25", operator="fixture", top_n=25)
-        replay = service.run("US_ALL", idempotency_key="shortlist-25", operator="fixture", top_n=25)
-        self.assertEqual(len(result["candidates"]), 25)
+        service.max_candidates = None
+        result = service.run("US_ALL", idempotency_key="universe-30", operator="fixture")
+        replay = service.run("US_ALL", idempotency_key="universe-30", operator="fixture")
+        self.assertEqual(len(result["candidates"]), 30)
         self.assertEqual(replay["run_id"], result["run_id"])
         self.assertEqual(execution.calls, [])
         self.assertTrue(all(c["payload"]["decision_trace"]["final_status"] == "NO_TRADE"

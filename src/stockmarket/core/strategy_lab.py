@@ -16,6 +16,7 @@ import pandas as pd
 from .ai.candidate_assessment import CandidateAssessmentService
 from .ai.schemas import StrategyProposalSchema
 from .backtesting.engine import BacktestConfig, BacktestEngine
+from .backtesting.csv_import import ImportedHistoricalDataset
 from .backtesting.strategy_adapter import strategy_signal_fn
 from .backtesting.execution_model import ExecutionModel
 from .backtesting.walk_forward import make_windows, session_dates
@@ -318,6 +319,67 @@ class StrategyLabService:
             allow_short=allow_short,
             session_flatten_before_close=timedelta(minutes=self.flatten_minutes),
             bar_interval=interval_delta(interval)))
+
+    def replay_imported_csv(
+        self, proposal_id: str, dataset: ImportedHistoricalDataset, *,
+        commission_rate: float = .001, slippage_bps: float = 5,
+    ) -> dict[str, Any]:
+        """Replay user-supplied historical bars without provider access or evaluation persistence."""
+        if not isinstance(dataset, ImportedHistoricalDataset):
+            raise TypeError("dataset must be an ImportedHistoricalDataset")
+        self._validate_costs(commission_rate, slippage_bps)
+        proposal = self.store.strategy_lab.get(proposal_id)
+        if proposal is None:
+            raise KeyError(proposal_id)
+        spec = StrategyProposalSchema.model_validate(proposal["specification"])
+        instrument = self.instruments.get(proposal["instrument_id"])
+        if instrument is None or instrument != dataset.instrument:
+            raise StrategyLabError("CSV instrument does not match the registered proposal instrument")
+        if instrument.exchange != "XNSE" or instrument.market != "IN" \
+                or instrument.currency != "INR":
+            raise StrategyLabError("historical CSV replay is restricted to NSE/IN/INR")
+        if interval_delta(dataset.interval) != interval_delta(spec.timeframe):
+            raise StrategyLabError("CSV interval does not match the strategy proposal timeframe")
+        if spec.market != instrument.market or spec.outcome != "PROPOSAL":
+            raise StrategyLabError("proposal is not an executable India strategy hypothesis")
+        if spec.parameters.allow_short and instrument.shortable is not True:
+            raise StrategyLabError("short-selling eligibility is unavailable")
+
+        bars = dataset.bars
+        quality = validate_bars(bars, dataset.interval, timezone=instrument.timezone)
+        if not quality.ok:
+            raise StrategyLabError("imported bars failed validation: " + ", ".join(quality.issues))
+        market = self.assessment.markets.get(instrument.market)
+        calendar = market.exchange_calendars.get(instrument.exchange)
+        if calendar is None:
+            raise StrategyLabError("NSE-specific exchange calendar is unavailable")
+        strategy = self._strategy(spec)
+        session = self.sessions.get(instrument.market)
+        if session is None:
+            raise StrategyLabError("verified session configuration is unavailable")
+        engine = self.backtest_engine(
+            instrument, dataset.interval, allow_short=spec.parameters.allow_short,
+            commission_rate=commission_rate, slippage_bps=slippage_bps)
+        result = dataset.replay(engine, strategy_signal_fn(strategy, instrument, session),
+                                calendar=calendar)
+        return {
+            "mode": "HISTORICAL_CSV_REPLAY",
+            "executable": False,
+            "orders_submitted": False,
+            "live_readiness_changed": False,
+            "proposal_id": proposal_id,
+            "instrument_id": instrument.instrument_id,
+            "interval": dataset.interval,
+            "provenance": dataset.provenance,
+            "metrics": result.metrics,
+            "skipped": result.skipped,
+            "trades": result.trades,
+            "equity_curve": [
+                {"timestamp": stamp.isoformat(), "equity": float(value)}
+                for stamp, value in result.equity_curve.items()
+            ],
+            "fills": result.fills,
+        }
 
     def register_holdout(
         self, proposal_id: str, *, start: datetime, end: datetime,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import unittest
 
 from fastapi.testclient import TestClient
@@ -80,8 +81,41 @@ def make_store() -> Store:
 
 
 class PaperEndToEndTests(unittest.TestCase):
+    def test_existing_account_task_preserves_universe_and_restores_entry_pause(self):
+        root = Path(__file__).resolve().parents[1]
+        tasks = json.loads((root / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
+        task = next(item for item in tasks["tasks"]
+                    if item["label"] == "Start existing US paper account (no universe import)")
+        options = task["options"]["env"]
+        self.assertIn("$env:INSTRUMENT_MASTER_FILE='';", task["command"])
+        self.assertIn("$env:INSTRUMENT_BOOTSTRAP='none';", task["command"])
+        self.assertIn("$env:ENABLE_LIVE_TRADING='false';", task["command"])
+        self.assertEqual(options["AUTO_MIGRATE"], "false")
+        self.assertEqual(options["MAX_TRADES_PER_DAY"], "10")
+        self.assertEqual(json.loads(options["CANDIDATE_RESEARCH_SETTINGS"])["news_max_items"], 5)
+        self.store.audit.append(
+            "fixture", "PAPER_LOOP_ENTRIES_PAUSED", "paper-loop", "automatic-entries",
+            {"reason": "capacity review", "at": self.clock(), "exits_remain_enabled": True})
+        ctx = self.context(auto_loop=True, extra_env={
+            "AUTO_MIGRATE": "false", "MAX_TRADES_PER_DAY": options["MAX_TRADES_PER_DAY"],
+            "INSTRUMENT_MASTER_FILE": "", "INSTRUMENT_BOOTSTRAP": "none",
+        })
+        self.assertEqual(set(ctx.instruments), {self.instrument_id})
+        self.assertEqual(ctx.settings.risk.max_trades_per_day, 10)
+        self.assertEqual(ctx.settings.risk.max_open_positions, 5)
+        self.assertFalse(ctx.paper_loop.status()["operator_entries_enabled"])
+        monitor = ctx.paper_loop.protective_monitor
+        monitor.enable()
+        monitor.run_once()
+        self.assertTrue(monitor.enabled)
+        self.assertEqual(monitor.status()["state"], "HEALTHY")
+        self.assertFalse(ctx.paper_loop.status()["operator_entries_enabled"])
+        self.assertEqual(self.store.orders.all(), [])
+        self.assertEqual(ctx.mode, "PAPER")
+        self.assertIsNone(ctx.live)
+
     def test_full_universe_is_the_default_with_optional_explicit_research_ceiling(self):
-        ctx = self.context(auto_loop=True)
+        ctx = self.context(auto_loop=True, extra_env={"PAPER_AUTO_LOOP_TOP_N": ""})
         self.assertIsNone(ctx.autonomous_research.settings.max_candidates)
         self.assertIsNone(ctx.autonomous_paper_trading.max_candidates)
         self.assertIsNone(ctx.paper_loop.settings.top_n)
@@ -92,6 +126,25 @@ class PaperEndToEndTests(unittest.TestCase):
         self.assertEqual(capped.autonomous_research.settings.max_candidates, 25)
         self.assertEqual(capped.autonomous_paper_trading.max_candidates, 25)
         self.assertEqual(capped.paper_loop.settings.top_n, 25)
+
+    def test_expanded_us_master_and_fifty_trade_policy_use_existing_paper_composition(self):
+        root = Path(__file__).resolve().parents[1]
+        tasks = json.loads((root / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
+        task = next(item for item in tasks["tasks"]
+                    if item["label"] == "Start US Paper Auto-Loop API")
+        ctx = self.context(auto_loop=True, extra_env={
+            "PAPER_AUTO_LOOP_TOP_N": "",
+            "INSTRUMENT_MASTER_FILE": str(root / "config" / "instruments_us_paper.json"),
+            "MAX_TRADES_PER_DAY": task["options"]["env"]["MAX_TRADES_PER_DAY"],
+        })
+        self.assertEqual(len(ctx.instruments), 30)
+        self.assertEqual(ctx.settings.risk.max_trades_per_day, 50)
+        self.assertEqual(ctx.settings.risk.max_open_positions, 5)
+        self.assertIsNone(ctx.autonomous_research.settings.max_candidates)
+        self.assertIsNone(ctx.autonomous_paper_trading.max_candidates)
+        self.assertIsNone(ctx.paper_loop.settings.top_n)
+        self.assertIsNone(ctx.live)
+        self.assertEqual(ctx.mode, "PAPER")
 
     def setUp(self):
         self.store = make_store()

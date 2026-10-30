@@ -444,14 +444,24 @@ not a durable account spend limit or a cross-thread/retry budget reservation.
 The analyst also rejects oversized raw inputs/context rather than silently
 truncating them (`AI_INPUT_LIMIT_EXCEEDED`, `AI_CONTEXT_LIMIT_EXCEEDED`).
 `AI_MAX_INPUT_CHARS` (1000-64000, default 6000) is the serialized
-snapshot/selection context limit. Oversized contexts still fail closed as
-`INSUFFICIENT_EVIDENCE`; they are never truncated or treated as a signal.
+snapshot/selection context limit. Oversized snapshot contexts fail closed as
+`AI_INVALID`; oversized strategy-selection contexts are rejected with an
+explicit selection error. The errors include actual character count and limit.
+Neither stage truncates context or treats an input-budget failure as a signal.
 `CANDIDATE_RESEARCH_SETTINGS` accepts `news_max_items` (1-20, default 20); when
 more in-window events are accepted, only the most recent are kept and the
 snapshot records `NEWS_EVENTS_CAPPED:kept=N:omitted=M`. The US auto-loop task
 uses `AI_MAX_INPUT_CHARS=16000` and `news_max_items=5` because 20 news items
-pushed every US snapshot (about 18.8k characters) over the 6000 default,
-rejecting all candidates before strategy evaluation.
+pushed the October 30 US snapshots (18,276-18,612 characters) over even the
+16,000-character configured cap, rejecting all ten candidates before a model
+call. The task was restored to five recent news items. Offline replay of those
+ten persisted contexts reduced them to 7,747-7,871 characters and passed both
+AI stages' full serialized-request/schema/output-reserve admission with mocked
+transport. This is request-budget validation, not a successful live-model
+assessment or permission to trade. The existing producer records omitted-event
+counts explicitly; this does not change universe size, provider credits or
+strategy/risk rules. A running worker requires a separately authorized controlled
+restart; the staged 30-instrument expansion must not be activated as a side effect.
 Compose mounts `secrets/ai_api_key.txt` as the key-file secret. Keep the
 non-secret endpoint, model, and session settings in the ignored host `.env`.
 

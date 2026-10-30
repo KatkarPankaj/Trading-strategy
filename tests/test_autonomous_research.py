@@ -236,7 +236,7 @@ class AutonomousResearchTests(unittest.TestCase):
             service.run("universe", idempotency_key="live-attempt", mode="LIVE")
 
     def test_all_eligible_candidates_use_existing_pipeline_without_fabricated_members(self):
-        for size in (10, 40):
+        for size in (10, 30, 40):
             with self.subTest(universe_size=size):
                 service, scanner, research, assessment, repository = self.make_service()
                 ids = [f"US:FIXTURE{i}" for i in range(size)]

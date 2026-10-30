@@ -14,8 +14,9 @@
 			"options": {
 				"env": {
 					"AUTO_MIGRATE": "false",
+					"MAX_TRADES_PER_DAY": "50",
 					"AI_MAX_INPUT_CHARS": "16000",
-					"CANDIDATE_RESEARCH_SETTINGS": "{\"news_max_items\":25}",
+					"CANDIDATE_RESEARCH_SETTINGS": "{\"news_max_items\":5}",
 					"NEWS_PROVIDER": "finnhub",
 					"FINNHUB_API_KEY_FILE": "secrets\\finhub-api-key",
 					"FINNHUB_API_KEY": "",
@@ -23,6 +24,25 @@
 				}
 			},
 			"command": "$env:PYTHONPATH='src'; $env:APP_ENV='development'; $env:TRADING_MODE='paper'; $env:ENABLE_LIVE_TRADING='false'; $env:PERSONAL_RESEARCH='false'; $env:INSTRUMENT_BOOTSTRAP='none'; $env:INSTRUMENT_MASTER_FILE='config\\instruments_us_paper.json'; $env:MARKETS='US'; $env:BASE_CURRENCY='USD'; $env:DATA_PROVIDER='twelvedata'; $env:TWELVEDATA_API_KEY_FILE='secrets\\twelvedata_api_key.txt'; if (-not $env:TWELVEDATA_REQUESTS_PER_MINUTE) { $env:TWELVEDATA_REQUESTS_PER_MINUTE='8' }; $env:DATABASE_URL='sqlite:///outputs/paper_auto_us.db'; $env:ENTRY_WINDOW_START='09:45'; $env:ENTRY_WINDOW_END='15:30'; $env:MAX_POSITION_QUANTITY='20'; $env:MAX_ORDER_NOTIONAL='25000'; $env:KILL_SWITCH_AUTO='true'; $env:API_TOKEN_FILE='secrets\\local_dashboard.secret'; $env:AI_BASE_URL='https://api.openai.com/v1'; $env:AI_MODEL='gpt-4.1-mini'; $env:AI_API_KEY_FILE='secrets\\ai_api_key.txt'; $env:AI_TIMEOUT_SECONDS='20'; if (Test-Path Env:AI_API_KEY) { Remove-Item Env:AI_API_KEY }; $env:PAPER_AUTO_LOOP='true'; $env:PAPER_AUTO_LOOP_MARKET='US'; $env:PAPER_AUTO_LOOP_INTERVAL_MINUTES='10'; $env:PAPER_EOD_FLATTEN_MINUTES='10'; $env:PAPER_DISCOVERY_ENABLED='true'; $env:PAPER_DISCOVERY_HOLD_MINUTES='30'; $env:AUTOMATIC_EVIDENCE_MAX_AGE_DAYS='90'; $env:PAPER_EXPLORATORY_AUTO_ENTRIES='true'; & '${command:python.interpreterPath}' -m uvicorn stockmarket.api.bootstrap:create_app_from_env --factory --host 127.0.0.1 --port 8000 --workers 1",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Start existing US paper account (no universe import)",
+			"type": "shell",
+			"options": {
+				"env": {
+					"AUTO_MIGRATE": "false",
+					"MAX_TRADES_PER_DAY": "10",
+					"AI_MAX_INPUT_CHARS": "16000",
+					"CANDIDATE_RESEARCH_SETTINGS": "{\"news_max_items\":5}",
+					"NEWS_PROVIDER": "finnhub",
+					"FINNHUB_API_KEY_FILE": "secrets\\finhub-api-key",
+					"FINNHUB_API_KEY": "",
+					"RESEARCH_SESSIONS": "{\"US\":{\"opening_range_minutes\":15,\"entry_cutoff\":\"15:30\",\"square_off\":\"15:50\",\"late_entry_start\":\"12:00\"}}"
+				}
+			},
+			"command": "$env:PYTHONPATH='src'; $env:APP_ENV='development'; $env:TRADING_MODE='paper'; $env:ENABLE_LIVE_TRADING='false'; $env:PERSONAL_RESEARCH='false'; $env:INSTRUMENT_BOOTSTRAP='none'; $env:INSTRUMENT_MASTER_FILE=''; $env:MARKETS='US'; $env:BASE_CURRENCY='USD'; $env:DATA_PROVIDER='twelvedata'; $env:TWELVEDATA_API_KEY_FILE='secrets\\twelvedata_api_key.txt'; if (-not $env:TWELVEDATA_REQUESTS_PER_MINUTE) { $env:TWELVEDATA_REQUESTS_PER_MINUTE='8' }; $env:DATABASE_URL='sqlite:///outputs/paper_auto_us.db'; $env:ENTRY_WINDOW_START='09:45'; $env:ENTRY_WINDOW_END='15:30'; $env:MAX_POSITION_QUANTITY='20'; $env:MAX_ORDER_NOTIONAL='25000'; $env:KILL_SWITCH_AUTO='true'; $env:API_TOKEN_FILE='secrets\\local_dashboard.secret'; $env:AI_BASE_URL='https://api.openai.com/v1'; $env:AI_MODEL='gpt-4.1-mini'; $env:AI_API_KEY_FILE='secrets\\ai_api_key.txt'; $env:AI_TIMEOUT_SECONDS='20'; if (Test-Path Env:AI_API_KEY) { Remove-Item Env:AI_API_KEY }; $env:PAPER_AUTO_LOOP='true'; $env:PAPER_AUTO_LOOP_MARKET='US'; $env:PAPER_AUTO_LOOP_INTERVAL_MINUTES='10'; $env:PAPER_EOD_FLATTEN_MINUTES='10'; $env:PAPER_DISCOVERY_ENABLED='true'; $env:PAPER_DISCOVERY_HOLD_MINUTES='30'; $env:AUTOMATIC_EVIDENCE_MAX_AGE_DAYS='90'; $env:PAPER_EXPLORATORY_AUTO_ENTRIES='true'; & '${command:python.interpreterPath}' -m uvicorn stockmarket.api.bootstrap:create_app_from_env --factory --host 127.0.0.1 --port 8000 --workers 1",
 			"isBackground": true,
 			"problemMatcher": []
 		},

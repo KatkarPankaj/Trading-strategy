@@ -27,6 +27,11 @@ from .walk_forward import (
     run_walk_forward,
     session_dates,
 )
+from .csv_import import (
+    HistoricalCSVImportError,
+    ImportedHistoricalDataset,
+    import_nse_csv,
+)
 
 __all__ = [
     "CandidateEvaluation",
@@ -45,6 +50,8 @@ __all__ = [
     "CorporateAction",
     "ExecutionModel",
     "FoldResult",
+    "HistoricalCSVImportError",
+    "ImportedHistoricalDataset",
     "MonteCarloResult",
     "PriceBasis",
     "WalkForwardReport",
@@ -52,6 +59,7 @@ __all__ = [
     "compute_metrics",
     "make_windows",
     "monte_carlo_trade_analysis",
+    "import_nse_csv",
     "run_walk_forward",
     "session_dates",
 ]

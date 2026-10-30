@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
@@ -34,6 +36,7 @@ from stockmarket.news.models import (
 from stockmarket.core.persistence import SQLiteDatabase, Store, migrate
 from stockmarket.core.research import ResearchObservation
 from stockmarket.core.security import Secret
+from stockmarket.core.settings import load_settings
 
 
 AS_OF = datetime(2026, 10, 8, 20, 1, tzinfo=timezone.utc)
@@ -322,6 +325,20 @@ class CandidateResearchTests(unittest.TestCase):
         self.assertEqual(
             parse_candidate_research_settings('{"news_max_items": 5}').news_max_items, 5)
         self.assertEqual(CandidateResearchSettings().news_max_items, 20)
+
+    def test_us_paper_task_research_settings_are_valid(self):
+        task_file = Path(__file__).resolve().parents[1] / ".vscode" / "tasks.json"
+        tasks = json.loads(task_file.read_text(encoding="utf-8"))["tasks"]
+        task = next(item for item in tasks if item["label"] == "Start US Paper Auto-Loop API")
+        settings = parse_candidate_research_settings(
+            task["options"]["env"]["CANDIDATE_RESEARCH_SETTINGS"])
+        self.assertEqual(settings.news_max_items, 5)
+        baseline = load_settings({"APP_ENV": "development"})
+        configured = load_settings({
+            "APP_ENV": "development",
+            "MAX_TRADES_PER_DAY": task["options"]["env"]["MAX_TRADES_PER_DAY"],
+        })
+        self.assertEqual(configured.risk, replace(baseline.risk, max_trades_per_day=50))
 
     def test_historical_news_requires_an_archive_capable_provider(self):
         provider = StaticNewsProvider()

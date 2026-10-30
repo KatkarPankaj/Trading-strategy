@@ -241,7 +241,9 @@ Use the API-backed [dashboard_app.py](dashboard_app.py), not the legacy
    backup/migration procedure in [docs/OPERATIONS.md](docs/OPERATIONS.md).
    Do not delete, reset, fund or replace the database to fix startup.
    **Known source/database alignment requirement:** experiment preregistration
-   adds V27. An API error containing `pending migrations [27]` means the backend
+   adds V27; the Kite REST usage ledger adds V28. Migrations are needed only
+   when code introduces schema changes, not for each restart. An API error
+   containing `pending migrations [...]` means the backend
    has not started, even if Streamlit opens. Request approval for a WAL-safe
    backup, integrity/account-history verification and the supported migration
    procedure. Do not set `AUTO_MIGRATE=true` as a workaround.
@@ -305,8 +307,10 @@ Troubleshooting:
 | Symptom | Action |
 | --- | --- |
 | Browser opens but API is unavailable | Inspect the API task terminal; dashboard health alone does not verify the backend. |
-| `pending migrations [27]` | Stop startup attempts and obtain approval for backup/verification/migration; preserve existing cash and history. |
+| `pending migrations [...]` | Stop startup attempts and obtain approval for backup/verification/migration; preserve existing cash and history. |
 | `RESEARCH_SESSIONS` missing/invalid | Launch the complete VS Code task, including `options.env`, not a copied partial command. |
+| `news_max_items must be an integer between 1 and 20` | Set `CANDIDATE_RESEARCH_SETTINGS.news_max_items` within 1–20; the US task uses five recent news items per candidate to fit its AI request budget. This is not the researched-stock count. |
+| `AI_INVALID`: snapshot context exceeds the configured AI input limit | Review the reported character count and limit. Keep the US task's five-item news budget with `AI_MAX_INPUT_CHARS=16000`; oversized contexts remain rejected, not truncated. Restart requires separate controlled approval; do not activate the staged universe to fix this. |
 | Python interpreter placeholder or module not found | Select the correct interpreter; verify dependencies in that environment. |
 | Address/worker ownership already in use | Inspect the existing PID and reuse the service; do not start a second worker or kill an unknown process. |
 | `PARTIAL`, `EXITS_ONLY`, active kill switch or stale feed | Read the exact diagnostics and resolve the cause; do not bypass the gate to obtain trades. |
@@ -319,6 +323,117 @@ the task neither guarantees an order nor overrides persisted safety controls.
 It uses OpenAI `gpt-4.1-mini`, not local Ollama. The earlier Ollama connectivity
 test did not switch the application to `qwen3:8b`. India execution remains a
 separate readiness task.
+
+### US research universe and daily paper-trade policy
+
+**Conservative existing-account restart:** while expansion capacity is unresolved,
+use **Start existing US paper account (no universe import)**, not **Start US
+Paper Auto-Loop API**. The conservative task opens the same account without
+importing a master file, keeps the ten/day cap and five-position default,
+and applies the five-news-item AI fix. It preserves whatever instruments are
+already persisted; it does not remove instruments or reset cash/history.
+The existing audited entry pause restores on startup; this task itself does
+not create a pause on a fresh/unpaused account. Verify the pause before and
+after maintenance, keep protective monitoring enabled, and never start it
+while port 8000 or the account worker lease is owned.
+
+Use Ctrl+C in the existing US API task terminal and wait for application
+shutdown to finish before launching the conservative task. Review open
+positions/pending orders and continued protection first. Do not terminate an
+unknown process, force-stop protection, resume entries or use the staged task
+as a shortcut. Provider capacity remains a separate prerequisite even for
+the smaller account. A paused loop does not automatically research or open
+new positions; historical analysis and explicitly budgeted advisory research
+are learning workflows, not permission to trade.
+
+The configured [US paper master](config/instruments_us_paper.json) contains
+30 instruments (28 equities and two ETFs), retaining the original ten.
+The loop's unset `PAPER_AUTO_LOOP_TOP_N` researches the eligible configured
+universe, not a guaranteed number of signals or orders. The US task explicitly
+sets `MAX_TRADES_PER_DAY=50`; the development default remains 10 for other
+launches. The five-simultaneous-position limit and all other risk limits remain
+unchanged. Strategy confirmation alone never authorizes an order.
+
+The 20 added symbols are AVGO, NFLX, COST, ADBE, INTC, CSCO, JPM, BAC, GS, V,
+MA, UNH, JNJ, ABBV, XOM, CVX, CAT, WMT, HD and PG. Their symbols, primary
+listing venues, equity classifications and non-test status were checked against
+Nasdaq Trader's [US symbol directory](https://www.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt)
+on October 30, 2026 (file stamp `1030202609:17`). `Q` maps to Nasdaq/XNAS
+and `N` to NYSE/XNYS; notably WMT uses XNAS. This is listing verification,
+not provider-entitlement, liquidity, current tick-size or strategy certification.
+The additions use the existing paper master conventions of whole-share lots,
+USD 0.01 ticks and no shorting. Fresh provider data, liquidity filters and
+per-order validation remain required; no stale data or assumed fills are added.
+
+**Activation pending capacity review:** these file changes do not reconfigure a
+running worker. The task defaults to eight Twelve Data requests/minute. Five
+open positions monitored every 30 seconds can require ten quote requests/minute
+before research, pending-order or entry traffic. The separate quote resilience
+lane still shares the underlying provider's quota. A full 30-member scan plus
+candidate-bar research can additionally require 60 bar requests per cycle
+before strategy/news/AI and risk evaluation. Neither expanded coverage nor
+50 daily trades is certified at the default provider budget. Verify the actual
+provider plan, total shared-key usage (including India/Market Watch), daily
+credits, cycle latency and protective-monitor capacity before an authorized
+controlled restart. Do not raise a quota speculatively, slow protection or
+remove entry gates to activate the expansion. No schema migration is needed
+for this configuration change.
+
+#### Capacity planning for the staged US expansion
+
+Planning assumptions: a normal 390-minute US session, 39 ten-minute cycles,
+all 30 instruments eligible, one scanner bar read, one candidate-research bar
+read and one deterministic-signal bar read per instrument per cycle. Five
+positions held throughout the session require up to 3,900 scheduled monitoring
+quotes at the unchanged 30-second cadence. The adapter uses Twelve Data
+`time_series` for both bars and quotes; its published weight is one credit per
+symbol for this endpoint.
+
+| Workload | Illustrative credits/session |
+| --- | ---: |
+| Scanner bars: 30 x 39 | 1,170 |
+| Candidate research bars: 30 x 39 | 1,170 |
+| Deterministic signal bars: 30 x 39 | 1,170 |
+| Protective quotes: 5 x 2/minute x 390 | 3,900 |
+| Cached daily risk-stat bars: 30 symbols | 30 |
+| Entry quote allowance: illustrative two reads x 50 entries | 100 |
+| Planning baseline | 7,540 |
+| Baseline plus 30% headroom | 9,802 |
+
+Use **at least 10,000 credits per US session, preferably no daily cap**, as an
+initial budget target, not a proven upper bound. Rejected proposals, repeated
+final validation, pending orders, exits, retries, restarts, manual research,
+Market Watch and shared India usage can add requests. The 50-trade cap does not
+cap rejected attempts or provider traffic. News/Finnhub and AI have separate
+quotas and costs.
+
+The baseline averages about 19.3 credits/minute, but research runs in bursts.
+For plan evaluation, target **144 credits/minute or more** with verified
+real-time US equity **and ETF** entitlement and permitted application usage.
+This is a procurement/planning target, not a measured safe configuration:
+even 144/minute can be exhausted by clustered research and risk validation.
+The current shared limiter has no protective request reservation. Confirm
+priority/reservation or demonstrate sufficient headroom under full-universe
+research plus five-position monitoring before activation; do not simply raise
+`TWELVEDATA_REQUESTS_PER_MINUTE` or infer safety from the average.
+
+Checked October 30, 2026: Twelve Data's
+[published pricing](https://twelvedata.com/pricing.md) lists Basic at 8/minute
+and 800/day, and Grow configurations at 55, 144 and 377/minute without a daily
+cap. These public offerings do not establish the operator account's allowance,
+ETF entitlement or licensing; confirm those directly with the provider.
+Neither the reported 100/day allowance nor published Basic capacity meets
+this workload. The expansion remains staged, with no quota changes or restart.
+
+Subsequent direct verification on October 30 used the configured provider's
+`api_usage` endpoint: it reported Basic, eight credits/minute and 800/day,
+correcting the earlier unverified 100/day report. A bounded AAPL adapter read
+also passed the existing 300-second freshness and tick checks (about 126
+seconds old). This proves neither continuous feed availability nor capacity
+for research plus protection. Health reads do not refresh quotes; a flat,
+entry-paused worker can report no execution data after restart without the
+provider itself being unavailable. Entries remain paused; no allowance was
+increased and no timestamps were rewritten.
 
 ## Launch legacy research dashboard
 The dashboard can still display:

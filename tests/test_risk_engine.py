@@ -203,6 +203,22 @@ class RiskEngineTests(unittest.TestCase):
         )
         self.assert_rejected(trades, "MAX_TRADES_PER_DAY_EXCEEDED")
 
+    def test_fifty_trade_policy_preserves_position_and_data_gates(self):
+        self.engine = RiskEngine(replace(
+            self.limits, max_open_positions=5, max_trades_per_day=50))
+        approved = self.evaluate(context=self.make_context(trades_today=49))
+        self.assertEqual(approved.status, RiskDecisionStatus.APPROVED)
+        self.assert_rejected(
+            self.evaluate(context=self.make_context(trades_today=50)),
+            "MAX_TRADES_PER_DAY_EXCEEDED")
+        self.assert_rejected(
+            self.evaluate(context=self.make_context(trades_today=49, open_positions=5)),
+            "MAX_OPEN_POSITIONS_EXCEEDED")
+        self.assert_rejected(
+            self.evaluate(context=self.make_context(
+                trades_today=49, market_data_timestamp=NOW - timedelta(minutes=3))),
+            "MARKET_DATA_STALE")
+
     def test_rejects_outside_entry_window_and_unconfigured_window(self):
         outside = self.evaluate(
             context=self.make_context(

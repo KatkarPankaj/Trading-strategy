@@ -2,27 +2,35 @@
 
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import json
+from pathlib import Path
 from threading import Event
 import unittest
+from unittest.mock import patch
+from uuid import UUID
 
 from pydantic import ValidationError
 
 from stockmarket.core.ai import AIAnalyst
 from stockmarket.core.ai.analyst import AIUnavailable
 from stockmarket.core.ai.candidate_assessment import CandidateAssessmentService
+from stockmarket.core.ai.openai_compatible import OpenAICompatibleProvider
 from stockmarket.core.ai.schemas import CandidateAssessmentSchema
 from stockmarket.core.candidate_research import (
     CandidateResearchService,
     CandidateResearchSettings,
+    parse_candidate_research_settings,
 )
 from stockmarket.core.markets import default_markets
+from stockmarket.core.security import Secret
 from stockmarket.core.strategies import OrbVwapStrategy
 
 from test_candidate_research import (
     AS_OF,
     AssessmentProvider,
     StaticObservationProvider,
+    StaticNewsProvider,
     assessment_response,
     make_fixture,
     strategy_response,
@@ -121,6 +129,86 @@ class AssessmentServiceTests(unittest.TestCase):
 
     def _order_count(self):
         return self.store.db.query("SELECT COUNT(*) AS n FROM orders")[0]["n"]
+
+    def test_us_task_news_budget_admits_both_ai_stages_without_truncating_evidence(self):
+        task_file = Path(__file__).resolve().parents[1] / ".vscode" / "tasks.json"
+        task = next(item for item in json.loads(task_file.read_text(encoding="utf-8"))["tasks"]
+                    if item["label"] == "Start US Paper Auto-Loop API")
+        env = task["options"]["env"]
+        settings = parse_candidate_research_settings(env["CANDIDATE_RESEARCH_SETTINGS"])
+        limit = int(env["AI_MAX_INPUT_CHARS"])
+
+        class ManyNewsProvider(StaticNewsProvider):
+            def get_news(self, query):
+                event, = super().get_news(query)
+                return tuple(replace(
+                    event, timestamp=AS_OF - timedelta(minutes=i + 1),
+                    headline=f"Event {i}: " + "Quarterly earnings and market outlook. " * 5,
+                    reference=f"https://example.com/news/{i}/" + "reference-" * 12,
+                    provider_event_id=f"provider-{i}",
+                    event_id=UUID(int=i + 1),
+                ) for i in range(20))
+
+        def research(news_settings):
+            service = CandidateResearchService(
+                self.market_data, self.store.scanner_runs, self.store.research_runs,
+                {self.instrument.instrument_id: self.instrument},
+                news_provider=ManyNewsProvider(),
+                settings=replace(news_settings, cache_ttl_seconds=0),
+                clock=lambda: AS_OF,
+            )
+            return service.run_scan("scan-test")[1][0]
+
+        oversized = research(replace(settings, news_max_items=20))
+        blocked_provider = AssessmentProvider([])
+        blocked = self._service(blocked_provider, max_input_chars=limit).assess(
+            oversized.snapshot_id)
+        self.assertEqual(blocked.assessment.status.value, "AI_INVALID")
+        self.assertIn(f"limit={limit}", blocked.assessment.error)
+        self.assertIn("chars=", blocked.assessment.error)
+        self.assertEqual(blocked_provider.users, [])
+
+        bounded = research(settings)
+        self.assertIn("NEWS_EVENTS_CAPPED:kept=5:omitted=15", bounded.warnings)
+        provider = AssessmentProvider([
+            assessment_response(
+                instrument_id=bounded.instrument_id, snapshot_id=bounded.snapshot_id),
+            strategy_response(),
+        ])
+        result = self._service(provider, max_input_chars=limit).assess(bounded.snapshot_id)
+        self.assertEqual(result.state.value, "STRATEGY_SELECTED")
+        self.assertEqual(len(provider.users), 2)
+        context = result.assessment.input_context.as_mapping()
+        for user in provider.users:
+            request = user.split("<untrusted>\n", 1)[1].split("\n</untrusted>", 1)[0]
+            self.assertLessEqual(len(request), limit)
+            payload = json.loads(request)
+            sent = payload.get("research", payload)
+            self.assertEqual(sent["evidence"], context["evidence"])
+        news = [item for item in context["evidence"] if item["component"] == "news"]
+        self.assertEqual(len(news), 5)
+        self.assertTrue(all(item["payload"]["headline"].endswith("outlook. ") for item in news))
+        self.assertEqual(self._order_count(), 0)
+
+        with patch("stockmarket.core.ai.openai_compatible.urlopen") as transport:
+            response = transport.return_value.__enter__.return_value
+            response.read.side_effect = [
+                json.dumps({"choices": [{"message": {"content": json.dumps(value)}}]}).encode()
+                for value in (
+                    assessment_response(
+                        instrument_id=bounded.instrument_id, snapshot_id=bounded.snapshot_id),
+                    strategy_response(),
+                )
+            ]
+            adapter = OpenAICompatibleProvider(
+                "https://api.openai.com/v1", "gpt-4.1-mini", Secret("offline-test-key"))
+            admitted = self._service(adapter, max_input_chars=limit).assess(bounded.snapshot_id)
+            self.assertEqual(admitted.state.value, "STRATEGY_SELECTED")
+            self.assertEqual(transport.call_count, 2)
+            for call in transport.call_args_list:
+                body = call.args[0].data
+                self.assertLessEqual(len(body) + 64 + 4096, 32768)
+            self.assertEqual(self._order_count(), 0)
 
     def test_no_trade_is_rejected_without_strategy_selection(self):
         provider = AssessmentProvider([self._response(

@@ -120,6 +120,35 @@ class InstrumentMasterTests(unittest.TestCase):
         self.markets = default_markets()
         self.env = {"INSTRUMENT_BOOTSTRAP": "development", "PERSONAL_RESEARCH": "true"}
 
+    def test_us_paper_master_has_thirty_unique_instruments_and_preserves_existing_records(self):
+        path = Path(__file__).resolve().parents[1] / "config" / "instruments_us_paper.json"
+        original_ids = {
+            "XNAS:AAPL", "XNAS:MSFT", "XNAS:NVDA", "XNAS:AMD", "XNAS:AMZN",
+            "XNAS:TSLA", "XNAS:META", "XNAS:GOOGL", "ARCX:SPY", "XNAS:QQQ",
+        }
+        existing = self.markets.get("US").instrument(
+            "AAPL", mic="XNAS", asset_class=AssetClass.EQUITY, tick_size=0.01,
+            tradable=False, name="Existing operator metadata")
+        self.store.instruments.save(existing)
+        env = {"INSTRUMENT_MASTER_FILE": str(path)}
+        report = bootstrap_instruments(self.store, self.markets, ("US",), env)
+        self.assertEqual((report["requested"], report["inserted"], report["preserved"]), (30, 29, 1))
+        rows = self.store.instruments.list()
+        self.assertEqual(len({row["instrument_id"] for row in rows}), 30)
+        self.assertTrue(original_ids.issubset({row["instrument_id"] for row in rows}))
+        for row in rows:
+            with self.subTest(instrument=row["instrument_id"]):
+                payload = json.loads(row["payload"])
+                self.assertEqual((row["market"], row["currency"], row["timezone"]),
+                                 ("US", "USD", "America/New_York"))
+                self.assertFalse(payload["shortable"])
+                if row["instrument_id"] != existing.instrument_id:
+                    self.assertEqual(payload["provider_symbol"], row["symbol"])
+        self.assertEqual(self.store.instruments.get("XNAS:WMT")["symbol"], "WMT")
+        self.assertFalse(json.loads(self.store.instruments.get("XNAS:AAPL")["payload"])["tradable"])
+        repeated = bootstrap_instruments(self.store, self.markets, ("US",), env)
+        self.assertEqual((repeated["inserted"], repeated["preserved"]), (0, 30))
+
     def test_bootstrap_valid_canonical_records_and_preserves_user_metadata_on_restart(self):
         report = bootstrap_instruments(self.store, self.markets, ("US", "IN"), self.env)
         self.assertEqual(report["inserted"], 16)

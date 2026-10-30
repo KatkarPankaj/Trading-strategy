@@ -296,6 +296,41 @@ starting with the Grow or Venture plan", so on a free key the DE and IN
 universes show MISSING/UNAVAILABLE and produce no recommendations. Use a paid
 plan or the Yahoo provider (no key, rate-limited) for those markets.
 
+## Local NSE historical CSV replay
+
+Historical NSE bars can be imported without contacting a data provider:
+
+```python
+from stockmarket.core.backtesting import import_nse_csv
+
+dataset = import_nse_csv(
+    r"data\SBIN_5m.csv",
+    ctx.instruments["XNSE:SBIN"],
+    "5m",
+    declared_source="user-supplied historical export",
+)
+replay = ctx.strategy_lab.replay_imported_csv("STRATEGY_PROPOSAL_ID", dataset)
+```
+
+The CSV header must be exactly `timestamp,open,high,low,close,volume`
+(case-insensitive, in that order). Timestamps must be ISO-8601 with `Z` or an
+explicit UTC offset. Prices must be finite and positive, volume non-negative,
+timestamps sorted and unique, OHLC relationships valid, and intraday bars on
+the instrument's NSE session grid. Internal same-session gaps are rejected;
+completeness at the first and last session boundaries cannot be independently
+verified. Accepted and rejected imports are recorded under
+`outputs\historical_replay\<artifact-id>\` with a preserved source copy and
+SHA-256 manifest. The source name is user-declared and is never treated as
+exchange-verified.
+
+Replay uses the existing Strategy Lab deterministic strategy adapter and
+`BacktestEngine`, with the proposal's interval, INR instrument and configured
+execution-cost assumptions. It is returned as `HISTORICAL_CSV_REPLAY`; it does
+not submit orders or create a live-feed paper evaluation. Replay requires
+covered, reviewed NSE calendar dates for the imported bars. This calendar check
+does not validate CSV provenance or change provider, instrument, or live
+execution readiness. BSE CSV import and dashboard upload are not supported.
+
 ## Germany (Xetra) instruments
 
 The DE development universe is built only from stored Xetra records. Import them

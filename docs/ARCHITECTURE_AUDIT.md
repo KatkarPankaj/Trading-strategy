@@ -1,5 +1,163 @@
 # Architecture Audit (Phase 0)
 
+## 2026-10-30 increment: provider blockers verified directly
+
+The configured Twelve Data `api_usage` endpoint reported Basic capacity of
+eight credits/minute and 800/day. This supersedes the previously unverified
+100/day assumption; published pricing alone was not account verification.
+No credentials, account identifiers or complete provider response are recorded.
+A single AAPL quote through the existing TwelveDataProvider had a source time
+of 13:55 UTC and was checked at 13:57:06 UTC: age about 126 seconds, within the
+existing 300-second threshold, with valid tick price and no quality issues.
+No order, timestamp substitution or runtime-health mutation was performed.
+
+The health endpoint's missing data after restart/pause is not by itself proof
+that the feed is broken: no entry-cycle quotes are fetched while entries are
+paused and no positions need protection. This bounded quote check proves one
+symbol at one instant, not continuous freshness, all-symbol entitlement or
+safe capacity. Five positions at the unchanged 30-second cadence require up
+to 3,900 protective quotes in a normal US session before research, exceeding
+the verified daily allowance; ten quotes/minute also exceeds eight/minute.
+No code setting can enlarge the external provider entitlement. The operator
+pause remains in place. A confirmed higher-capacity provider plan and measured
+protective/research scheduling headroom, or a separately approved reduced
+workflow, are still needed before automatic entries can safely resume.
+
+## 2026-10-30 increment: conservative operator decision
+
+The user delegated selection of the safest paper/learning setup while provider
+capacity remains unresolved. The existing authenticated entry-control route
+recorded an automatic-entry pause; read-back confirmed entries disabled,
+protective monitoring enabled/HEALTHY and recovery complete. Preflight showed
+zero gross exposure and only the six prior FILLED orders. No kill switch,
+cash, history, provider allowance or risk limits were reset.
+
+A separate existing-account VS Code task applies the five-news-item AI fix
+without importing the staged 30-member master, retains ten trades/day and
+restores the existing durable pause through normal bootstrap. It does not
+force a pause on an account without a persisted pause; operators must verify
+control state. The staged 30/50 task remains separate.
+
+After explicit authorization to perform the shutdown, console inspection proved
+that only the US worker, its task shell and the inspection helper were attached.
+A normal Windows Ctrl+C event was sent to that dedicated console only after
+rechecking the paused/flat account and absence of pending orders. Terminal output
+confirmed application shutdown complete and the old worker exited before the
+replacement started. No forced process kill or second worker was used.
+
+The conservative task then started successfully. Acceptance GETs confirmed
+PAPER/US, ten instruments, ten/day, five maximum positions, entries disabled,
+HEALTHY protective monitoring and complete recovery. Flat-account equity was
+preserved. The dashboard and India research API remained responsive. The
+five-news-item AI configuration is loaded by the new task; no new model calls
+or research/trade success are claimed while automatic entries are paused.
+Pausing entries is not automated model learning, and it does not certify
+provider capacity or protection continuity. The 30/50 expansion remains staged.
+
+Validation: 56 paper end-to-end/loop tests passed, including existing-universe
+bootstrap, persisted pause restoration and successful protective monitoring
+while paused. `git diff --check` passed.
+
+## 2026-10-30 increment: AI input-budget rejection root cause
+
+Read-only inspection found ten `AI_INVALID` assessments whose exact error was
+`snapshot context exceeds the configured AI input limit`, not model schema
+failure. Contexts measured 18,276-18,612 characters against the task's 16,000
+cap. Twenty news items accounted for most of each context. Restore the already
+documented five-recent-item producer setting rather than increasing budgets,
+truncating serialized evidence or relaxing validation. Existing capped-news
+warnings disclose omitted events; snapshot/evidence provenance remains intact.
+Budget errors now include measured character count and configured limit for
+both assessment and strategy selection.
+
+Offline replay of all ten persisted failures with five recent news items
+yielded 7,747-7,871 characters and admitted both AI stages, including actual
+OpenAI-compatible request serialization, schemas and output-token reserve.
+Transport was mocked; no provider call, database write or order was made.
+The regression fixture reproduces oversized-news rejection before transport,
+checks the actual task configuration and both AI-stage limits, preserves sent
+evidence exactly and produces no orders. Oversized inputs still fail closed.
+No worker restart, universe activation or risk/provider quota change was made.
+This fixes a configuration blocker, not learning, feed capacity, protective
+continuity or daily-PnL reconciliation.
+
+Validation executed: `PYTHONPATH=src;tests`, `python -B -m unittest
+test_ai_research_schema test_candidate_research test_openai_structured_output
+test_ai_strategy_selection test_personal_research test_paper_end_to_end`:
+108 tests passed. Pylance syntax checks passed for the assessment service and
+new regression fixture; `git diff --check` passed. AnyIO emitted existing
+unclosed-stream ResourceWarnings during API fixtures. No live-model success,
+new paper fill or operational continuity is inferred from these tests.
+
+## 2026-10-30 increment: staged US provider capacity assessment
+
+The user selected keeping the expansion staged while determining capacity.
+The documented 390-minute-session planning model totals 7,540 Twelve Data
+time-series credits: 3,510 scanner/research/signal reads, 3,900 five-position
+protective quotes, 30 cached daily-stat reads and an illustrative 100 entry
+quote allowance. Arithmetic was executed; 30% headroom yields 9,802.
+This is not a measured upper bound: failed attempts, pending orders, exits,
+retries, restarts, other clients and separate AI/news workloads remain additive.
+
+Initial plan-evaluation targets are at least 10,000 credits/session (preferably
+no daily cap) and at least 144 credits/minute, with confirmed US equity/ETF
+coverage and appropriate licensing. A subscription alone does not certify
+activation. Research and protection share a limiter without reserved protective
+capacity; burst/priority and latency validation remain required. Public pricing
+was checked, not the operator's entitlement. No provider quota, risk policy,
+database or running service was changed. Read-only runtime checks still showed
+ten instruments, ten/day, five maximum positions and a HEALTHY monitor.
+
+## 2026-10-30 increment: 30-member US research configuration
+
+The user approved expanding the US paper master from ten to 30 instruments and
+replacing the US task's daily trade cap of ten with 50. The original ten records
+are unchanged. Nasdaq Trader's public symbol directory (file stamp
+`1030202609:17`) confirmed the added symbols, listing venues, equity/non-test
+status; WMT is XNAS. This does not certify provider mapping, entitlement, current
+tick sizes or liquidity. Existing paper lot/tick conventions and fail-closed
+provider, strategy and risk checks remain authoritative. No research shortlist
+ceiling is introduced; 30 researched candidates do not mean 30 signals or orders.
+The five-open-position limit and every other risk setting remain unchanged.
+
+Runtime activation is deferred. At the task's default eight provider requests
+per minute, five positions at the unchanged 30-second protective cadence can
+need ten quote requests per minute, before research and order traffic.
+Research and execution resilience lanes share the raw provider's limiter.
+The running worker was not restarted or reconfigured; it retains its previous
+ten-member universe and ten/day policy. Provider entitlement/shared-key budgets,
+latency and protective capacity must be reviewed before activation. No quota
+increase, protection slowdown, database mutation or entry-gate bypass was made
+for this expansion. No migration is required.
+
+Validation: 110 tests passed across personal/candidate/autonomous research,
+autonomous paper cycles, RiskEngine and paper end-to-end composition.
+Coverage includes the actual 30-record master, preserved existing metadata,
+30/40-member full-universe selection, 30 HOLD candidates with zero submissions,
+49-versus-50 daily-count boundaries, five-open-position/stale-data rejections,
+and production composition in PAPER mode. The full-universe bootstrap test
+now explicitly clears its helper's one-candidate override so it tests the real
+unset default. AnyIO emitted unclosed-stream ResourceWarnings; no test failed.
+Read-only runtime verification still reported ten instruments, ten/day, five
+open positions maximum, RUNNING loop and HEALTHY protective monitor.
+
+## 2026-10-30 increment: US startup configuration
+
+The US paper task requested `news_max_items=25`, exceeding the existing
+candidate-research limit of 20 and preventing API startup. The task now uses
+20, with a regression test that parses its actual configuration. This bounds
+news evidence per candidate, not universe size, and changes no trading gates.
+Database schema upgrades remain explicit, separately authorized operations;
+restarting unchanged code does not require another migration.
+
+Validation: all 22 candidate-research tests passed. The authorized US V28
+migration was tested on an isolated copy, then verified against a WAL-safe
+backup: pre-existing table contents and schemas were preserved, integrity and
+foreign-key checks passed, and the audit chain remained intact. The US API
+subsequently started in PAPER mode with recovery complete and a healthy
+protective monitor; entry readiness remained blocked by pre-market/stale-data
+checks. This is a startup observation, not unattended-operation certification.
+
 ## 2026-10-30 increment: full eligible-universe research
 
 The user clarified that stock-count expansion means researching the entire

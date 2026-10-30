@@ -335,7 +335,8 @@ class CandidateAssessmentService:
             assessed_at = self._now()
             assessment = self._failed_assessment(
                 context, AssessmentStatus.AI_INVALID, self.analyst.provider_name, assessed_at,
-                "snapshot context exceeds the configured AI input limit")
+                "snapshot context exceeds the configured AI input limit "
+                f"(chars={len(request_text)}, limit={self.analyst.max_input_chars})")
             return self._persist(self._opportunity(
                 assessment, OpportunityState.REJECTED, None, assessed_at))
         assessment_result = self.analyst.analyze(
@@ -428,7 +429,8 @@ class CandidateAssessmentService:
             }, sort_keys=True, separators=(",", ":"), default=str)
             if len(selection_request) > self.analyst.max_input_chars:
                 selection_error = (
-                    "strategy-selection context exceeds the configured AI input limit")
+                    "strategy-selection context exceeds the configured AI input limit "
+                    f"(chars={len(selection_request)}, limit={self.analyst.max_input_chars})")
             else:
                 selection_result, selection = self.analyst.select_strategies(
                     instrument_id=context.instrument_id,
